@@ -1282,7 +1282,8 @@ def list_command(cockpit: Cockpit, all_: bool, json_: bool) -> int:
         print(json.dumps(snap.to_json(), indent=2))
         return 0
 
-    rows = [s for s in snap.sessions if all_ or not s.archived]
+    # Chuck (SPEC §50) is not a list entry (--json still has him, marked "support")
+    rows = [s for s in snap.sessions if (all_ or not s.archived) and not s.support]
     rows.sort(key=lambda s: (s.archived, s.index if s.index is not None else 0))
 
     width = max([len(s.name) for s in rows] + [4])
@@ -1318,7 +1319,8 @@ def _current_session(cockpit: Cockpit, client: str | None) -> str | None:
 
 def switch_command(cockpit: Cockpit, name: str | None, index: int | None,
                   next_: bool, prev_: bool, client: str | None) -> int:
-    live = [e.name for e in registry.load(cockpit.paths.registry).live()]
+    # the session list (Alt+N, next, previous): without Chuck (SPEC §50), who opens from his own button
+    live = [e.name for e in registry.load(cockpit.paths.registry).live() if not registry.is_support(e)]
     if name:
         target = name
     elif index is not None:
@@ -1333,8 +1335,8 @@ def switch_command(cockpit: Cockpit, name: str | None, index: int | None,
         cur = _current_session(cockpit, client)
         if cur in live:
             i = live.index(cur)
-        else:
-            i = 0 if next_ else -1
+        else:                   # from outside the list (Chuck): next is the first, previous the last
+            i = -1 if next_ else 0
         step = 1 if next_ else -1
         target = live[(i + step) % len(live)]
     else:

@@ -414,3 +414,81 @@ def test_the_repo_override_is_for_testing_and_checked():
     assert run("tmux/tmux") == "tmux/tmux"
     assert run("not a repo; rm -rf") == "zalandemeter/force"
     assert run("") == "zalandemeter/force"
+
+
+# --- Chuck is not in the session list (SPEC §50) ---------------------------------------------------------------
+def _views():
+    mk = lambda name, idx, st, sup=False: SessionView(
+        name=name, index=idx, state=st, since_ms=None, version=None, outdated=False, archived=False, order=idx or 99,
+        cwd="/x", session_id=name, pid=None, waiting_for=None, viewed=False, support=sup)
+    return [mk("a", 1, State.NEEDS_YOU), mk("b", 2, State.WORKING), mk("chuck", None, State.NEEDS_YOU, True)]
+
+
+def test_counts_leave_chuck_out():
+    c = Snapshot(generated_ms=1, latest_version=None, sessions=_views()).counts()
+    assert c["needs_you"] == 1 and c["working"] == 1
+
+
+def test_force_list_hides_chuck_but_json_keeps_him(cockpit, monkeypatch, capsys):
+    snap = Snapshot(generated_ms=cli._now_ms(), latest_version=None, sessions=_views())
+    monkeypatch.setattr(cli, "_read_fresh_snapshot", lambda c: snap)
+    assert cli.list_command(cockpit, False, False) == 0
+    out = capsys.readouterr().out
+    assert " a " in out and " b " in out and "chuck" not in out
+    assert cli.list_command(cockpit, False, True) == 0
+    assert any(s["name"] == "chuck" and s["support"] for s in json.loads(capsys.readouterr().out)["sessions"])
+
+
+def test_numbers_and_next_prev_skip_chuck(cockpit, monkeypatch):
+    for n in ("a", "b"):
+        assert cli.create_session(cockpit, n, "/tmp", no_switch=True) == 0
+    assert support.ensure_session(cockpit) == "chuck"
+    went = []
+    monkeypatch.setattr(cockpit.tmux, "switch_client", lambda target, client=None: went.append(target))
+    assert cli.switch_command(cockpit, None, 3, False, False, None) == 1, "Chuck has no number"
+    monkeypatch.setattr(cli, "_current_session", lambda c, client: "chuck")
+    cli.switch_command(cockpit, None, None, True, False, None)
+    cli.switch_command(cockpit, None, None, False, True, None)
+    assert went == ["a", "b"], "from Chuck, next is the first and previous the last"
+    monkeypatch.setattr(cli, "_current_session", lambda c, client: "b")
+    cli.switch_command(cockpit, None, None, True, False, None)
+    assert went[-1] == "a", "wraps around without passing through Chuck"
+
+
+def test_daemon_gives_chuck_no_number(cockpit):
+    from test_daemon import FakeClock
+    from force.daemon import Daemon
+    for n in ("a", "b"):
+        assert cli.create_session(cockpit, n, "/tmp", no_switch=True) == 0
+    support.ensure_session(cockpit)
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    snap = json.loads(cockpit.paths.snapshot.read_text())
+    idx = {s["name"]: s["index"] for s in snap["sessions"]}
+    assert idx == {"a": 1, "b": 2, "chuck": None}
+
+
+# --- security problems go by email (SECURITY.md) ---------------------------------------------------------------
+def test_security_report_is_a_mailto_never_an_issue(env, monkeypatch, capsys, tmp_path):
+    url = support.security_mailto("Token in a world-readable file", "force 1.0.6\nAn attacker can …")
+    assert url.startswith("mailto:hello@useforce.cc?")
+    q = dict(urllib.parse.parse_qsl(url.split("?", 1)[1]))
+    assert q["subject"] == "Security: Token in a world-readable file" and q["body"].startswith("force 1.0.6")
+    long = support.security_mailto("x", "a" * 5000)
+    assert len(long) <= support.MAILTO_LIMIT and "clipboard" in long
+    draft = tmp_path / "draft.txt"
+    draft.write_text("force 1.0.6\nsteps")
+    copied = []
+    monkeypatch.setattr(support, "copy", lambda text, paths: copied.append(text) or True)
+    assert cli.main(["support", "security", "--title", "T", "--file", str(draft)]) == 0
+    out = capsys.readouterr()
+    assert out.out.startswith("mailto:hello@useforce.cc?") and "never as a public issue" in out.err
+    assert copied == ["force 1.0.6\nsteps"]
+
+
+def test_the_brief_sends_vulnerabilities_by_email():
+    brief = (REPO / "share" / "support" / "CHUCK.md").read_text()
+    assert "hello@useforce.cc" in brief and "force support security" in brief
+    assert "no issue, no comment, no pull request" in brief
+    policy = (REPO / ".github" / "SECURITY.md").read_text()
+    assert "hello@useforce.cc" in policy

@@ -570,6 +570,15 @@ impl App {
 
     /// The session to use for display/logic (current-card highlight, attention suppression, viewed, env): the HOST
     /// session in ui mode, else the pane's own ui session. In classic mode both are the same session.
+    /// Chuck's session (SPEC §50): whether this window shows it now, and its state.
+    fn chuck_status(&self) -> (bool, Option<State>) {
+        let chuck = self.snapshot.as_ref().and_then(|s| s.sessions.iter().find(|s| s.support && !s.archived));
+        match chuck {
+            Some(c) => (self.display_own() == Some(c.name.as_str()), Some(c.state)),
+            None => (false, None),
+        }
+    }
+
     fn display_own(&self) -> Option<&str> {
         if self.ui_mode {
             self.host_own.as_deref()
@@ -1244,7 +1253,8 @@ impl App {
 
     fn live_sessions(snap: &Option<Snapshot>) -> Vec<&Session> {
         let mut v: Vec<&Session> = match snap {
-            Some(s) => s.sessions.iter().filter(|s| !s.archived).collect(),
+            // Chuck (SPEC §50) is not a card: he opens from his own row, which shows his state
+            Some(s) => s.sessions.iter().filter(|s| !s.archived && !s.support).collect(),
             None => Vec::new(),
         };
         v.sort_by_key(|s| s.index.unwrap_or(0));
@@ -1423,12 +1433,25 @@ impl App {
         // Chuck, Force's assistant (SPEC §50): a blank row, then his label centred in a rule like the one above
         // (` ─── ☺  ask chuck ─── `, over columns 1..w), the face in coral
         running += 1;
-        let mut label: Vec<Glyph> = vec![Glyph { ch: ' ', color: m::GREY, bold: false }];
+        // His row shows his session's state: lit (coral rule, white label) while this window shows him, else the
+        // label in the state's colour when there is something to tell (needs you, working, your turn).
+        let (active, chuck_state) = self.chuck_status();
+        let (text_color, bold, rule_color) = if active {
+            (m::NAME_CURRENT, true, m::ACCENT)
+        } else {
+            match chuck_state {
+                Some(State::NeedsYou) => (m::C_NEEDS_YOU, true, m::PANEL_RULE),
+                Some(State::Working) => (m::C_WORKING, false, m::PANEL_RULE),
+                Some(State::YourTurn) => (m::C_YOUR_TURN, false, m::PANEL_RULE),
+                _ => (m::GREY, false, m::PANEL_RULE),
+            }
+        };
+        let mut label: Vec<Glyph> = vec![Glyph { ch: ' ', color: text_color, bold: false }];
         label.push(Glyph { ch: glyphs::state(self.tier, '?', CHUCK_RICH), color: m::ACCENT, bold: false });
         label.extend(format!("{}ask chuck ", if self.tier == Tier::Rich { "  " } else { " " })
-            .chars().map(|ch| Glyph { ch, color: m::GREY, bold: false }));
+            .chars().map(|ch| Glyph { ch, color: text_color, bold }));
         let dashes = rule_n.saturating_sub(label.len());
-        let rule = |n: usize| (0..n).map(|_| Glyph { ch: '─', color: m::PANEL_RULE, bold: false });
+        let rule = |n: usize| (0..n).map(|_| Glyph { ch: '─', color: rule_color, bold: false });
         let mut chuck: Vec<Glyph> = rule(dashes / 2).collect();
         chuck.extend(label);
         chuck.extend(rule(dashes - dashes / 2));
@@ -3804,6 +3827,69 @@ mod tests {
     }
 
     // --- many sessions: the actions stay pinned, "N more" rows show what is hidden ------
+    fn chuck_app(state: State, own: &str) -> App {
+        let (tmux, _) = FakeTmux::new();
+        let mut chuck = sess("chuck", 2, state, false, false);
+        chuck.support = true;
+        let sessions = vec![sess("s0", 0, State::Idle, false, true), sess("s1", 1, State::Idle, false, true), chuck];
+        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] };
+        let mut a = app_with(tmux);
+        a.on_resize(28, 40);
+        a.set_now(NOW);
+        a.own = Some(own.into());
+        a.update_from_snapshot(Some(snap), NOW);
+        a.seen_viewed = true;
+        a
+    }
+
+    fn chuck_row(a: &App, g: &Grid) -> usize {
+        (0..g.h).find(|&y| row_text(g, y).contains("ask chuck")).expect("Chuck's row")
+    }
+
+    #[test]
+    fn chuck_is_not_a_card_but_his_row_shows_him() {
+        let mut a = chuck_app(State::Working, "s0");
+        let g = a.build_grid_at(NOW);
+        assert!(!(0..g.h).any(|y| a.hit_test(4, y).map(|t| t.str() == "chuck").unwrap_or(false)), "no card for Chuck");
+        assert!(!(0..g.h).any(|y| row_text(&g, y).contains(" chuck ") && !row_text(&g, y).contains("ask")));
+        let y = chuck_row(&a, &g);
+        let label = row_text(&g, y).find("ask").unwrap();
+        let col = row_text(&g, y)[..label].chars().count();
+        assert_eq!(g.row(y)[col].fg, m::C_WORKING, "working while you are elsewhere");
+        assert_eq!(g.row(y)[1].fg, m::PANEL_RULE);
+    }
+
+    #[test]
+    fn chuck_row_is_lit_while_you_are_with_him_and_no_card_is_current() {
+        let mut a = chuck_app(State::Idle, "chuck");
+        let g = a.build_grid_at(NOW);
+        let y = chuck_row(&a, &g);
+        let label = row_text(&g, y).find("ask").unwrap();
+        let col = row_text(&g, y)[..label].chars().count();
+        assert_eq!(g.row(y)[col].fg, m::NAME_CURRENT);
+        assert!(g.row(y)[col].bold);
+        assert_eq!(g.row(y)[1].fg, m::ACCENT, "the rule turns coral");
+        assert!(!a.items.iter().any(|i| i.is_session && i.current), "no selected card");
+        // elsewhere and idle: the plain grey label
+        let mut b = chuck_app(State::Idle, "s1");
+        let g = b.build_grid_at(NOW);
+        let y = chuck_row(&b, &g);
+        let label = row_text(&g, y).find("ask").unwrap();
+        let col = row_text(&g, y)[..label].chars().count();
+        assert_eq!(g.row(y)[col].fg, m::GREY);
+        assert_eq!(g.row(y)[1].fg, m::PANEL_RULE);
+    }
+
+    #[test]
+    fn chuck_needing_you_turns_his_row_red() {
+        let mut a = chuck_app(State::NeedsYou, "s0");
+        let g = a.build_grid_at(NOW);
+        let y = chuck_row(&a, &g);
+        let label = row_text(&g, y).find("ask").unwrap();
+        let col = row_text(&g, y)[..label].chars().count();
+        assert_eq!(g.row(y)[col].fg, m::C_NEEDS_YOU);
+    }
+
     fn many_app(n: i32, h: usize, needs: Option<i32>) -> App {
         let (tmux, _) = FakeTmux::new();
         let sessions: Vec<Session> = (0..n)

@@ -178,7 +178,8 @@ fn attention_pills(snap: &Snapshot, own: Option<&str>) -> Vec<Pill> {
     let mut live: Vec<&Session> = snap
         .sessions
         .iter()
-        .filter(|s| !s.archived && s.name != own && matches!(s.state, State::NeedsYou | State::YourTurn))
+        // Chuck (SPEC §50) is not in the lists: his own row in the sidebar shows his state
+        .filter(|s| !s.archived && !s.support && s.name != own && matches!(s.state, State::NeedsYou | State::YourTurn))
         .collect();
     live.sort_by_key(|s| s.index.unwrap_or(0));
     let mut out = Vec::new();
@@ -216,7 +217,7 @@ fn truncate_name(name: &str, limit: Option<usize>) -> String {
 }
 
 fn working_count(snap: &Snapshot) -> usize {
-    snap.sessions.iter().filter(|s| !s.archived && s.state == State::Working).count()
+    snap.sessions.iter().filter(|s| !s.archived && !s.support && s.state == State::Working).count()
 }
 
 fn spinner(now_ms: i64) -> char {
@@ -1334,6 +1335,18 @@ mod tests {
         h.own = own.map(str::to_string);
         h.snapshot = snap;
         h
+    }
+
+    #[test]
+    fn chuck_is_left_out_of_the_header() {
+        let mut chuck = sess("chuck", 3, State::NeedsYou, false, None, false);
+        chuck.support = true;
+        let mut busy_chuck = sess("chuck", 3, State::Working, false, None, false);
+        busy_chuck.support = true;
+        let s = snap(vec![sess("a", 1, State::NeedsYou, false, None, false), chuck]);
+        let pills = attention_pills(&s, Some("own"));
+        assert_eq!(pills.len(), 1, "only the listed session that needs you");
+        assert_eq!(working_count(&snap(vec![sess("a", 1, State::Working, false, None, false), busy_chuck])), 1);
     }
 
     fn snap(sessions: Vec<Session>) -> Snapshot {
