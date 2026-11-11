@@ -1420,13 +1420,20 @@ impl App {
             self.actions_rows = 2;
             running += 2;
         }
-        // Chuck, Force's assistant (SPEC §50): his face in coral in the cards' icon column, then `ask chuck`
-        let mut chuck: Vec<Glyph> = "  ".chars().map(|ch| Glyph { ch, color: m::GREY, bold: false }).collect();
-        chuck.push(Glyph { ch: glyphs::state(self.tier, '?', CHUCK_RICH), color: m::ACCENT, bold: false });
-        chuck.extend(format!("{}ask chuck", if self.tier == Tier::Rich { "  " } else { " " })
+        // Chuck, Force's assistant (SPEC §50): a blank row, then his label centred in a rule like the one above
+        // (` ─── ☺  ask chuck ─── `, over columns 1..w), the face in coral
+        running += 1;
+        let mut label: Vec<Glyph> = vec![Glyph { ch: ' ', color: m::GREY, bold: false }];
+        label.push(Glyph { ch: glyphs::state(self.tier, '?', CHUCK_RICH), color: m::ACCENT, bold: false });
+        label.extend(format!("{}ask chuck ", if self.tier == Tier::Rich { "  " } else { " " })
             .chars().map(|ch| Glyph { ch, color: m::GREY, bold: false }));
-        items.push(action(Target::Chuck, running, pad(chuck, c), None));
-        self.actions_rows += 1;
+        let dashes = rule_n.saturating_sub(label.len());
+        let rule = |n: usize| (0..n).map(|_| Glyph { ch: '─', color: m::PANEL_RULE, bold: false });
+        let mut chuck: Vec<Glyph> = rule(dashes / 2).collect();
+        chuck.extend(label);
+        chuck.extend(rule(dashes - dashes / 2));
+        items.push(action(Target::Chuck, running, chuck, None));
+        self.actions_rows += 2;
         running += 1;
         (items, running)
     }
@@ -2403,9 +2410,11 @@ mod tests {
         // one action row: new on the left, archived on the right
         assert_eq!(a.hit_test(4, BRAND_H + 7).map(|t| t.str()), Some("__new__"));
         assert_eq!(a.hit_test(a.w - 3, BRAND_H + 7).map(|t| t.str()), Some("__archived__"));
-        // then Chuck's row (SPEC §50)
-        assert_eq!(a.hit_test(4, BRAND_H + 8).map(|t| t.str()), Some("__chuck__"));
-        assert!(a.hit_test(2, BRAND_H + 9).is_none()); // past the list of items
+        // a blank row, then Chuck's row (SPEC §50), clickable over its whole width
+        assert!(a.hit_test(4, BRAND_H + 8).is_none());
+        assert_eq!(a.hit_test(2, BRAND_H + 9).map(|t| t.str()), Some("__chuck__"));
+        assert_eq!(a.hit_test(a.w - 3, BRAND_H + 9).map(|t| t.str()), Some("__chuck__"));
+        assert!(a.hit_test(2, BRAND_H + 10).is_none()); // past the list of items
     }
 
     #[test]
@@ -3821,19 +3830,24 @@ mod tests {
         let g = a.build_grid_at(NOW);
         assert_eq!(a.list_h, 15);
         assert!(a.pinned);
-        assert_eq!(a.actions_rows, 2);
+        assert_eq!(a.actions_rows, 3);
         let chuck = BRAND_H + a.list_h - 1;
-        assert!(row_text(&g, chuck).contains("? ask chuck"), "{:?}", row_text(&g, chuck));
-        assert_eq!(g.row(chuck)[3].fg, m::ACCENT);     // under the `+` of new
+        // his label centred in a rule like new/archived's, over columns 1..w
+        let d = a.w - 1 - 13;
+        assert_eq!(row_text(&g, chuck), format!(" {} ? ask chuck {}", "─".repeat(d / 2), "─".repeat(d - d / 2)));
+        let face = 1 + d / 2 + 1;
+        assert_eq!(g.row(chuck)[face].fg, m::ACCENT);
+        assert_eq!(g.row(chuck)[1].fg, m::PANEL_RULE);
         assert_eq!(a.hit_test(4, chuck).map(|t| t.str()), Some("__chuck__"));
-        let last = chuck - 1;
+        assert!(row_text(&g, chuck - 1).trim().is_empty(), "a blank row above Chuck's");
+        let last = chuck - 2;
         let t = row_text(&g, last);
         // new and archived set into one rule, like the header's labels, over columns 1..w
         assert_eq!(t, format!(" ─ + new {} archived (0) ─", "─".repeat(a.w - 1 - 8 - 15)), "{t:?}");
         assert_eq!(g.row(last)[1].fg, m::PANEL_RULE);
         assert_eq!(g.row(last)[4].fg, m::GREY);
-        // viewport 12 rows: s0..s5 whole, s6..s9 hidden (4)
-        assert!(row_text(&g, last - 1).contains("↓ 4 more"), "{:?}", row_text(&g, last - 1));
+        // viewport 11 rows: s0..s4 whole, s5 cut, s5..s9 hidden (5)
+        assert!(row_text(&g, last - 1).contains("↓ 5 more"), "{:?}", row_text(&g, last - 1));
         assert!(!row_text(&g, BRAND_H).contains("more"), "nothing hidden above at the top");
         assert_eq!(a.hit_test(4, last).map(|t| t.str()), Some("__new__"));
         assert_eq!(a.hit_test(a.w - 3, last).map(|t| t.str()), Some("__archived__"));
@@ -3863,12 +3877,12 @@ mod tests {
             a.build_grid_at(NOW);
         }
         let g = a.build_grid_at(NOW);
-        let last = BRAND_H + a.list_h - 2;     // the new/archived rule; Chuck's row under it
+        let last = BRAND_H + a.list_h - 3;     // the new/archived rule; a blank row and Chuck's under it
         assert!(row_text(&g, BRAND_H).contains("↑ 5 more"), "{:?} off={} view={} total={}", row_text(&g, BRAND_H), a.offset, a.view_h, a.sess_total);
         assert!(row_text(&g, last - 1).trim().is_empty(), "nothing below: {:?}", row_text(&g, last - 1));
         // the last card ends right above the more row
         assert_eq!(a.hit_test(2, last - 2).map(|t| t.str()), Some("s9"));
-        assert_eq!(a.hit_test(2, BRAND_H + 1).map(|t| t.str()), Some("s4"));
+        assert_eq!(a.hit_test(2, BRAND_H + 1).map(|t| t.str()), Some("s5"));
         assert!(a.hit_test(2, BRAND_H).is_none(), "the more row is not an item");
         assert!(row_text(&g, last).contains("+ new"));
     }
@@ -3880,11 +3894,14 @@ mod tests {
         let down = BRAND_H + a.list_h - a.actions_h();
         a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 2, down as u16);
         a.build_grid_at(NOW);
-        assert_eq!(a.offset, 9, "paged to the end (viewport 12 - 1 = 11, clamped)");
+        assert_eq!(a.offset, 10, "paged to the end (viewport 11 - 1 = 10, clamped)");
         assert!(!a.follow_own);
-        a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 2, BRAND_H as u16);
-        a.build_grid_at(NOW);
-        assert_eq!(a.offset, 0);
+        // back up a page at a time: 10 -> 1 -> 0
+        for want in [1, 0] {
+            a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 2, BRAND_H as u16);
+            a.build_grid_at(NOW);
+            assert_eq!(a.offset, want);
+        }
     }
 
     #[test]
@@ -3941,13 +3958,14 @@ mod tests {
         let mut a = many_app(2, 40, None);
         a.on_resize(18, 40);
         let g = a.build_grid_at(NOW);
-        assert_eq!(a.actions_rows, 3);
+        assert_eq!(a.actions_rows, 4);
         assert!(row_text(&g, BRAND_H + 5).contains("archived"));
         assert!(row_text(&g, BRAND_H + 6).contains("+ new"));
-        assert!(row_text(&g, BRAND_H + 7).contains("ask chuck"));
+        assert!(row_text(&g, BRAND_H + 7).trim().is_empty());
+        assert!(row_text(&g, BRAND_H + 8).contains("ask chuck"));
         assert_eq!(a.hit_test(2, BRAND_H + 5).map(|t| t.str()), Some("__archived__"));
         assert_eq!(a.hit_test(2, BRAND_H + 6).map(|t| t.str()), Some("__new__"));
-        assert_eq!(a.hit_test(2, BRAND_H + 7).map(|t| t.str()), Some("__chuck__"));
+        assert_eq!(a.hit_test(2, BRAND_H + 8).map(|t| t.str()), Some("__chuck__"));
     }
 
     #[test]
