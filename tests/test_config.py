@@ -85,7 +85,7 @@ def test_load_config_missing_returns_defaults(tmp_path):
 def test_load_config_valid(tmp_path):
     f = tmp_path / "c.json"
     f.write_text(json.dumps({"staleAfterHours": 5, "sidebarWidth": 40, "autoUpgradeSessions": False,
-                           "startGraceSeconds": 7.5, "icons": "on", "layout": "classic"}))
+                           "startGraceSeconds": 7.5, "icons": "on", "layout": "classic", "unreadReplies": False}))
     cfg = load_config(f)
     assert cfg.stale_hours == 5
     assert cfg.sidebar_width == 40
@@ -93,6 +93,7 @@ def test_load_config_valid(tmp_path):
     assert cfg.start_grace_seconds == 7.5
     assert cfg.glyphs == "rich"           # icons on -> rich
     assert cfg.ui == "classic"            # layout -> ui
+    assert cfg.unread_replies is False
 
 
 def test_load_config_invalid_json_warns_defaults(tmp_path, capsys):

@@ -56,6 +56,7 @@ default; an invalid file is never overwritten by `force settings set`.
 | `icons` | `"auto"` | auto / on / off: the glyph tier (§28; field `glyphs`) |
 | `sidebarWidth` | 29 | sidebar width in columns |
 | `staleAfterHours` | 12 | idle longer than this → STALE |
+| `unreadReplies` | true | a working session's icon turns blue on a reply you have not seen (§5 `unread`) |
 | `autoUpgradeSessions` | true | restart idle, outdated sessions on the new release (§5) |
 | `autoUpgradeIdleMinutes` | 10 | idle time before that |
 | `layout` | `"split"` | split / classic (§39) |
@@ -162,7 +163,8 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
   time of the newest text the agent wrote to you: the `timestamp` of the newest non-sidechain assistant record
   with a non-empty `text` block in a Claude Code transcript; for OpenCode, the tick on which the text of the
   last message (read while busy, §36) changed, never its first sight after a (re)start; shells have none. The
-  daemon keeps the newest `reply_ms` it has seen per session in memory. The sidebar draws an unread WORKING
+  daemon keeps the newest `reply_ms` it has seen per session in memory; with `unreadReplies` off the flag is
+  never set. The sidebar draws an unread WORKING
   session's icon blue (`#5c9cf5`, the spinner unchanged; its edge, label and activity keep the working
   colours); opening the session clears it on the next tick.
 - `since_ms` (for the age column) = `statusUpdatedAt` when a status file exists, else pane start.

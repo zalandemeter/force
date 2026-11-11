@@ -1240,6 +1240,16 @@ def test_unread_reply_while_working(env, monkeypatch):
     clk.advance(1)
     d.tick()
     assert view().unread is False
+    # a newer reply marks it again, unless the user turned it off (unreadReplies)
+    reply["ms"] = int(clk() * 1000)
+    d._activity.clear()
+    clk.advance(1)
+    d.tick()
+    assert view().unread is True
+    d.cfg = dataclasses.replace(d.cfg, unread_replies=False)
+    clk.advance(1)
+    d.tick()
+    assert view().unread is False and "unread" not in view().why
 
 
 def test_opencode_reply_only_on_change():

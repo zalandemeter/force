@@ -1018,7 +1018,8 @@ class Daemon:
                 act = "moves after this turn"
             if card.reply_ms is not None and card.reply_ms > self._reply.get(name, 0):
                 self._reply[name] = card.reply_ms
-            is_unread = unread(state, self._reply.get(name), seen.get(name, Seen()), name in viewed)
+            is_unread = self.cfg.unread_replies and unread(state, self._reply.get(name), seen.get(name, Seen()),
+                                                           name in viewed)
             if is_unread:
                 clauses.append(f"unread: wrote you {max(0, now_ms - self._reply[name]) // 1000} s ago, "
                                "not viewed since")

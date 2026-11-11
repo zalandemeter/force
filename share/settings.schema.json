@@ -38,6 +38,11 @@
       "default": 12,
       "description": "after how many idle hours an unseen session is stale"
     },
+    "unreadReplies": {
+      "type": "boolean",
+      "default": true,
+      "description": "turn a working session's icon blue when it wrote you something you have not seen"
+    },
     "autoUpgradeSessions": {
       "type": "boolean",
       "default": true,
