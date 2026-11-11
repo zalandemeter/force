@@ -249,7 +249,8 @@ def test_ui_session_for_a_remote(env):
     opt = lambda k: ui.run("show", "-wqv", "-t", main.pane_id, k)
     assert opt("@force_host") == "devbox"
     assert opt("@force_nested") == ""                    # named once the remote side reports it
-    prefix = f"devbox tmux -L {cockpit.paths.tmux_socket}"
+    # the remote's own tmux (asked over ssh; "tmux" when it cannot be asked) on its live server
+    prefix = "devbox tmux -L force"
     assert opt("@force_host_tmux").startswith("ssh ") and opt("@force_host_tmux").endswith(prefix)
     assert "FORCE_HOST=devbox" in ui.run("show-environment", "-t", "=" + name, "FORCE_HOST")
     start = ui.run("display", "-p", "-t", main.pane_id, "#{pane_start_command}")
@@ -505,3 +506,24 @@ def test_hosts_menu_offers_a_new_shell_on_an_empty_remote(env, monkeypatch):
     items = [str(a) for a in calls[-1]]
     assert "  e (new shell)" in items
     assert "  f · 1 need you" in items
+
+
+def test_remote_tmux_is_asked_once_and_kept(tmp_path, monkeypatch):
+    from force import config
+    paths = config.get_paths({"HOME": str(tmp_path), "FORCE_HOME": str(tmp_path / "h"),
+                              "FORCE_STATE": str(tmp_path / "s"), "FORCE_CONFIG": str(tmp_path / "c.json")})
+    r = remote.Remote("box", "me@box")
+    calls = []
+
+    class Out:
+        returncode, stdout = 0, "/home/me/.local/share/force/app/share/tmux-bin/tmux\n"
+
+    run = lambda argv, **k: calls.append(argv) or Out()
+    assert remote.remote_tmux(paths, r, run) == "/home/me/.local/share/force/app/share/tmux-bin/tmux"
+    assert remote.remote_tmux(paths, r, run) == "/home/me/.local/share/force/app/share/tmux-bin/tmux"
+    assert len(calls) == 1 and calls[0][-2] == "me@box" and "tmux-bin/tmux" in calls[0][-1]
+
+    class Fail:
+        returncode, stdout = 255, ""
+
+    assert remote.remote_tmux(paths, remote.Remote("other", "x"), lambda a, **k: Fail()) == "tmux"

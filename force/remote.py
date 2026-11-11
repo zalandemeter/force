@@ -108,9 +108,42 @@ def ssh_argv(paths, r: Remote, *remote_argv: str, tty: bool = False) -> list[str
     return ["ssh", *ssh_opts(paths), *(["-t"] if tty else []), r.ssh, cmd]
 
 
+REMOTE_TMUX_SOCKET = "force"                                   # a remote runs its live Force
+# where a remote's tmux is: Force's own when its release ships one (an install by the one-line installer may have no
+# other), else the one on PATH. Asked once over ssh and kept (an absolute path: tmux escapes `$` in option values,
+# so a variable in @force_host_tmux would never reach the remote shell).
+_TMUX_PROBE = "sh -c 'p=$HOME/.local/share/force/app/share/tmux-bin/tmux; [ -x \"$p\" ] && echo \"$p\" || command -v tmux'"
+
+
+def remote_tmux(paths, r: Remote, run=subprocess.run) -> str:
+    """The remote's tmux binary (cached in <state>/remotes/<name>/tmux); "tmux" when it cannot be asked."""
+    cache = remote_dir(paths, r.name) / "tmux"
+    try:
+        v = cache.read_text().strip()
+        if v.startswith("/"):
+            return v
+    except OSError:
+        pass
+    try:
+        out = run(["ssh", *ssh_opts(paths), r.ssh, _TMUX_PROBE], capture_output=True, text=True, timeout=20,
+                  stdin=subprocess.DEVNULL)
+        v = (out.stdout or "").strip().splitlines()[-1:] if out.returncode == 0 else []
+    except (OSError, subprocess.TimeoutExpired):
+        v = []
+    if v and v[0].startswith("/") and " " not in v[0]:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(v[0] + "\n")
+        except OSError:
+            pass
+        return v[0]
+    return "tmux"
+
+
 def host_tmux_prefix(paths, r: Remote) -> str:
-    """The ui window option @force_host_tmux for a remote (whitespace-separated argv prefix)."""
-    return " ".join(["ssh", *ssh_opts(paths), r.ssh, "tmux", "-L", paths.tmux_socket])
+    """The ui window option @force_host_tmux for a remote (whitespace-separated argv prefix): its own tmux, on its
+    live server (`force`, also from a development instance here, SPEC §2.1)."""
+    return " ".join(["ssh", *ssh_opts(paths), r.ssh, remote_tmux(paths, r), "-L", REMOTE_TMUX_SOCKET])
 
 
 # --------------------------------------------------------------------------- the host side ------------
