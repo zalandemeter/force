@@ -149,7 +149,8 @@ def statusline_command(script: Path, usage_file: Path) -> str:
 
 def build_argv(claude_bin: Path, claude_dir: Path, name: str, session_id: str,
                statusline: str | None = None, memory_dir: str | None = None,
-               remote_control: bool = True) -> list[str]:
+               remote_control: bool = True, extra_settings: dict | None = None,
+               extra_args: list[str] | None = None) -> list[str]:
     """SPEC §7.2: --resume if a transcript exists, else --session-id; then -n NAME --remote-control NAME
     --settings DISABLE_AGENT_VIEW (plus a statusLine command when given, SPEC §21, and the auto memory
     directory a moved session keeps, SPEC §7.7)."""
@@ -163,10 +164,13 @@ def build_argv(claude_bin: Path, claude_dir: Path, name: str, session_id: str,
         settings["statusLine"] = {"type": "command", "command": statusline}
     if memory_dir:
         settings["autoMemoryDirectory"] = memory_dir
+    if extra_settings:          # Chuck, the support session (SPEC §50): his own context and MCP permissions
+        settings.update(extra_settings)
     argv += ["-n", name]
     if remote_control:       # off only for `force smoke` (its sessions must not show up in claude.ai)
         argv += ["--remote-control", name]
     argv += ["--settings", json.dumps(settings, separators=(",", ":"))]
+    argv += list(extra_args or [])
     return argv
 
 

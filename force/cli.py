@@ -159,7 +159,8 @@ def available_kinds(cockpit: Cockpit) -> list[str]:
 
 
 def create_session(cockpit: Cockpit, name: str | None, cwd: str | None = None,
-                  no_switch: bool = False, shell: bool = False, kind: str | None = None) -> int:
+                  no_switch: bool = False, shell: bool = False, kind: str | None = None,
+                  extra: dict | None = None) -> int:
     """Shared `force new` logic used by the CLI, attach and dialog new. Returns exit code.
     kind: "claude" (default), "opencode" (SPEC §36) or "shell" (registry extra kind; shell=True is the
     older spelling of kind="shell"). No name (SPEC §49.6): an agent session starts as `new`, `new-2`, … and is
@@ -201,6 +202,8 @@ def create_session(cockpit: Cockpit, name: str | None, cwd: str | None = None,
             entry.extra["kind"] = kind
         if auto and kind != "shell":
             entry.extra["auto_name"] = True
+        if extra:
+            entry.extra.update(extra)       # e.g. role = support: Chuck's session (SPEC §50)
     if auto:
         print(name)
     # Create only after the lock released and the entry is on disk: the pane's `force run` reads it.
@@ -727,7 +730,8 @@ def _attention_target(snapshot: Path) -> str | None:
     return None
 
 
-def ui_host_command(cockpit: Cockpit, name: str, window: str, attention: bool = False) -> int:
+def ui_host_command(cockpit: Cockpit, name: str, window: str, attention: bool = False,
+                    target_name: str | None = None) -> int:
     """`force ui-host NAME --window W [--attention]` (host picker, header markers): show another host in this
     ui window ("local" = this machine; with no sessions here it starts a shell session); --attention: on
     the session there that needs you. Problems are shown as a message in the window (it runs from a key
@@ -764,6 +768,8 @@ def ui_host_command(cockpit: Cockpit, name: str, window: str, attention: bool = 
                     return note(f"{name}: cannot start a shell session there")
         elif not cockpit.split:
             return note("this machine uses the classic layout: force ui split")
+        elif target_name:           # a given session here (Chuck's, SPEC §50)
+            target = target_name
         elif registry.load(cockpit.paths.registry).live():
             target = (attention and _attention_target(cockpit.paths.snapshot)) or _target_session(cockpit, None)
         else:
@@ -2308,6 +2314,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session", default="example", help="the session name the sample event names")
 
     sub.add_parser("skill", help="print the guide for agents that drive Force (also: force --skill)")
+    from . import support as support_mod
+    support_mod.add_parser(sub)
+    sub.add_parser("mcp", help="Force's local MCP server on stdin/stdout, for Chuck's session (SPEC §50)")
 
     p = sub.add_parser("explain", help="why a card shows its state (SPEC §43.3)")
     p.add_argument("name")
@@ -2453,6 +2462,12 @@ def _dispatch(args) -> int:
         return notify_test_command(cockpit, args.event, args.session)
     if cmd == "skill":
         return skill_command(cockpit)
+    if cmd == "support":
+        from . import support as support_mod
+        return support_mod.command(cockpit, args)
+    if cmd == "mcp":
+        from . import mcp as mcp_mod
+        return mcp_mod.serve()
     if cmd == "explain":
         return automation.explain_command(cockpit, args)
     if cmd == "import":

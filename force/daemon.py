@@ -17,12 +17,13 @@ from . import config
 from .config import Config, Paths, ensure_dirs
 from .lifecycle import Cockpit
 from .tmux import LEGACY_AGENT_ROLE, TmuxError
-from .registry import (RegistryError, is_claude, is_opencode, is_shell, kind as kind_of, locked, slugify, valid_name,
+from .registry import (RegistryError, is_support, is_claude, is_opencode, is_shell, kind as kind_of, locked, slugify, valid_name,
                      slugify, valid_name)
 from .state import (PaneInfo, Seen, SessionView, Snapshot, State, compute_state, compute_state_why, clean_title,
                    glyph, load_seen, save_seen, write_snapshot)
 
 _UPGRADE_INTERVAL = 30.0
+SUPPORT_ORDER = 1_000_000_000   # added to the support session's snapshot order: the sidebar shows it last (SPEC §50)
 _CRASH_UNKNOWN_GRACE = 5.0
 _RELOAD_DEBOUNCE = 2.0          # SPEC §6.11: wait this long of clock time with a stable fp
 _UI_ORPHAN_SECS = 60           # a ui session without a client this long has lost its terminal
@@ -362,7 +363,8 @@ class Daemon:
             return list(reg.entries)
 
     def _live(self):
-        return sorted((e for e in self._registry if not e.archived), key=lambda e: e.order)
+        # Chuck, the support session (SPEC §50), always last
+        return sorted((e for e in self._registry if not e.archived), key=lambda e: (is_support(e), e.order))
 
     def _info(self, name: str, entry=None):
         pane = self.cockpit.agent_pane(name)
@@ -990,13 +992,15 @@ class Daemon:
             views.append(SessionView(
                 name=name, index=index.get(name), state=state,
                 since_ms=since, version=pv, outdated=outdated, archived=False,
-                order=entry.order, cwd=entry.cwd, session_id=entry.session_id,
+                order=entry.order + (SUPPORT_ORDER if is_support(entry) else 0),
+                cwd=entry.cwd, session_id=entry.session_id,
                 pid=pi.pane_pid, waiting_for=(status.waiting_for if status else None),
                 viewed=name in viewed,
                 activity=act,
                 mode=mode, model=model, effort=effort,
                 shared=(entry.extra.get("shares") or None) if self.cfg.sharing else None,
-                note=note, kind=kind_of(entry), why="; ".join(clauses), title=title))
+                note=note, kind=kind_of(entry), why="; ".join(clauses), title=title,
+                support=is_support(entry)))
         self._views = views
         limits = self._limits(live)
         snap = Snapshot(generated_ms=now_ms, latest_version=lv, sessions=views,

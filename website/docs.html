@@ -41,6 +41,7 @@
     <a href="#scripting">Scripts and agents</a>
     <a href="#settings">Settings</a>
     <a href="#updates">Updates and uninstall</a>
+    <a href="#chuck">Ask Chuck</a>
     <a href="#trouble">When something is off</a>
     <a href="#reference">Command reference</a>
   </nav>
@@ -139,6 +140,8 @@
           <tr><th scope="row"><kbd>e</kbd></th><td>Restart all sessions, busy ones once idle; for example after changing <code>~/.claude/settings.json</code>.</td></tr>
           <tr><th scope="row"><kbd>b</kbd></th><td>Hide or show the sidebar.</td></tr>
           <tr><th scope="row"><kbd>H</kbd></th><td>Health check (<code>force doctor --fix</code>).</td></tr>
+          <tr><th scope="row"><kbd>?</kbd></th><td>Ask Chuck, Force's assistant (<a href="#chuck">below</a>).</td></tr>
+          <tr><th scope="row"><kbd>k</kbd></th><td>The keys at a glance.</td></tr>
           <tr><th scope="row"><kbd>q</kbd></th><td>Quit this terminal. Sessions keep running.</td></tr>
         </tbody>
       </table>
@@ -261,6 +264,7 @@
           <tr><th scope="row"><code>layout</code></th><td><code>split</code></td><td><code>split</code> or <code>classic</code>.</td></tr>
           <tr><th scope="row"><code>opencodeManaged</code></th><td><code>false</code></td><td>Keep Force's own copy of OpenCode on the latest release.</td></tr>
           <tr><th scope="row"><code>checkForUpdates</code></th><td><code>true</code></td><td>The daily check for a new Force.</td></tr>
+          <tr><th scope="row"><code>supportAgent</code></th><td><code>auto</code></td><td>The agent Chuck runs on: <code>claude</code>, <code>opencode</code>, or the first one installed.</td></tr>
         </tbody>
       </table>
     </section>
@@ -272,6 +276,27 @@
       <p><code>force uninstall</code> asks first (<code>--yes</code> answers for you). It keeps your
         conversations, the session list and your settings; <code>--purge</code> removes everything, the icon font
         included.</p>
+    </section>
+
+    <section id="chuck">
+      <h2>Ask Chuck</h2>
+      <p>Chuck is Force's assistant: an agent session that knows Force inside out. Open him with <kbd>?</kbd> in the
+        menu, the <strong>ask chuck</strong> button at the bottom of the sidebar, or <code>force support</code>. He
+        shows what he can do first, then <kbd>Enter</kbd> opens his session; next time you are back in the same
+        conversation.</p>
+      <ul>
+        <li><strong>How does…?</strong> He answers from the docs and the code of the version you run.</li>
+        <li><strong>Set it up for me.</strong> A new remote host, a notification, a setting: he says what he will
+          change and does it once you approve.</li>
+        <li><strong>Something is wrong, or missing.</strong> He checks whether it is reported already, then writes the
+          bug report or the idea. You get a pre-filled GitHub link: you look it over and press Submit.</li>
+        <li><strong>Help fix it.</strong> He builds the fix in a copy of your fork, tests it, and prepares the pull
+          request for you to open.</li>
+      </ul>
+      <p>He runs on your own Claude Code or OpenCode (setting <code>supportAgent</code>) and your plan, so his answers
+        use your tokens. He never asks for passwords or logins, and nothing reaches GitHub without your click.</p>
+<pre class="code"><span class="p">$</span> force support                          <span class="c"># his card, then his session</span>
+<span class="p">$</span> force support search sidebar flicker   <span class="c"># issues that match, open and closed</span></pre>
     </section>
 
     <section id="trouble">
@@ -287,7 +312,7 @@
           <tr><th scope="row"><code>~/.local/state/force/</code></th><td>Runtime state.</td></tr>
         </tbody>
       </table>
-      <p>Still stuck? <a href="{{repo}}/issues/new?template=bug_report.yml" data-repo>Report an issue</a> on GitHub; the
+      <p>Still stuck? <a href="#chuck">Ask Chuck</a> (<kbd>?</kbd>), or <a href="{{repo}}/issues/new?template=bug_report.yml" data-repo>report an issue</a> on GitHub; the
         form asks for <code>force --version</code> and <code>force doctor</code>. Missing something?
         <a href="{{repo}}/issues/new?template=feature_request.yml" data-repo>Suggest an idea</a>.</p>
     </section>
@@ -319,6 +344,7 @@
 <span class="l">force doctor <span class="w">[--fix]</span></span>
 <span class="l">force fonts</span>
 <span class="l">force <span class="w">--version</span>  <span class="c"># the installed version (for bug reports)</span></span>
+<span class="l">force support <span class="w">[search WORDS | link bug|feature</span> <span class="w">--title</span> T <span class="w">[--field</span> ID=VALUE] <span class="w">| comment N | fix N</span> <span class="w">--user</span> NAME <span class="w">| pr</span> <span class="w">--title</span> T]  <span class="c"># Chuck</span></span>
 <span class="l">force skill  <span class="c"># the guide for agents that drive Force</span></span></pre>
     </section>
   </main>

@@ -66,6 +66,8 @@ nice -n 10 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 cp -a "$REPO/force" "$REPO/share" "$REPO/systemd" "$REPO/install.sh" "$REPO/LICENSE" "$REPO/THIRD-PARTY-NOTICES.md" \
   "$REPO/README.md" "$REPO/docs/SPEC.md" "$R/"
 find "$R" -name '__pycache__' -prune -exec rm -rf {} +
+# Chuck's context pack (SPEC §50): the docs, the command reference and CONTRIBUTING, made from this tree
+python3 "$REPO/scripts/support-pack.py" --out "$R/share/support"
 mkdir -p "$R/share/bin"
 cp -a "$STAGE/bins/bin/." "$R/share/bin/"
 # Force's own static tmux ships alone in share/tmux-bin/ (the systemd units and cli put it first on PATH).

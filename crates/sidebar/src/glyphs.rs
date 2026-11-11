@@ -98,6 +98,7 @@ fn assert_width_1() {
         '\u{F0F3}', '\u{F058}', '\u{F10C}', '\u{F017}', '\u{F057}', '\u{EA85}', '\u{F110}',
         '\u{F059}', '\u{F0AA}', '\u{F187}', '\u{F067}', '\u{E0B6}', '\u{E0B4}', '\u{EBF3}',
         '\u{F11C}', '\u{F011}', '\u{F040}', '\u{F1F8}', '\u{F002}', '\u{F071}', '━', '╸', '✻', '▣',
+        '\u{F118}', // Chuck's face (app::CHUCK_RICH)
     ] {
         assert_eq!(unicode_width::UnicodeWidthChar::width(c), Some(1), "width of U+{:04X} must be 1", c as u32);
     }

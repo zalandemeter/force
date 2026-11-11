@@ -279,6 +279,7 @@ class SessionView:
     shared: dict | None = None   # user -> "r"|"w" for who this session is shared with (SPEC §19)
     note: str | None = None      # brief feedback in place of the state label: restarting, restarted, archiving
     kind: str = "claude"         # claude | opencode | shell (SPEC §36): the card's kind mark
+    support: bool = False        # Chuck, the support session (SPEC §50): the sidebar shows it last, with its face
     why: str | None = None       # why the card shows its state (SPEC §43.3)
     title: str | None = None     # cleaned pane title (SPEC §43.4)
 
@@ -344,6 +345,7 @@ class Snapshot:
                 "kind": s.kind,
                 "why": s.why,
                 "title": s.title,
+                "support": s.support,
             } for s in self.sessions],
         }
         if self.update:
@@ -375,6 +377,7 @@ class Snapshot:
                 shared=s.get("shared"),
                 note=s.get("note"),
                 kind=s.get("kind") or "claude",
+                support=bool(s.get("support")),
                 why=s.get("why"),
                 title=s.get("title"),
             ))

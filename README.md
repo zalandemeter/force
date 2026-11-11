@@ -51,6 +51,8 @@ before unpacking. Today Force runs Claude Code, OpenCode and plain shell session
 - **Scripts and agents drive it.** <code>force&nbsp;prompt</code>, `wait` and `read` hand work to a session and collect the
   answer. <code>force&nbsp;skill</code> is the guide an agent reads to run Force itself.
 - **Nothing to set up.** Force paints its own theme in any terminal or ssh login.
+- **Ask Chuck.** Force's assistant (<kbd>?</kbd> in the menu) answers how things work, sets things up for you,
+  writes bug reports and ideas you submit with one click, and can build the fix. He runs on your own agent.
 
 ### Your turn, on your phone too
 
@@ -79,6 +81,8 @@ Force fits a phone's terminal too: open it over ssh and the sidebar becomes the 
   Add another machine you reach with ssh.
 - <code>force&nbsp;prompt&nbsp;NAME&nbsp;TEXT&nbsp;--wait</code>  
   Send a session a prompt from a script or another agent and wait for its answer.
+- <code>force&nbsp;support</code>  
+  Ask Chuck, Force's assistant: questions, setup, bug reports and ideas, fixes.
 - <code>force&nbsp;settings</code>  
   Show and change settings, such as the command that notifies you.
 - <code>force&nbsp;update</code>  
@@ -93,8 +97,9 @@ Everything else is in the menu (<kbd>Ctrl</kbd>&#8288;+&#8288;<kbd>Space</kbd> i
 
 ## Contributing
 
-Bug reports and ideas are welcome: use the [issue forms](https://github.com/zalandemeter/force/issues/new/choose).
-To work on Force itself, see [CONTRIBUTING.md](CONTRIBUTING.md); the design is written down in
+Bug reports and ideas are welcome: use the [issue forms](https://github.com/zalandemeter/force/issues/new/choose),
+or let Chuck (<kbd>?</kbd> inside Force) check for duplicates and draft them. To work on Force itself, see
+[CONTRIBUTING.md](CONTRIBUTING.md): Chuck can build a fix with you there too; the design is written down in
 [docs/SPEC.md](docs/SPEC.md). Found a security problem? Email hello@useforce.cc instead of opening an issue ([SECURITY.md](.github/SECURITY.md)).
 
 ## Licence

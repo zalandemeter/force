@@ -16,6 +16,10 @@ use crate::tmux::{self, Tmux};
 
 pub const ARCHIVED_TARGET: &str = "__archived__";
 pub const NEW_TARGET: &str = "__new__";
+/// Chuck, Force's assistant (SPEC §50): the footer's `ask chuck` row and the rail's face.
+pub const CHUCK_TARGET: &str = "__chuck__";
+/// Chuck's face: Font Awesome's smile (Nerd Font) in the rich tier, `?` in the plain one.
+pub const CHUCK_RICH: char = '\u{F118}';
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct RowCell {
@@ -54,6 +58,7 @@ pub enum Target {
     Session(String),
     Archived,
     New,
+    Chuck,
     Daemon,
 }
 
@@ -63,6 +68,7 @@ impl Target {
             Target::Session(n) => n,
             Target::Archived => ARCHIVED_TARGET,
             Target::New => NEW_TARGET,
+            Target::Chuck => CHUCK_TARGET,
             Target::Daemon => "",
         }
     }
@@ -909,6 +915,10 @@ impl App {
             self.popup("new", None, 64, 17);
             return;
         }
+        if target == CHUCK_TARGET {
+            self.open_chuck();
+            return;
+        }
         let own = match &self.own {
             Some(o) => o.clone(),
             None => return,
@@ -960,6 +970,43 @@ impl App {
                 self.show_error(format!("select: {}", e));
             }
         }
+    }
+
+    /// Chuck's card and session (`force support --ui`, SPEC §50) in a popup, with the dialogs' env plus this
+    /// window (a window showing a remote host comes back to this machine for him).
+    fn open_chuck(&mut self) {
+        let client = self.own_client();
+        let mut env = self.popup_env();
+        if self.ui_mode {
+            if let Some(w) = self.tmux_pane.as_ref().and_then(|p| tmux::window_id(self.tmux.as_ref(), p)) {
+                env.push(("FORCE_WINDOW".to_string(), w));
+            }
+        }
+        let command = format!("{} support --ui", tmux::shell_quote(&self.cockpit_bin));
+        if let Err(e) = tmux::popup(self.tmux.as_ref(), client.as_deref(), &env, 72, 18, &command) {
+            self.show_error(format!("chuck: {}", e));
+        }
+    }
+
+    fn popup_env(&self) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = Vec::new();
+        if self.ui_mode {
+            if let Some(n) = &self.nested {
+                env.push(("FORCE_CLIENT".to_string(), n.clone()));
+            }
+            if let Some(ho) = &self.host_own {
+                env.push(("FORCE_SESSION".to_string(), ho.clone()));
+            }
+            env.push(("FORCE_GLYPHS".to_string(), crate::glyphs::tier_str(self.tier).to_string()));
+            if let Ok(h) = std::env::var("FORCE_HOST") {
+                if !h.is_empty() {
+                    env.push(("FORCE_HOST".to_string(), h));
+                }
+            }
+        } else {
+            env.push(("FORCE_GLYPHS".to_string(), crate::glyphs::tier_str(self.tier).to_string()));
+        }
+        env
     }
 
     fn popup(&mut self, kind: &str, name: Option<&str>, w: u32, h: u32) {
@@ -1373,6 +1420,14 @@ impl App {
             self.actions_rows = 2;
             running += 2;
         }
+        // Chuck, Force's assistant (SPEC §50): his face in coral in the cards' icon column, then `ask chuck`
+        let mut chuck: Vec<Glyph> = "  ".chars().map(|ch| Glyph { ch, color: m::GREY, bold: false }).collect();
+        chuck.push(Glyph { ch: glyphs::state(self.tier, '?', CHUCK_RICH), color: m::ACCENT, bold: false });
+        chuck.extend(format!("{}ask chuck", if self.tier == Tier::Rich { "  " } else { " " })
+            .chars().map(|ch| Glyph { ch, color: m::GREY, bold: false }));
+        items.push(action(Target::Chuck, running, pad(chuck, c), None));
+        self.actions_rows += 1;
+        running += 1;
         (items, running)
     }
 
@@ -1949,6 +2004,9 @@ impl App {
         rail_targets.push((y, Target::New));
         set_rail_text(&mut grid, y, w, if self.tier == Tier::Rich { format!("    {}", '\u{F067}') } else { " +".to_string() }, m::GREY);
         y += 1;
+        rail_targets.push((y, Target::Chuck));
+        set_rail_text(&mut grid, y, w, if self.tier == Tier::Rich { format!("    {}", CHUCK_RICH) } else { " ?".to_string() }, m::ACCENT);
+        y += 1;
 
         // --- usage (2 rows + 1 blank) at the bottom if it is present and fits ----------
         self.rail_usage_show = !self.daemon() && usage_present(&self.snapshot) && y + 3 <= h;
@@ -2250,6 +2308,7 @@ mod tests {
             shared: None,
             note: None,
             kind: "claude".into(),
+            support: false,
         }
     }
 
@@ -2344,7 +2403,9 @@ mod tests {
         // one action row: new on the left, archived on the right
         assert_eq!(a.hit_test(4, BRAND_H + 7).map(|t| t.str()), Some("__new__"));
         assert_eq!(a.hit_test(a.w - 3, BRAND_H + 7).map(|t| t.str()), Some("__archived__"));
-        assert!(a.hit_test(2, BRAND_H + 8).is_none()); // past the list of items
+        // then Chuck's row (SPEC §50)
+        assert_eq!(a.hit_test(4, BRAND_H + 8).map(|t| t.str()), Some("__chuck__"));
+        assert!(a.hit_test(2, BRAND_H + 9).is_none()); // past the list of items
     }
 
     #[test]
@@ -2791,6 +2852,19 @@ mod tests {
     }
 
     // --- fake tmux records exact argv for each dialog popup --------------------------
+    #[test]
+    fn chuck_opens_his_card_in_a_popup() {
+        let (mut tmux, log) = FakeTmux::new();
+        tmux.clients_.push(Client { name: "c0".into(), session: "own".into(), activity: 9 });
+        let mut a = app_with(tmux);
+        a.own = Some("own".into());
+        a.activate(CHUCK_TARGET);
+        let log = log.lock().unwrap();
+        let e = log.iter().find(|e| e.first().map(|s| s.as_str()) == Some("display-popup")).expect("a popup");
+        assert_eq!(&e[1..6], &["-E", "-w", "72", "-h", "18"]);
+        assert_eq!(e.last().unwrap(), &format!("{} support --ui", crate::tmux::shell_quote("/bin/true")));
+    }
+
     #[test]
     fn popup_argv_for_each_kind() {
         for (kind, w, h, name) in [
@@ -3741,19 +3815,24 @@ mod tests {
 
     #[test]
     fn actions_pinned_when_the_list_overflows() {
-        // 10 two-row cards (20 rows) in a 15-row list: new + archived stay on the last row, "↓ N more" above
+        // 10 two-row cards (20 rows) in a 15-row list: new + archived and Chuck's row stay at the bottom,
+        // "↓ N more" above
         let mut a = many_app(10, BRAND_H + 15, None);
         let g = a.build_grid_at(NOW);
         assert_eq!(a.list_h, 15);
         assert!(a.pinned);
-        assert_eq!(a.actions_rows, 1);
-        let last = BRAND_H + a.list_h - 1;
+        assert_eq!(a.actions_rows, 2);
+        let chuck = BRAND_H + a.list_h - 1;
+        assert!(row_text(&g, chuck).contains("? ask chuck"), "{:?}", row_text(&g, chuck));
+        assert_eq!(g.row(chuck)[3].fg, m::ACCENT);     // under the `+` of new
+        assert_eq!(a.hit_test(4, chuck).map(|t| t.str()), Some("__chuck__"));
+        let last = chuck - 1;
         let t = row_text(&g, last);
         // new and archived set into one rule, like the header's labels, over columns 1..w
         assert_eq!(t, format!(" ─ + new {} archived (0) ─", "─".repeat(a.w - 1 - 8 - 15)), "{t:?}");
         assert_eq!(g.row(last)[1].fg, m::PANEL_RULE);
         assert_eq!(g.row(last)[4].fg, m::GREY);
-        // viewport 13 rows: s0..s5 whole, s6 cut, s6..s9 hidden (4)
+        // viewport 12 rows: s0..s5 whole, s6..s9 hidden (4)
         assert!(row_text(&g, last - 1).contains("↓ 4 more"), "{:?}", row_text(&g, last - 1));
         assert!(!row_text(&g, BRAND_H).contains("more"), "nothing hidden above at the top");
         assert_eq!(a.hit_test(4, last).map(|t| t.str()), Some("__new__"));
@@ -3784,8 +3863,8 @@ mod tests {
             a.build_grid_at(NOW);
         }
         let g = a.build_grid_at(NOW);
-        let last = BRAND_H + a.list_h - 1;
-        assert!(row_text(&g, BRAND_H).contains("↑ 4 more"), "{:?} off={} view={} total={}", row_text(&g, BRAND_H), a.offset, a.view_h, a.sess_total);
+        let last = BRAND_H + a.list_h - 2;     // the new/archived rule; Chuck's row under it
+        assert!(row_text(&g, BRAND_H).contains("↑ 5 more"), "{:?} off={} view={} total={}", row_text(&g, BRAND_H), a.offset, a.view_h, a.sess_total);
         assert!(row_text(&g, last - 1).trim().is_empty(), "nothing below: {:?}", row_text(&g, last - 1));
         // the last card ends right above the more row
         assert_eq!(a.hit_test(2, last - 2).map(|t| t.str()), Some("s9"));
@@ -3801,7 +3880,7 @@ mod tests {
         let down = BRAND_H + a.list_h - a.actions_h();
         a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 2, down as u16);
         a.build_grid_at(NOW);
-        assert_eq!(a.offset, 8, "paged to the end (viewport 13 - 1 = 12, clamped)");
+        assert_eq!(a.offset, 9, "paged to the end (viewport 12 - 1 = 11, clamped)");
         assert!(!a.follow_own);
         a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 2, BRAND_H as u16);
         a.build_grid_at(NOW);
@@ -3862,11 +3941,13 @@ mod tests {
         let mut a = many_app(2, 40, None);
         a.on_resize(18, 40);
         let g = a.build_grid_at(NOW);
-        assert_eq!(a.actions_rows, 2);
+        assert_eq!(a.actions_rows, 3);
         assert!(row_text(&g, BRAND_H + 5).contains("archived"));
         assert!(row_text(&g, BRAND_H + 6).contains("+ new"));
+        assert!(row_text(&g, BRAND_H + 7).contains("ask chuck"));
         assert_eq!(a.hit_test(2, BRAND_H + 5).map(|t| t.str()), Some("__archived__"));
         assert_eq!(a.hit_test(2, BRAND_H + 6).map(|t| t.str()), Some("__new__"));
+        assert_eq!(a.hit_test(2, BRAND_H + 7).map(|t| t.str()), Some("__chuck__"));
     }
 
     #[test]

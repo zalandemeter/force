@@ -19,7 +19,8 @@ from pathlib import Path
 SHARE = Path(__file__).resolve().parent.parent / "share"
 FORCE = "$FORCE_BIN"          # set by tmux.conf / tmux-ui.conf (the live launcher unless an instance, SPEC §2.1)
 APP = "#{@force_app}/share"
-HELP_W, HELP_H = 80, 18          # the help popup (share/help.ansi fits inside, tests/test_keys.py checks)
+HELP_W, HELP_H = 80, 19          # the help popup (share/help.ansi fits inside, tests/test_keys.py checks)
+CHUCK_W, CHUCK_H = 72, 18        # Chuck's card (force support --ui, SPEC §50)
 
 # (key, label, action, core). None = a separator. Keys are letters (Shift is fine on any layout), Tab and ?,
 # never arrows: tmux matches an item's key before its own navigation, so arrows stay free to move in the menu.
@@ -44,7 +45,8 @@ ITEMS = [
     None,
     ("b", "Sidebar on / off", "sidebar", False),
     ("H", "Health check…", "health", False),
-    ("?", "Help", "help", True),
+    ("?", "Ask Chuck…", "chuck", True),
+    ("k", "Keys…", "help", True),
     ("q", "Quit (sessions keep running)", "quit", True),
 ]
 
@@ -69,6 +71,7 @@ def classic() -> tuple[str, dict[str, str]]:
         return f"run-shell -b \"{FORCE} {args} >/dev/null\""
 
     return s, {
+        "chuck": f"display-popup -E -w {CHUCK_W} -h {CHUCK_H} \"{FORCE} support --ui\"",
         "jump": pop(64, 20, "jump"),
         "prev": "switch-client -l",
         "host": "display-message -d 4000 \" switching hosts needs the split layout: force ui split, then run force again \"",
@@ -104,6 +107,8 @@ def split() -> tuple[str, dict[str, str]]:
         return f"run-shell -b \"{APP}/ui-key.sh '#{{socket_path}}' '#{{window_id}}' {action}\""
 
     return s, {
+        "chuck": f"display-popup {env} -e \"FORCE_WINDOW=#{{window_id}}\" -E -w {CHUCK_W} -h {CHUCK_H} "
+                 f"\"{FORCE} support --ui\"",
         "jump": pop(64, 20, "jump"),
         "prev": key("last"),
         "host": f"run-shell -b \"{FORCE} hosts-menu --client '#{{client_name}}' --window '#{{window_id}}'\"",

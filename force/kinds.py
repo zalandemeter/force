@@ -80,9 +80,15 @@ class Claude(Kind):
     def exec_argv(self, cockpit, entry):
         statusline = claude_mod.statusline_command(Path(cockpit.paths.tmux_conf).parent / "statusline.py",
                                                    cockpit.paths.state / "usage.json")
+        extra_settings, extra_args = None, None
+        if entry.extra.get("role") == "support":       # Chuck (SPEC §50)
+            from . import support
+            support.prepare_dir(cockpit.paths)
+            extra_settings, extra_args = support.claude_launch(cockpit.paths)
         argv = claude_mod.build_argv(cockpit.paths.claude_bin, cockpit.paths.claude_dir, entry.name, entry.session_id,
                                      statusline, memory_dir=entry.extra.get("memory_dir"),
-                                     remote_control=not os.environ.get("FORCE_NO_REMOTE_CONTROL"))
+                                     remote_control=not os.environ.get("FORCE_NO_REMOTE_CONTROL"),
+                                     extra_settings=extra_settings, extra_args=extra_args)
         return argv, {}
 
     def read(self, d, entry, pane):
@@ -141,6 +147,9 @@ class OpenCode(Kind):
         # Force handles updates (its own copy, or restarts onto the admin's): OpenCode's own update dialog
         # would sit over the prompt and swallow the first keystrokes
         env = {"OPENCODE_DISABLE_AUTOUPDATE": "1"}
+        if entry.extra.get("role") == "support":       # Chuck (SPEC §50): his folder's opencode.json and AGENTS.md
+            from . import support
+            support.prepare_dir(cockpit.paths)
         return opencode_mod.argv(port, entry.extra.get("oc_session"), entry.cwd, binary), env
 
     def read(self, d, entry, pane):

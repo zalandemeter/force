@@ -83,6 +83,8 @@ pub struct Session {
     pub note: Option<String>,
     /// "claude" | "opencode" | "shell" (SPEC §36): the card's kind mark.
     pub kind: String,
+    /// Chuck, Force's assistant (SPEC §50): shown last, with his face while idle.
+    pub support: bool,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -192,6 +194,7 @@ fn parse_session(v: &Value) -> Option<Session> {
         shared,
         note: obj.get("note").and_then(|v| v.as_str()).map(str::to_string),
         kind: obj.get("kind").and_then(|v| v.as_str()).unwrap_or("claude").to_string(),
+        support: obj.get("support").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }
 

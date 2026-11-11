@@ -95,6 +95,9 @@ mkdir -p "$dest"
 cp -a "$REPO/force" "$REPO/share" "$REPO/systemd" "$REPO/docs/SPEC.md" "$REPO/README.md" "$REPO/install.sh" \
   "$REPO/LICENSE" "$REPO/THIRD-PARTY-NOTICES.md" "$dest/"
 find "$dest" -name '__pycache__' -prune -exec rm -rf {} +
+# Chuck's context pack (SPEC §50): the docs, the command reference and CONTRIBUTING, made from this tree
+"$PY" "$REPO/scripts/support-pack.py" --out "$dest/share/support" \
+  || { echo "deploy: Chuck's context pack does not build, not deployed" >&2; rm -rf "$dest"; exit 1; }
 
 # The Rust sidebar (SPEC §22): built here, shipped as share/bin/force-sidebar in the release.
 if [[ -f "$REPO/crates/sidebar/Cargo.toml" ]]; then

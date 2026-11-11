@@ -77,6 +77,16 @@
       "default": false,
       "description": "also notify about a session a terminal is showing"
     },
+    "supportAgent": {
+      "type": "string",
+      "default": "auto",
+      "description": "the agent Chuck, the support assistant, runs on: auto | claude | opencode",
+      "enum": [
+        "auto",
+        "claude",
+        "opencode"
+      ]
+    },
     "crashRestartMax": {
       "type": "integer",
       "default": 3,

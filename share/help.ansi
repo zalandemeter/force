@@ -7,6 +7,7 @@
   [38;2;217;119;87mAlt+1…9[0m        [38;2;198;198;198msession N        Alt+↑ ↓  previous / next[0m
   [38;2;217;119;87m[0m               [38;2;198;198;198m[38;2;128;128;128m(Tilix and Terminator keep these for their own panes)[0m[0m
   [38;2;217;119;87mclick[0m          [38;2;198;198;198ma sidebar row, a header chip, the host chip[0m
+  [38;2;217;119;87mCtrl+Space ?[0m   [38;2;198;198;198mask Chuck, Force's assistant (or the sidebar's ask chuck)[0m
 
   [38;2;217;119;87mcopy[0m           [38;2;198;198;198mdrag selects, right click copies[0m
   [38;2;217;119;87mnew line[0m       [38;2;198;198;198mAlt+Enter or Ctrl+J; Shift+Enter where the term sends it[0m

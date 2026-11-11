@@ -79,8 +79,8 @@ def test_a_click_on_the_published_button_toggles_a_clickable_menu(tmp_path):
         assert "Force ·" not in t.screen()
         t.click(9, 0)                                         # open again, click an item: it runs
         assert _wait(lambda: "Force ·" in t.screen())
-        row = next(i for i, line in enumerate(t.screen().splitlines()) if "Help" in line)
-        col = t.screen().splitlines()[row].index("Help")
+        row = next(i for i, line in enumerate(t.screen().splitlines()) if "Keys…" in line)
+        col = t.screen().splitlines()[row].index("Keys…")
         t.click(col + 2, row)
         assert _wait(lambda: "any key closes this help" in t.screen())
         # nothing published (kind empty): every click goes to the pane
@@ -131,7 +131,7 @@ def test_tmux_quote_round_trips_through_the_tmux_parser(tmp_path):
 
 def test_ctrl_space_opens_the_menu_and_the_next_letter_picks_an_item(tmp_path):
     """No prefix key: Ctrl+Space opens the Force menu at once, so a letter typed right after it picks an item
-    (here ? = Help) instead of reaching the session. Ctrl+\\ does the same; Esc closes the menu."""
+    (here k = Keys) instead of reaching the session. Ctrl+\\ does the same; Esc closes the menu."""
     t = Nested(tmp_path)
     try:
         assert t.run_in("show", "-gv", "prefix") == "None" and t.run_in("show", "-gv", "prefix2") == "None"
@@ -139,7 +139,7 @@ def test_ctrl_space_opens_the_menu_and_the_next_letter_picks_an_item(tmp_path):
         for key in ("00", "1c"):                               # Ctrl+Space (NUL), Ctrl+\
             subprocess.run(t.outer + ["send-keys", "-t", "t:", "-H", key], check=True, timeout=10)
             time.sleep(0.005)
-            subprocess.run(t.outer + ["send-keys", "-t", "t:", "?"], check=True, timeout=10)
+            subprocess.run(t.outer + ["send-keys", "-t", "t:", "k"], check=True, timeout=10)
             assert _wait(lambda: "any key closes this help" in t.screen())
             subprocess.run(t.outer + ["send-keys", "-t", "t:", "q"], check=True, timeout=10)
             assert _wait(lambda: "any key closes this help" not in t.screen())

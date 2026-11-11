@@ -95,6 +95,8 @@ class Config:
     notify_command: str = ""
     # also notify about the session a terminal is showing
     notify_when_viewed: bool = False
+    # the agent Chuck, the support assistant (SPEC §50), runs on: auto = the first installed of Claude Code, OpenCode
+    support_agent: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -140,6 +142,8 @@ SETTINGS = [
                "command run when a session needs you, finishes or stops ($FORCE_MESSAGE, $FORCE_EVENT, …)"),
     SettingSpec("notifyWhenViewed", "notify_when_viewed", "bool", (), False,
                "also notify about a session a terminal is showing"),
+    SettingSpec("supportAgent", "support_agent", "choice", ("auto", "claude", "opencode"), True,
+               "the agent Chuck, the support assistant, runs on: auto | claude | opencode"),
     SettingSpec("crashRestartMax", "crash_restart_max", "int", (), False,
                "how often a session is restarted after a crash"),
     SettingSpec("crashWindowMinutes", "crash_window_minutes", "number", (), False,

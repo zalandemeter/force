@@ -1296,6 +1296,7 @@ mod tests {
             shared: None,
             note: None,
             kind: "claude".into(),
+            support: false,
         }
     }
 

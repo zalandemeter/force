@@ -38,6 +38,11 @@ class Entry:
     extra: dict = field(default_factory=dict)   # unknown keys, preserved on rewrite
 
 
+def is_support(e: Entry) -> bool:
+    """Chuck, the support assistant's session (SPEC §50): registry extra role = "support"."""
+    return e.extra.get("role") == "support"
+
+
 @dataclass
 class Registry:
     entries: list[Entry]
@@ -55,8 +60,8 @@ class Registry:
         return None
 
     def live(self) -> list[Entry]:
-        """Non-archived entries sorted by order."""
-        return sorted((e for e in self.entries if not e.archived), key=lambda e: e.order)
+        """Non-archived entries sorted by order; Chuck, the support session (SPEC §50), always last."""
+        return sorted((e for e in self.entries if not e.archived), key=lambda e: (is_support(e), e.order))
 
     def archived(self) -> list[Entry]:
         """Archived entries sorted by archived_at descending."""

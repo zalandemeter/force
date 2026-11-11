@@ -346,7 +346,9 @@ fn pad_to(out: &mut Vec<Glyph>, c: usize) {
 /// Line 1: `  {glyph} {name}{pad}{age}` + optional ` ↑` (outdated), exactly `c` columns. The first column is the
 /// card's edge slot (the app draws the `▍` there); no index number.
 pub fn line1(s: &Session, now_ms: i64, c: usize, name_color: Color, tier: Tier) -> Vec<Glyph> {
-    let g = glyph(tier, s.state, now_ms);
+    // Chuck (SPEC §50) shows his face while there is nothing to tell; working, needs you and your turn as usual
+    let face = s.support && matches!(s.state, State::Idle | State::Stale);
+    let g = if face { glyphs::state(tier, '?', crate::app::CHUCK_RICH) } else { glyph(tier, s.state, now_ms) };
     let gap = glyphs::gap(tier);
     let prefix = format!("  {}{}", g, gap); // width 4 (5 in RICH: 2-cell icon slot)
     let age = age(s.since_ms, now_ms);
@@ -360,8 +362,8 @@ pub fn line1(s: &Session, now_ms: i64, c: usize, name_color: Color, tier: Tier) 
     let nw = width(&name);
     let pad = (c as i64 - pw as i64 - nw as i64 - rw as i64).max(0) as usize;
 
-    let gcol = glyph_color(s.state);
-    let gbold = is_bold_glyph(s.state);
+    let gcol = if face { ACCENT } else { glyph_color(s.state) };
+    let gbold = if face { false } else { is_bold_glyph(s.state) };
     let mut out = Vec::with_capacity(c);
     out.push(space(BG));
     out.push(space(BG));
@@ -840,6 +842,19 @@ pub fn glyphs_to_string(g: &[Glyph]) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn chuck_shows_his_face_while_idle() {
+        let mut s = sess(State::Idle);
+        s.support = true;
+        let l = line1(&s, 0, 29, NAME, Tier::Rich);
+        assert_eq!(l[2].ch, crate::app::CHUCK_RICH);
+        assert_eq!(l[2].color, ACCENT);
+        assert_eq!(line1(&s, 0, 29, NAME, Tier::Plain)[2].ch, '?');
+        // anything to tell shows as usual
+        s.state = State::NeedsYou;
+        assert_eq!(line1(&s, 0, 29, NAME, Tier::Rich)[2].ch, glyph(Tier::Rich, State::NeedsYou, 0));
+    }
+
     fn sess(state: State) -> Session {
         Session {
             name: "portal".into(),
@@ -863,6 +878,7 @@ mod tests {
             shared: None,
             note: None,
             kind: "claude".into(),
+            support: false,
         }
     }
 
