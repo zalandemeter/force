@@ -20,7 +20,7 @@ from .tmux import LEGACY_AGENT_ROLE, TmuxError
 from .registry import (RegistryError, is_support, is_claude, is_opencode, is_shell, kind as kind_of, locked, slugify, valid_name,
                      slugify, valid_name)
 from .state import (PaneInfo, Seen, SessionView, Snapshot, State, compute_state, compute_state_why, clean_title,
-                   glyph, load_seen, save_seen, write_snapshot)
+                   glyph, load_seen, save_seen, unread, write_snapshot)
 
 _UPGRADE_INTERVAL = 30.0
 _CRASH_UNKNOWN_GRACE = 5.0
@@ -246,6 +246,8 @@ class Daemon:
         # session activity cache: session_id -> ((st_mtime_ns, st_size) | None, clock-time, value).
         # Recompute only when the transcript changed AND at least 3 s of clock time has passed (SPEC §15).
         self._activity: dict[str, tuple] = {}
+        self._reply: dict[str, int] = {}          # name -> newest reply_ms seen (SPEC §5, unread)
+        self._oc_reply: dict[str, tuple] = {}     # OpenCode sessions: name -> (pid, opencode.reply_key) last read
         self._oc_meta: dict[str, object] = {}     # OpenCode sessions: name -> opencode.Meta (SPEC §36)
         self._oc_last: dict[str, tuple] = {}      # name -> (status, meta, clock) of the last answer from its API
         self._oc_src: dict[str, str] = {}         # OpenCode sessions: name -> source clause for `why` (SPEC §43.3)
@@ -294,15 +296,15 @@ class Daemon:
     def _now_ms(self) -> int:
         return int(self.clock() * 1000)
 
-    def _config_for(self, session_id: str) -> tuple[str | None, str | None, str | None]:
-        """(activity, model, effort) for a live session, cached per transcript path keyed by (st_mtime_ns,
-        st_size) and throttled to at most one recompute per 3 s of clock time per session. (None, None, None)
-        when no session_id, no transcript, or the transcript is unreadable."""
+    def _config_for(self, session_id: str) -> tuple[str | None, str | None, str | None, int | None]:
+        """(activity, model, effort, reply_ms) for a live session, cached per transcript path keyed by
+        (st_mtime_ns, st_size) and throttled to at most one recompute per 3 s of clock time per session. All
+        None when no session_id, no transcript, or the transcript is unreadable."""
         if not session_id:
-            return None, None, None
+            return None, None, None, None
         path = claude_mod.find_transcript(self.paths.claude_dir, session_id)
         if path is None:
-            return None, None, None
+            return None, None, None, None
         try:
             st = os.stat(path)
             key = (st.st_mtime_ns, st.st_size)
@@ -319,6 +321,18 @@ class Daemon:
         value = activity.scan(path)
         self._activity[session_id] = (key, now, value)
         return value
+
+    def _oc_reply_for(self, name: str, pane, meta) -> int | None:
+        """SPEC §5 unread: now when the text of an OpenCode TUI's last assistant message changed since the last
+        read of the same TUI; never on its first sight, so a (re)start or a daemon restart marks nothing."""
+        key = getattr(meta, "reply", None)
+        pid = pane.pid if (pane is not None and not pane.dead and pane.pid) else None
+        if key is None or pid is None:
+            return None
+        prev = self._oc_reply.get(name)
+        self._oc_reply[name] = (pid, key)
+        changed = prev is not None and prev[0] == pid and prev[1] != key
+        return self._now_ms() if changed else None
 
     def _oc_agent_for(self, name: str, pane) -> str | None:
         """The agent an OpenCode TUI is on, from its screen (SPEC §36), read at most once per _MODE_INTERVAL
@@ -550,7 +564,8 @@ class Daemon:
             self.cockpit.tmux.rename_session(old, new)
         _rename_seen_key(self.paths.seen, old, new)
         for cache in (self._readings, self._shell_prog, self._oc_meta, self._oc_last, self._oc_agent,
-                      self._claude_name, self._auto_name_last, self._note_state, self._note_down):
+                      self._claude_name, self._auto_name_last, self._note_state, self._note_down,
+                      self._reply, self._oc_reply):
             if old in cache:
                 cache[new] = cache.pop(old)
         # the rest of this tick works on the new name: a stale registry would show the old one down for a tick,
@@ -1001,6 +1016,12 @@ class Daemon:
                 act = pending_restart_activity(state) or act
             if entry.extra.get("pending_move") and state == State.WORKING:
                 act = "moves after this turn"
+            if card.reply_ms is not None and card.reply_ms > self._reply.get(name, 0):
+                self._reply[name] = card.reply_ms
+            is_unread = unread(state, self._reply.get(name), seen.get(name, Seen()), name in viewed)
+            if is_unread:
+                clauses.append(f"unread: wrote you {max(0, now_ms - self._reply[name]) // 1000} s ago, "
+                               "not viewed since")
             note = None
             mark = None if is_shell(entry) else self.cockpit.restarted(name)
             if mark is not None:
@@ -1025,7 +1046,7 @@ class Daemon:
                 mode=mode, model=model, effort=effort,
                 shared=(entry.extra.get("shares") or None) if self.cfg.sharing else None,
                 note=note, kind=kind_of(entry), why="; ".join(clauses), title=title,
-                support=is_support(entry)))
+                support=is_support(entry), unread=is_unread))
         self._views = views
         limits = self._limits(live)
         snap = Snapshot(generated_ms=now_ms, latest_version=lv, sessions=views,

@@ -32,6 +32,7 @@ class Card:
     effort: str | None = None
     mode: str | None = None
     title: str | None = None            # replaces the pane title (a shell's interactive program)
+    reply_ms: int | None = None         # when the agent last wrote you text (SPEC §5, unread)
 
 
 class Kind:
@@ -106,10 +107,10 @@ class Claude(Kind):
         return claude_mod.latest_version(paths.claude_bin)
 
     def card(self, d, entry, pane, reading):
-        act, model, effort = d._config_for(entry.session_id)
+        act, model, effort, reply_ms = d._config_for(entry.session_id)
         from .daemon import shown_activity
         return Card(activity=shown_activity(reading.status, act), model=model, effort=effort,
-                    mode=d._mode_for(entry.name, pane))
+                    mode=d._mode_for(entry.name, pane), reply_ms=reply_ms)
 
     def follow(self, d, entry, reading):
         d._follow_claude(entry, reading.status)
@@ -194,7 +195,8 @@ class OpenCode(Kind):
         effort = meta.variant if meta is not None and meta.variant not in (None, "", "default") else None
         agent = d._oc_agent_for(entry.name, pane) or (meta.agent if meta is not None else None)
         mode = {"build": "oc-build", "plan": "oc-plan"}.get(agent) if agent else None
-        return Card(activity=act, model=model, effort=effort, mode=mode)
+        return Card(activity=act, model=model, effort=effort, mode=mode,
+                    reply_ms=d._oc_reply_for(entry.name, pane, meta))
 
     def follow(self, d, entry, reading):
         d._follow_opencode(entry, reading.status)

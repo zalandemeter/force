@@ -527,3 +527,17 @@ def test_daemon_keeps_an_opencode_state_when_its_api_misses_an_answer(env, monke
     clock.advance(_OC_HOLD + 1)
     d.tick()
     assert state() is not State.WORKING               # silent for longer: no longer held (the usual rules)
+
+
+def test_reply_key():
+    """SPEC §5 unread: what the agent wrote in a message, by message id and text length."""
+    text = lambda t: {"type": "text", "text": t}
+    msg = {"info": {"id": "m1", "role": "assistant"}, "parts": [text("hello"), {"type": "tool", "tool": "bash"}]}
+    assert opencode.reply_key(msg) == "m1:5"
+    msg["parts"].append(text(" there"))
+    assert opencode.reply_key(msg) == "m1:11"               # streaming text grows the key
+    assert opencode.reply_key({"info": {"id": "u", "role": "user"}, "parts": [text("do it")]}) is None
+    assert opencode.reply_key({"info": {"id": "m2", "role": "assistant"},
+                               "parts": [{"type": "tool", "tool": "bash"}, text("  ")]}) is None
+    assert opencode.reply_key({"id": "m3", "role": "assistant", "parts": [text("x")]}) == "m3:1"
+    assert opencode.reply_key(None) is None

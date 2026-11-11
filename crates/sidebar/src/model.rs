@@ -51,6 +51,8 @@ pub const C_YOUR_TURN: Color = Color::Rgb(0x87, 0xc0, 0x8f);
 pub const C_DOWN: Color = Color::Rgb(0xd7, 0x5f, 0x5f);
 pub const C_YOUR_TURN_DIM: Color = Color::Rgb(0x79, 0xa5, 0x80); // #79a580
 pub const C_WORKING_DIM: Color = Color::Rgb(0xa6, 0x89, 0x4d); // #d7af5f at ~60% brightness
+/// The icon of a working session whose agent wrote a reply you have not seen (SPEC §5, `unread`).
+pub const C_UNREAD: Color = Color::Rgb(0x5c, 0x9c, 0xf5); // #5c9cf5
 
 // Mode colours as the agents themselves show them (dark themes): Claude Code's autoAccept, planMode, warning (auto),
 // inactive (manual) and error (bypass); OpenCode's build and plan agents take its theme's secondary and accent.
@@ -102,6 +104,15 @@ pub fn glyph_color(s: State) -> Color {
         State::Down => C_DOWN,
         State::Shell | State::Idle => GREY,
         State::Stale | State::Starting | State::Unknown | State::Archived => IDX,
+    }
+}
+
+/// A card's icon colour: the state's, but blue for a working session with an unread reply (SPEC §5).
+pub fn session_glyph_color(s: &Session) -> Color {
+    if s.unread && s.state == State::Working {
+        C_UNREAD
+    } else {
+        glyph_color(s.state)
     }
 }
 
@@ -362,7 +373,7 @@ pub fn line1(s: &Session, now_ms: i64, c: usize, name_color: Color, tier: Tier) 
     let nw = width(&name);
     let pad = (c as i64 - pw as i64 - nw as i64 - rw as i64).max(0) as usize;
 
-    let gcol = if face { ACCENT } else { glyph_color(s.state) };
+    let gcol = if face { ACCENT } else { session_glyph_color(s) };
     let gbold = if face { false } else { is_bold_glyph(s.state) };
     let mut out = Vec::with_capacity(c);
     out.push(space(BG));
@@ -879,6 +890,7 @@ mod tests {
             note: None,
             kind: "claude".into(),
             support: false,
+            unread: false,
         }
     }
 
@@ -1283,6 +1295,22 @@ mod tests {
         s.note = None;
         s.state = State::Starting;
         assert!(glyphs_to_string(&line2(&s, 24, Tier::Plain)).contains("starting"));
+    }
+
+    #[test]
+    fn unread_working_icon_is_blue() {
+        // SPEC §5: only the icon of a working session with an unread reply turns blue; the spinner, edge and
+        // label stay the working ones, and the flag means nothing in other states
+        let mut s = sess(State::Working);
+        assert_eq!(line1(&s, 0, 29, NAME, Tier::Plain)[2].color, C_WORKING);
+        s.unread = true;
+        let l = line1(&s, 0, 29, NAME, Tier::Plain);
+        assert_eq!(l[2].color, C_UNREAD);
+        assert_eq!(l[2].ch, glyph(Tier::Plain, State::Working, 0));
+        assert_eq!(edge_color(s.state), C_WORKING);
+        assert_eq!(label_color(s.state), C_WORKING_DIM);
+        s.state = State::YourTurn;
+        assert_eq!(session_glyph_color(&s), C_YOUR_TURN);
     }
 
     #[test]

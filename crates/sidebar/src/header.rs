@@ -1323,6 +1323,7 @@ mod tests {
             note: None,
             kind: "claude".into(),
             support: false,
+            unread: false,
         }
     }
 

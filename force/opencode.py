@@ -94,6 +94,7 @@ class Meta:
     activity: str | None = None  # "running a command", "editing app.py", ... while busy
     version: str | None = None  # the version this TUI runs
     title: str | None = None    # the session's own title (OpenCode names sessions after their first message)
+    reply: str | None = None    # the last assistant message's text, as "<message id>:<length>" (SPEC §5)
 
 
 _installed: tuple[float, str | None] = (0.0, None)
@@ -174,6 +175,24 @@ def activity_from_parts(parts) -> str | None:
     return None
 
 
+def reply_key(message) -> str | None:
+    """What the agent has written you in a message (SPEC §5, unread): "<message id>:<text length>" for an
+    assistant message with non-empty text parts, else None (the user's own message, tools only)."""
+    if not isinstance(message, dict):
+        return None
+    info = message.get("info") if isinstance(message.get("info"), dict) else message
+    if info.get("role") != "assistant":
+        return None
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return None
+    n = sum(len(p.get("text") or "") for p in parts
+            if isinstance(p, dict) and p.get("type") == "text" and str(p.get("text") or "").strip())
+    if not n:
+        return None
+    return f"{info.get('id') or ''}:{n}"
+
+
 def model_label(model_id: str | None) -> str | None:
     """A short card label like Claude's "opus 5.5": the provider's id without its provider prefix, dashes as
     spaces ("deepseek-v4-flash" -> "deepseek v4 flash", "anthropic/claude-x" -> "claude x")."""
@@ -240,17 +259,18 @@ def read_status(port, pid: int, session: str | None,
         cfg = _get(port, "/config")
         if isinstance(cfg, dict) and isinstance(cfg.get("model"), str):
             model = cfg["model"].rsplit("/", 1)[-1] or None
-    act = None
+    act = reply = None
     if state == "busy" and sid:
         msgs = _get(port, f"/session/{sid}/message?limit=1")
         if isinstance(msgs, list) and msgs and isinstance(msgs[-1], dict):
             act = activity_from_parts(msgs[-1].get("parts"))
+            reply = reply_key(msgs[-1])
     health = _get(port, "/global/health")
     version = health.get("version") if isinstance(health, dict) and isinstance(health.get("version"), str) else None
     st = AgentStatus(pid=pid, session_id=sid or "", name=None, name_source=None, status=state,
                       status_updated_ms=updated, waiting_for=None, cwd=None)
     return st, Meta(model=model, question=question, variant=variant, agent=agent, activity=act,
-                    version=version, title=title)
+                    version=version, title=title, reply=reply)
 
 
 _DEFAULT_TITLE_RE = re.compile(r"^(new|child) session\b", re.I)

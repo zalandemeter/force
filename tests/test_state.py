@@ -8,7 +8,7 @@ from force.config import Config
 from force.registry import Entry
 from force.state import (PaneInfo, Seen, SessionView, Snapshot, State,
                        color, compute_state, format_age, glyph, load_seen,
-                       read_snapshot, save_seen, write_snapshot)
+                       read_snapshot, save_seen, unread, write_snapshot)
 
 
 def entry(name="portal", archived=False):
@@ -456,3 +456,28 @@ def test_snapshot_why_title_roundtrip():
     del d["sessions"][0]["why"], d["sessions"][0]["title"]
     old = Snapshot.from_json(d).sessions[0]
     assert old.why is None and old.title is None
+
+
+@pytest.mark.parametrize("state, reply, last_seen, viewed, expected", [
+    (State.WORKING, 2000, 1000, False, True),       # wrote after you last looked
+    (State.WORKING, 1000, 1000, False, False),      # not after
+    (State.WORKING, 500, 1000, False, False),
+    (State.WORKING, None, 0, False, False),         # never wrote
+    (State.WORKING, 2000, 1000, True, False),       # on screen now
+    (State.YOUR_TURN, 2000, 1000, False, False),    # only working sessions
+    (State.NEEDS_YOU, 2000, 1000, False, False),
+    (State.IDLE, 2000, 1000, False, False),
+])
+def test_unread(state, reply, last_seen, viewed, expected):
+    assert unread(state, reply, Seen(last_seen_ms=last_seen), viewed) is expected
+
+
+def test_snapshot_unread_roundtrip():
+    sv = SessionView(name="portal", index=1, state=State.WORKING, since_ms=5, version=None, outdated=False,
+                     archived=False, order=1, cwd="/home", session_id="s", pid=10, waiting_for=None,
+                     viewed=False, unread=True)
+    d = Snapshot(generated_ms=1, latest_version=None, sessions=[sv]).to_json()
+    assert d["sessions"][0]["unread"] is True
+    assert Snapshot.from_json(d).sessions[0].unread is True
+    del d["sessions"][0]["unread"]                  # a snapshot from an older daemon
+    assert Snapshot.from_json(d).sessions[0].unread is False

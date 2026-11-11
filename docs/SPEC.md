@@ -157,6 +157,14 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
 | UNKNOWN | `?` | dim | any other status string |
 
 - `outdated` is a separate boolean flag (shown as cyan `↑`), not a state.
+- `unread` is a separate boolean flag, not a state: the session is WORKING, not viewed by any client, and its
+  agent has written a reply text since you last looked at it (`reply_ms > last_seen_ms`). `reply_ms` is the
+  time of the newest text the agent wrote to you: the `timestamp` of the newest non-sidechain assistant record
+  with a non-empty `text` block in a Claude Code transcript; for OpenCode, the tick on which the text of the
+  last message (read while busy, §36) changed, never its first sight after a (re)start; shells have none. The
+  daemon keeps the newest `reply_ms` it has seen per session in memory. The sidebar draws an unread WORKING
+  session's icon blue (`#5c9cf5`, the spinner unchanged; its edge, label and activity keep the working
+  colours); opening the session clears it on the next tick.
 - `since_ms` (for the age column) = `statusUpdatedAt` when a status file exists, else pane start.
 - **turn_done_ms**: the daemon records `now` when it observes a session go from `busy`/`waiting`
   to `idle` (not on first sight, not after a (re)start). Persisted in `$FORCE_STATE/seen.json`.
@@ -333,7 +341,8 @@ Exit 0 on success, 1 on user error with a one-line message on stderr, 2 on envir
  "counts": {"needs_you": 1, "working": 2, "your_turn": 1, "idle": 3, "stale": 1, "down": 0},
  "sessions": [{"name": "portal", "index": 1, "state": "NEEDS_YOU", "since_ms": 0, "version": "2.1.289",
                "outdated": true, "archived": false, "order": 3, "cwd": "/home/alice",
-               "session_id": "…", "pid": 188564, "waiting_for": "input needed", "viewed": false}]}
+               "session_id": "…", "pid": 188564, "waiting_for": "input needed", "viewed": false,
+               "unread": false}]}
 ```
 Archived sessions are included with `state: "ARCHIVED"` and `index: null`.
 
@@ -428,7 +437,7 @@ guarded by tests/test_dev_tree.py).
   the version. The sidebar is the full list; the header never repeats it.
 - **Theme**: one palette for header, sidebar, dialogs, toasts and popups: greys of
   the tmux status line (`#262626`, `#303030`, `#3a3a3a`), coral `#d97757` as the only accent,
-  no blue.
+  no blue but the icon of a working session with an unread reply (§5).
 - **Sidebar**: a coral `▌` marker column on the current session's rows (text, not a CSS border);
   no keyboard cursor; no scrollbar; `     archived (n)` and `   + new session` aligned with the names.
 - **Dialogs**: padded frame, sentence-case title, labelled fields, coloured status row (× / ✓), a

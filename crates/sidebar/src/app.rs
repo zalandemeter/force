@@ -2036,7 +2036,7 @@ impl App {
                 grid.set(y, 4, RowCell { ch: glyphs::state(self.tier, '✓', glyphs::CHECK_RICH), fg: FINISH_CHECK, bg, bold: true });
             } else {
                 let glyph = m::glyph(self.tier, s.state, now_ms);
-                let gfg = lerp_bg(m::glyph_color(s.state), m::BG, mb);
+                let gfg = lerp_bg(m::session_glyph_color(s), m::BG, mb);
                 grid.set(y, 4, RowCell { ch: glyph, fg: gfg, bg, bold: m::is_bold_glyph(s.state) });
             }
 
@@ -2365,6 +2365,7 @@ mod tests {
             note: None,
             kind: "claude".into(),
             support: false,
+            unread: false,
         }
     }
 

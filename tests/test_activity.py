@@ -209,14 +209,14 @@ def test_scan_returns_activity_model_effort_newest(tmp_path):
          "message": {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "reply"}]},
          "effort": "max"},
     ])
-    assert scan(p) == ("writing a reply", "opus 5.5", "max")
+    assert scan(p) == ("writing a reply", "opus 5.5", "max", None)
     # model/effort come from the newest assistant record even if it has no concrete action
     assert describe_config(p) == ("opus 5.5", "max")
 
 
 def test_scan_missing_file():
     from pathlib import Path
-    assert scan(Path("/no/such/file")) == (None, None, None)
+    assert scan(Path("/no/such/file")) == (None, None, None, None)
     assert describe_config(Path("/no/such/file")) == (None, None)
 
 
@@ -233,3 +233,27 @@ def test_synthetic_api_error_records_are_skipped(tmp_path):
     ])
     assert describe_config(p) == ("opus 5.5", "high")
     assert "API Error" not in (describe(p) or "")
+
+
+def test_scan_reply_ms_newest_text_record(tmp_path):
+    """SPEC §5 unread: the newest main-thread assistant text, not tools, thinking, sidechains or API errors."""
+    def rec(content, ts, **kw):
+        return {"type": "assistant", "timestamp": ts, "message": {"content": content}, **kw}
+    p = write(tmp_path / "t.jsonl", [
+        rec([{"type": "text", "text": "first"}], "2026-11-11T10:00:00.000Z"),
+        rec([{"type": "text", "text": "here is the plan"}], "2026-11-11T10:00:05.500Z"),
+        rec([{"type": "tool_use", "name": "Bash", "input": {}}], "2026-11-11T10:00:06.000Z"),
+        rec([{"type": "thinking", "thinking": "hm"}], "2026-11-11T10:00:07.000Z"),
+        rec([{"type": "text", "text": "   "}], "2026-11-11T10:00:08.000Z"),
+        rec([{"type": "text", "text": "sub-agent"}], "2026-11-11T10:00:09.000Z", isSidechain=True),
+        rec([{"type": "text", "text": "API error"}], "2026-11-11T10:00:10.000Z", isApiErrorMessage=True),
+        {"type": "user", "timestamp": "2026-11-11T10:00:11.000Z", "message": {"content": "go on"}},
+    ])
+    assert scan(p)[3] == 1794391205500
+
+
+def test_scan_reply_ms_none(tmp_path):
+    assert scan(write(tmp_path / "a.jsonl", [tool("Bash")]))[3] is None
+    # the newest text record without a usable timestamp: not an older one's
+    older = dict(assistant([{"type": "text", "text": "a"}]), timestamp="2026-11-11T10:00:00Z")
+    assert scan(write(tmp_path / "b.jsonl", [older, assistant([{"type": "text", "text": "b"}])]))[3] is None

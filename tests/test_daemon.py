@@ -452,8 +452,8 @@ def test_activity_cached_until_transcript_changes(env, monkeypatch):
     calls = []
     monkeypatch.setattr("force.daemon.activity.scan",
                       lambda path, max_len=60:
-                      (calls.append(1) or ("desc", "opus 5.5", "high")))
-    trip = ("desc", "opus 5.5", "high")
+                      (calls.append(1) or ("desc", "opus 5.5", "high", None)))
+    trip = ("desc", "opus 5.5", "high", None)
     assert d._config_for(sid) == trip
     assert len(calls) == 1
     # transcript changed, but within 3 s of the last compute -> throttled: stale value returned, no call
@@ -597,7 +597,7 @@ def test_snapshot_includes_model_effort(env, monkeypatch):
     cockpit = env.make_cockpit()
     add_live(cockpit, "portal")
     monkeypatch.setattr("force.daemon.activity.scan",
-                      lambda path, max_len=60: ("editing a.py", "opus 5.5", "high"))
+                      lambda path, max_len=60: ("editing a.py", "opus 5.5", "high", None))
     # the fake agent writes its status file and transcript just after it starts: tick once they exist
     assert wait_for(lambda: current_status(cockpit, "portal") is not None)
     d = Daemon(cockpit, FakeClock(start=1000.0))
@@ -609,7 +609,7 @@ def test_snapshot_includes_model_effort(env, monkeypatch):
     # cached: a second tick does not recompute from the transcript (still one scan call)
     calls = []
     monkeypatch.setattr("force.daemon.activity.scan",
-                      lambda path, max_len=60: (calls.append(1) or ("x", None, None)))
+                      lambda path, max_len=60: (calls.append(1) or ("x", None, None, None)))
     d.clock.advance(1)
     d.tick()
     sv2 = [s for s in read_snapshot(env.paths.snapshot).sessions if s.name == "portal"][0]
@@ -1205,3 +1205,52 @@ def test_trust_phrase_after_a_status_file_is_a_crash():
     d._seen_pid["x"] = 42
     d._step_crash()
     assert stub.restart_calls == ["x"]
+
+
+def test_unread_reply_while_working(env, monkeypatch):
+    """SPEC §5 unread: a working session that wrote text after you last looked is flagged until you open it."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    clk = FakeClock(start=1_800_000_000.0)
+    d = Daemon(cockpit, clk)
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda: [])
+    ctl(cockpit, "portal", status="busy")
+    assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
+    reply = {"ms": None}
+    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: (None, None, None, reply["ms"]))
+
+    def view():
+        return next(s for s in read_snapshot(env.paths.snapshot).sessions if s.name == "portal")
+
+    d.tick()
+    assert view().state is State.WORKING and view().unread is False     # nothing written yet
+    reply["ms"] = int(clk() * 1000)
+    d._activity.clear()                                                   # the transcript changed
+    clk.advance(1)
+    d.tick()
+    v = view()
+    assert v.state is State.WORKING and v.unread is True
+    assert "unread" in v.why
+    # you open the session: cleared, and it stays cleared once you leave again
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda: [Client("/dev/pts/9", "portal", 100, 40, 1)])
+    clk.advance(1)
+    d.tick()
+    assert view().unread is False
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda: [])
+    clk.advance(1)
+    d.tick()
+    assert view().unread is False
+
+
+def test_opencode_reply_only_on_change():
+    """An OpenCode TUI's reply time is the tick its text changed, never its first sight (SPEC §5)."""
+    d = SimpleNamespace(_oc_reply={}, _now_ms=lambda: 42)
+    pane = SimpleNamespace(pid=7, dead=False)
+
+    def reply(key, p=pane):
+        return Daemon._oc_reply_for(d, "oc", p, SimpleNamespace(reply=key))
+    assert reply("m1:5") is None                                          # first sight
+    assert reply("m1:5") is None                                          # unchanged
+    assert reply("m1:9") == 42                                            # more text
+    assert reply(None) is None                                            # not busy: nothing read
+    assert reply("m2:1", SimpleNamespace(pid=8, dead=False)) is None      # restarted: first sight again

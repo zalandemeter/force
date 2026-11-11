@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 
 _TAIL = 256 * 1024           # read at most this many bytes from the end of the transcript
@@ -149,16 +150,35 @@ def _scan_tail(transcript: Path) -> list | None:
     return lines
 
 
-def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, str | None]:
-    """(activity, model_short, effort) from the tail of `transcript`: `activity` from the newest concrete
-    assistant turn, and `model_short`/`effort` from the newest non-sidechain assistant record. All three are
-    read from the file in a single pass. model/effort are None when the file is missing/unreadable or no
-    suitable assistant record is found."""
+def _timestamp_ms(value: object) -> int | None:
+    """Epoch ms of a record's ISO-8601 `timestamp` ("2026-11-11T14:48:12.345Z"); None if absent or bad."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return int(dt.timestamp() * 1000)
+
+
+def _has_text(blocks: list) -> bool:
+    """A non-empty text block: the agent wrote you something (SPEC §5, unread)."""
+    return any(isinstance(b, dict) and b.get("type") == "text" and str(b.get("text") or "").strip()
+               for b in blocks)
+
+
+def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, str | None, int | None]:
+    """(activity, model_short, effort, reply_ms) from the tail of `transcript`: `activity` from the newest
+    concrete assistant turn, `model_short`/`effort` from the newest non-sidechain assistant record, and
+    `reply_ms` (SPEC §5, unread) from the newest one with a non-empty text block. All four are read from the
+    file in a single pass. Each is None when the file is missing/unreadable or no suitable record is found."""
     lines = _scan_tail(transcript)
     if lines is None:
-        return None, None, None
-    model = effort = None
-    newest = False
+        return None, None, None, None
+    model = effort = reply_ms = None
+    newest = replied = False
     desc = None
     for line in reversed(lines):
         if not line.strip():
@@ -185,13 +205,17 @@ def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, s
                 model = _model_short(message.get("model"))
             eff = record.get("effort")
             effort = eff if isinstance(eff, str) else None
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(blocks, list):
+            continue
         if desc is None:
-            blocks = message.get("content") if isinstance(message, dict) else None
-            if isinstance(blocks, list):
-                d = _describe_blocks(blocks)
-                if d:
-                    desc = _truncate(_single(d), max_len)
-    return desc, model, effort
+            d = _describe_blocks(blocks)
+            if d:
+                desc = _truncate(_single(d), max_len)
+        if not replied and _has_text(blocks):
+            replied = True
+            reply_ms = _timestamp_ms(record.get("timestamp"))
+    return desc, model, effort, reply_ms
 
 
 def describe(transcript: Path, max_len: int = 60) -> str | None:
@@ -202,4 +226,4 @@ def describe(transcript: Path, max_len: int = 60) -> str | None:
 
 def describe_config(transcript: Path) -> tuple[str | None, str | None]:
     """(model_short, effort) for the newest non-sidechain assistant record in `transcript`."""
-    return scan(transcript)[1:]
+    return scan(transcript)[1:3]

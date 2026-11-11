@@ -85,6 +85,8 @@ pub struct Session {
     pub kind: String,
     /// Chuck, Force's assistant (SPEC §50): shown last, with his face while idle.
     pub support: bool,
+    /// WORKING with a reply the user has not seen yet (SPEC §5): the card's icon turns blue.
+    pub unread: bool,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -195,6 +197,7 @@ fn parse_session(v: &Value) -> Option<Session> {
         note: obj.get("note").and_then(|v| v.as_str()).map(str::to_string),
         kind: obj.get("kind").and_then(|v| v.as_str()).unwrap_or("claude").to_string(),
         support: obj.get("support").and_then(|v| v.as_bool()).unwrap_or(false),
+        unread: obj.get("unread").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }
 
@@ -258,7 +261,8 @@ mod tests {
                 "version": "2.1.295", "outdated": false, "archived": false, "order": 1,
                 "cwd": "/home/alice/portal", "session_id": "s1", "pid": 123,
                 "waiting_for": null, "viewed": true, "activity": "editing app.py",
-                "mode": "auto", "model": "opus 5.5", "effort": "high", "shared": null
+                "mode": "auto", "model": "opus 5.5", "effort": "high", "shared": null,
+                "unread": true
             }]
         })
     }
@@ -295,6 +299,7 @@ mod tests {
         assert_eq!(s.name, "portal");
         assert_eq!(s.index, Some(2));
         assert_eq!(s.state, State::Working);
+        assert!(s.unread);
         assert_eq!(s.since_ms, Some(1791699990000));
         assert!(s.viewed);
         assert_eq!(s.activity.as_deref(), Some("editing app.py"));
@@ -331,6 +336,7 @@ mod tests {
         assert!(!s.outdated);
         assert!(!s.archived);
         assert!(!s.viewed);
+        assert!(!s.unread);
         assert_eq!(s.activity, None);
         assert!(s.shared.is_none());
         assert!(snap.usage.is_none());
