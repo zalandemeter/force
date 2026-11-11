@@ -178,7 +178,8 @@ fn attention_pills(snap: &Snapshot, own: Option<&str>) -> Vec<Pill> {
     let mut live: Vec<&Session> = snap
         .sessions
         .iter()
-        .filter(|s| !s.archived && s.name != own && matches!(s.state, State::NeedsYou | State::YourTurn))
+        // Chuck (SPEC §50) is not in the lists: his own row in the sidebar shows his state
+        .filter(|s| !s.archived && !s.support && s.name != own && matches!(s.state, State::NeedsYou | State::YourTurn))
         .collect();
     live.sort_by_key(|s| s.index.unwrap_or(0));
     let mut out = Vec::new();
@@ -216,7 +217,7 @@ fn truncate_name(name: &str, limit: Option<usize>) -> String {
 }
 
 fn working_count(snap: &Snapshot) -> usize {
-    snap.sessions.iter().filter(|s| !s.archived && s.state == State::Working).count()
+    snap.sessions.iter().filter(|s| !s.archived && !s.support && s.state == State::Working).count()
 }
 
 fn spinner(now_ms: i64) -> char {
@@ -293,6 +294,10 @@ pub struct Header {
     nested: Option<String>,
     host_own: Option<String>,
     host_tmux: Option<Box<dyn Tmux>>,
+    /// the `@force_host_tmux` words `host_tmux` was built from (None: injected by a test)
+    host_tmux_prefix: Option<String>,
+    /// `@force_overlay` set: the main pane shows Chuck from this machine over a remote (SPEC §50)
+    overlay: bool,
 
     prev_pills: Vec<String>,
     fade_start: HashMap<String, f64>,
@@ -378,6 +383,8 @@ impl Header {
             nested: None,
             host_own: None,
             host_tmux: None,
+            host_tmux_prefix: None,
+            overlay: false,
             prev_pills: Vec::new(),
             fade_start: HashMap::new(),
             anims: AnimMode::Full,
@@ -604,13 +611,20 @@ impl Header {
         if nested.as_deref().map_or(false, |s| !s.is_empty()) {
             self.ui_mode = true;
             self.nested = nested;
-            if self.host_tmux.is_none() {
-                let prefix = self
-                    .tmux_pane
-                    .as_ref()
-                    .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_host_tmux}"));
+            // rebuilt when the words change (Chuck's overlay, SPEC §50); a handle a test injected is kept
+            let prefix = self
+                .tmux_pane
+                .as_ref()
+                .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_host_tmux}"));
+            if self.host_tmux.is_none() || (self.host_tmux_prefix.is_some() && self.host_tmux_prefix != prefix) {
                 self.host_tmux = Some(Box::new(tmux::HostTmux::from_option(prefix.as_deref().unwrap_or(""))));
+                self.host_tmux_prefix = Some(prefix.unwrap_or_default());
             }
+            self.overlay = self
+                .tmux_pane
+                .as_ref()
+                .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_overlay}"))
+                .map_or(false, |s| !s.is_empty());
             if let (Some(h), Some(nest)) = (&self.host_tmux, &self.nested) {
                 if let Some(c) = tmux::clients(h.as_ref()).into_iter().find(|c| &c.name == nest) {
                     self.host_own = Some(c.session);
@@ -801,6 +815,18 @@ impl Header {
     }
 
     fn do_switch(&mut self, name: &str) {
+        if self.ui_mode && self.overlay {
+            // Chuck shown over a remote (SPEC §50): the window's host back in the main pane, on that session
+            if let Some(w) = self.tmux_pane.as_ref().and_then(|p| tmux::window_id(self.tmux.as_ref(), p)) {
+                let args = vec!["ui-main".to_string(), "--window".to_string(), w, "--target".to_string(),
+                                name.to_string()];
+                let bin = force_bin(std::env::var("FORCE_BIN").ok(), std::env::var("HOME").ok());
+                if let Err(e) = self.spawner.spawn(&bin, &args) {
+                    self.log_error("switch", &e);
+                }
+            }
+            return;
+        }
         if self.ui_mode {
             // split mode: switch the HOST nested client, then focus the main pane of my ui window, and optimistically
             // adopt `name` as host own + publish it (the arrival effect, if any, is the SIGUSR1 tier re-read).
@@ -1334,6 +1360,18 @@ mod tests {
         h.own = own.map(str::to_string);
         h.snapshot = snap;
         h
+    }
+
+    #[test]
+    fn chuck_is_left_out_of_the_header() {
+        let mut chuck = sess("chuck", 3, State::NeedsYou, false, None, false);
+        chuck.support = true;
+        let mut busy_chuck = sess("chuck", 3, State::Working, false, None, false);
+        busy_chuck.support = true;
+        let s = snap(vec![sess("a", 1, State::NeedsYou, false, None, false), chuck]);
+        let pills = attention_pills(&s, Some("own"));
+        assert_eq!(pills.len(), 1, "only the listed session that needs you");
+        assert_eq!(working_count(&snap(vec![sess("a", 1, State::Working, false, None, false), busy_chuck])), 1);
     }
 
     fn snap(sessions: Vec<Session>) -> Snapshot {

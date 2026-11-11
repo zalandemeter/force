@@ -988,7 +988,7 @@ impl Dialog {
             Some(s) => s
                 .sessions
                 .iter()
-                .filter(|s| !s.archived)
+                .filter(|s| !s.archived && !s.support)       // Chuck opens from his own row (SPEC §50)
                 .map(|s| JumpSession {
                     name: s.name.clone(),
                     state: s.state,

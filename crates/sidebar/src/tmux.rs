@@ -367,6 +367,26 @@ pub fn popup(t: &dyn Tmux, client: Option<&str>, env: &[(String, String)], w: u3
     t.run(&args).map(|_| ())
 }
 
+/// Chuck's card popup (SPEC §50): a rounded, quiet border and a slightly darker surface than the session behind.
+pub const CHUCK_POPUP_STYLE: [&str; 6] = ["-b", "rounded", "-S", "fg=#4e4e4e", "-s", "bg=#1c1c1c"];
+
+/// `popup` with extra display-popup options before the command (e.g. CHUCK_POPUP_STYLE).
+pub fn popup_with(t: &dyn Tmux, client: Option<&str>, env: &[(String, String)], w: u32, h: u32, extra: &[&str],
+                  command: &str) -> Result<(), String> {
+    let mut args: Vec<String> = vec!["display-popup".into(), "-E".into(), "-w".into(), format!("{}", w), "-h".into(), format!("{}", h)];
+    if let Some(c) = client {
+        args.push("-c".into());
+        args.push(c.into());
+    }
+    for (k, v) in env {
+        args.push("-e".into());
+        args.push(format!("{}={}", k, v));
+    }
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args.push(command.into());
+    t.run(&args).map(|_| ())
+}
+
 /// Single-quote `s` the way a POSIX shell does (for the popup command argument).
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))

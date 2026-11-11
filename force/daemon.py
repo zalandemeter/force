@@ -23,7 +23,6 @@ from .state import (PaneInfo, Seen, SessionView, Snapshot, State, compute_state,
                    glyph, load_seen, save_seen, write_snapshot)
 
 _UPGRADE_INTERVAL = 30.0
-SUPPORT_ORDER = 1_000_000_000   # added to the support session's snapshot order: the sidebar shows it last (SPEC §50)
 _CRASH_UNKNOWN_GRACE = 5.0
 _RELOAD_DEBOUNCE = 2.0          # SPEC §6.11: wait this long of clock time with a stable fp
 _UI_ORPHAN_SECS = 60           # a ui session without a client this long has lost its terminal
@@ -906,7 +905,8 @@ class Daemon:
         viewed = {c.session for c in clients}
         lv = claude_mod.latest_version(self.paths.claude_bin)
         live = self._live()
-        index = {e.name: i + 1 for i, e in enumerate(live)}
+        # the list's numbers (Alt+N, jump): Chuck (SPEC §50) is not in the list and has none
+        index = {e.name: i + 1 for i, e in enumerate(e for e in live if not is_support(e))}
         latest_by_kind: dict[str, str | None] = {}
         views = []
         live_names = {e.name for e in live}
@@ -992,8 +992,7 @@ class Daemon:
             views.append(SessionView(
                 name=name, index=index.get(name), state=state,
                 since_ms=since, version=pv, outdated=outdated, archived=False,
-                order=entry.order + (SUPPORT_ORDER if is_support(entry) else 0),
-                cwd=entry.cwd, session_id=entry.session_id,
+                order=entry.order, cwd=entry.cwd, session_id=entry.session_id,
                 pid=pi.pane_pid, waiting_for=(status.waiting_for if status else None),
                 viewed=name in viewed,
                 activity=act,
@@ -1178,7 +1177,7 @@ class Daemon:
     def _step_switch(self) -> None:
         if self._skipping:
             return
-        live = self._live()
+        live = [e for e in self._live() if not is_support(e)]     # Alt+N, next, previous: not Chuck (SPEC §50)
         idx = {}
         for i in range(1, 10):
             idx[f"@force_idx_{i}"] = live[i - 1].name if (i - 1) < len(live) else None

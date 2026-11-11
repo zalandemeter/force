@@ -21,6 +21,7 @@ from pathlib import Path
 from . import automation, claude, config, opencode, registry, share, state
 from .config import Config, Paths
 from . import remote as remote_mod
+from . import menus as menus_mod
 from .lifecycle import Cockpit, MoveError
 from .registry import RegistryError
 from .state import State
@@ -459,6 +460,107 @@ def build_ui_session(cockpit: Cockpit, target: str, name: str, cols: int, rows: 
            cockpit.header_command(), ";", "set-option", "-p", "@force_role", "header")
     ui.select_pane(main)
     return name
+
+
+def _ui_main_pane(ui, window: str) -> str | None:
+    """The main pane (@force_role agent) of a ui window."""
+    for line in ui.run("list-panes", "-t", window, "-F", "#{pane_id}\t#{@force_role}").splitlines():
+        pid, _, role = line.partition("\t")
+        if role == "agent":
+            return pid
+    return None
+
+
+def _ui_poke(ui, window: str) -> None:
+    """SIGUSR1 to the window's sidebar and header: they re-read the window options and redraw."""
+    try:
+        out = ui.run("list-panes", "-t", window, "-F", "#{?#{m:force-*,#{pane_current_command}},#{pane_pid},}")
+    except TmuxError:
+        return
+    for pid in out.split():
+        try:
+            os.kill(int(pid), signal.SIGUSR1)
+        except (ValueError, OSError):
+            pass
+
+
+def overlay_open(cockpit: Cockpit, window: str, name: str) -> int:
+    """Show this machine's session `name` (Chuck, SPEC §50) in the main pane of a ui window that shows a remote
+    host, without changing the host: the sidebar and header keep listing the remote's sessions. The window's host
+    options point at this machine meanwhile (so the shown session's actions, and its own switches, work here);
+    the remote's are kept in @force_overlay_back and come back with overlay_close: on a click on a remote card or
+    pill, and before every key that goes to another session."""
+    ui = cockpit.ui_tmux
+    main = _ui_main_pane(ui, window)
+    if main is None:
+        print("force: no main pane in this window", file=sys.stderr)
+        return 1
+    opt = lambda k: ui.run("show", "-wqv", "-t", window, k)
+    if not opt("@force_overlay"):
+        back = {"host": opt("@force_host"), "host_tmux": opt("@force_host_tmux"), "session": opt("@force_session")}
+        ui.run("set-option", "-w", "-t", window, "@force_overlay_back", json.dumps(back, separators=(",", ":")))
+    nested_cmd = [cockpit.cockpit_bin, "nested", name]
+    ui.run("respawn-pane", "-k", "-t", main, "-e", "FORCE_HOST=", shlex.join(nested_cmd))
+    tty = ui.run("display", "-p", "-t", main, "#{pane_tty}")
+    for k, v in (("@force_nested", tty), ("@force_host", ""), ("@force_session", name),
+                 ("@force_host_tmux", f"tmux -L {cockpit.paths.tmux_socket}"), ("@force_overlay", name)):
+        ui.run("set-option", "-w", "-t", window, k, v)
+    _ui_poke(ui, window)
+    return 0
+
+
+def overlay_close(cockpit: Cockpit, window: str, target: str | None = None, wait: bool = False,
+                  dialog: str | None = None, client: str | None = None) -> int:
+    """`force ui-main --window W [--target NAME] [--wait]`: the window's own host back in its main pane after
+    overlay_open, on `target` (default: the session it showed before). --wait: until the remote nested client
+    has reported (keys act on it next). Nothing to do without an overlay."""
+    ui = cockpit.ui_tmux
+    try:
+        raw = ui.run("show", "-wqv", "-t", window, "@force_overlay_back")
+    except TmuxError as e:
+        print(f"force: {e}", file=sys.stderr)
+        return 1
+    if not raw:
+        return 0
+    try:
+        back = json.loads(raw)
+    except ValueError:
+        back = {}
+    host = back.get("host") or ""
+    remote = remote_mod.get(cockpit.paths, host) if host else None
+    if host and remote is None:
+        print(f"force: no host {host!r}", file=sys.stderr)
+        return 1
+    main = _ui_main_pane(ui, window)
+    if main is None:
+        return 1
+    target = target or back.get("session") or ""
+    nested_cmd = [cockpit.cockpit_bin, "nested", target] + (["--remote", host] if remote else [])
+    ui.run("respawn-pane", "-k", "-t", main, "-e", f"FORCE_HOST={host}", shlex.join(nested_cmd))
+    nested = "" if remote else ui.run("display", "-p", "-t", main, "#{pane_tty}")
+    host_tmux = back.get("host_tmux") or (remote_mod.host_tmux_prefix(cockpit.paths, remote) if remote
+                                         else f"tmux -L {cockpit.paths.tmux_socket}")
+    for k, v in (("@force_nested", nested), ("@force_host", host), ("@force_session", target),
+                 ("@force_host_tmux", host_tmux)):
+        ui.run("set-option", "-w", "-t", window, k, v)
+    for k in ("@force_overlay", "@force_overlay_back"):
+        ui.run("set-option", "-wu", "-t", window, k)
+    _ui_poke(ui, window)
+    if (wait or dialog) and remote:
+        deadline = time.time() + 10
+        while time.time() < deadline and not ui.run("show", "-wqv", "-t", window, "@force_nested"):
+            time.sleep(0.1)
+    if dialog in menus_mod.DIALOGS and client:
+        # the dialog the menu item opens, now with the window's own host (menus.split host_first)
+        w, h = menus_mod.DIALOGS[dialog]
+        opt = lambda k: ui.run("show", "-wqv", "-t", window, k)
+        sess_name = ui.run("display", "-p", "-t", window, "#{session_name}")
+        glyphs = ui.run("show", "-qv", "-t", "=" + sess_name + ":", "@force_glyphs")
+        ui.run("display-popup", "-c", client, "-e", f"FORCE_HOST={opt('@force_host')}",
+               "-e", f"FORCE_CLIENT={opt('@force_nested')}", "-e", f"FORCE_SESSION={opt('@force_session')}",
+               "-e", f"FORCE_GLYPHS={glyphs}", "-E", "-w", str(w), "-h", str(h),
+               f"{shlex.quote(cockpit.cockpit_bin)} dialog {dialog}")
+    return 0
 
 
 def nested_command(cockpit: Cockpit, target: str, remote_name: str | None = None, report: str | None = None) -> int:
@@ -1282,7 +1384,8 @@ def list_command(cockpit: Cockpit, all_: bool, json_: bool) -> int:
         print(json.dumps(snap.to_json(), indent=2))
         return 0
 
-    rows = [s for s in snap.sessions if all_ or not s.archived]
+    # Chuck (SPEC §50) is not a list entry (--json still has him, marked "support")
+    rows = [s for s in snap.sessions if (all_ or not s.archived) and not s.support]
     rows.sort(key=lambda s: (s.archived, s.index if s.index is not None else 0))
 
     width = max([len(s.name) for s in rows] + [4])
@@ -1318,7 +1421,8 @@ def _current_session(cockpit: Cockpit, client: str | None) -> str | None:
 
 def switch_command(cockpit: Cockpit, name: str | None, index: int | None,
                   next_: bool, prev_: bool, client: str | None) -> int:
-    live = [e.name for e in registry.load(cockpit.paths.registry).live()]
+    # the session list (Alt+N, next, previous): without Chuck (SPEC §50), who opens from his own button
+    live = [e.name for e in registry.load(cockpit.paths.registry).live() if not registry.is_support(e)]
     if name:
         target = name
     elif index is not None:
@@ -1333,8 +1437,8 @@ def switch_command(cockpit: Cockpit, name: str | None, index: int | None,
         cur = _current_session(cockpit, client)
         if cur in live:
             i = live.index(cur)
-        else:
-            i = 0 if next_ else -1
+        else:                   # from outside the list (Chuck): next is the first, previous the last
+            i = -1 if next_ else 0
         step = 1 if next_ else -1
         target = live[(i + step) % len(live)]
     else:
@@ -2243,6 +2347,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("install-to", help="copy this release to another machine over ssh and install it there")
     p.add_argument("ssh")
 
+    p = sub.add_parser("ui-main", help="a ui window's own host back in its main pane after Chuck (internal)")
+    p.add_argument("--window", required=True)
+    p.add_argument("--target", default=None)
+    p.add_argument("--wait", action="store_true")
+    p.add_argument("--dialog", default=None, help="then open this dialog (jump, new, archived) for the host")
+    p.add_argument("--client", default=None)
+
     p = sub.add_parser("ui-host", help="show another host in a ui window (internal, host picker)")
     p.add_argument("name")
     p.add_argument("--window", required=True)
@@ -2432,6 +2543,8 @@ def _dispatch(args) -> int:
         return settings_command(cockpit, args.action, args.key, args.value, args.all, args.json)
     if cmd == "install-to":
         return install_to_command(cockpit, args.ssh)
+    if cmd == "ui-main":
+        return overlay_close(cockpit, args.window, args.target, args.wait, args.dialog, args.client)
     if cmd == "ui-host":
         return ui_host_command(cockpit, args.name, args.window, args.attention)
     if cmd == "hosts-menu":

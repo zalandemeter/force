@@ -298,6 +298,8 @@ class Snapshot:
         """Keys needs_you, working, your_turn, idle, stale, down (live sessions only; STARTING/UNKNOWN not counted)."""
         counts = {"needs_you": 0, "working": 0, "your_turn": 0, "idle": 0, "stale": 0, "down": 0}
         for s in self.sessions:
+            if s.support:          # Chuck (SPEC §50) is not in the session list: his state shows on his own row
+                continue
             if s.archived:
                 continue
             if s.state is State.NEEDS_YOU:

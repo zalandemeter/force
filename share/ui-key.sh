@@ -11,6 +11,19 @@ nested=$(t display -p -t "$W" '#{@force_nested}')
 sess=$(t display -p -t "$W" '#{@force_session}')
 [ -n "$htmux" ] || htmux="tmux -L force"
 f() { FORCE_HOST="$host" "${FORCE_BIN:-$HOME/.local/bin/force}" "$@"; }
+# Chuck shown over a remote (SPEC §50, @force_overlay): going to another session first brings the window's own
+# host back in the main pane; the shown session's own actions (restart, upgrade) stay with Chuck here
+case "$A" in
+  idx|next|prev|last|newshell|restart-all|up|down)
+    if [ -n "$(t display -p -t "$W" '#{@force_overlay}')" ]; then
+      "${FORCE_BIN:-$HOME/.local/bin/force}" ui-main --window "$W" --wait >/dev/null 2>&1
+      host=$(t display -p -t "$W" '#{@force_host}')
+      htmux=$(t display -p -t "$W" '#{@force_host_tmux}')
+      nested=$(t display -p -t "$W" '#{@force_nested}')
+      sess=$(t display -p -t "$W" '#{@force_session}')
+      [ -n "$htmux" ] || htmux="tmux -L force"
+    fi ;;
+esac
 # The session the nested client shows now, asked from its host (@force_session can lag a switch by a
 # sidebar poll); published to the window, and the sidebar and header poked to redraw. A remote's shell
 # reads the format, so it is quoted for it.
