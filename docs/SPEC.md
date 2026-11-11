@@ -192,6 +192,11 @@ Each step catches and logs its own exceptions; one bad session never stops the l
    `crash_window_minutes` per session; after that leave it DOWN and log it. Exit status 0 (user
    typed `/exit`) → leave it DOWN. Deaths caused by force (upgrade, rename, restart, archive) are
    marked in memory before force sends the signal.
+   **Trust declined**: a dead Claude pane whose screen still shows the "trust this folder?" question
+   (`TRUST_MARKERS`) was answered "No, exit" (exit 1) or Esc (exit 0): never restarted, it would only ask
+   again. A session that has no conversation yet (no transcript: just created there) is deleted (§20) and
+   logged; any other (moved to a folder Claude does not trust yet, §7.7; Chuck, §50) stays DOWN with the
+   activity "folder not trusted" until it is restarted, moved back or deleted.
 5. **Auto-upgrade** (every 30 s, if `auto_upgrade`): session is outdated, state IDLE / YOUR_TURN /
    STALE, `now - statusUpdatedAt ≥ upgrade_idle_minutes`, and no client attached to its tmux
    session → restart it (§7.3). Never touch WORKING, NEEDS_YOU, STARTING.
@@ -294,7 +299,8 @@ a folder (the Move popup: `f` in the Force menu; it always passes an absolute pa
 A busy session (working / needs you) gets `extra.pending_move`; the daemon moves it once idle and its card
 says "moves after this turn". While moving, `extra.moving` makes the card say "moving", then "moved" for
 the restart's first seconds (`extra.moved_at`). A folder Claude has not been trusted in asks its trust
-question in the pane, as for a new session there.
+question in the pane, as for a new session there; declining it leaves the moved session down, never deleted
+(§6.4).
 
 ## 8. CLI (`force/cli.py`, argparse, entry point `force`)
 
@@ -520,7 +526,8 @@ daemon never restores it), move viewing clients to another live session, stop th
 session, delete force's archive copy `archive/<session_id>` (uuid-checked, never a symlink). Claude
 Code's own transcript in `~/.claude/projects` is left alone (Claude removes it after 30 days). Busy
 sessions need force; the CLI asks y/N on a terminal and needs `--yes` otherwise. `f` (`force forget`)
-removes only the registry entry of an archived session and keeps the archive.
+removes only the registry entry of an archived session and keeps the archive. The daemon deletes a new
+Claude session the same way when its folder's trust question is declined (§6.4).
 
 ## 21. Plan usage bars
 

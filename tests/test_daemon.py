@@ -78,10 +78,12 @@ class FakeClock:
 
 # --- crash detection exit-reason unknown --------------------------------------
 class _StubPane:
-    def __init__(self, dead=True, dstat=None, dsig=None):
+    def __init__(self, dead=True, dstat=None, dsig=None, pid=None):
         self.dead = dead
         self.dead_status = dstat
         self.dead_signal = dsig
+        self.pid = pid
+        self.pane_id = "%0"
 
 
 def _crash_stub():
@@ -1149,3 +1151,57 @@ def test_title_sync_ready_when_the_status_file_says_connected():
     assert title_sync_ready("long conversation…\n────\n❯ \n────", connected=True)
     assert not title_sync_ready("❯ 1. docs/ in o\n  2. other", connected=True), "an open menu is not an empty input"
     assert not title_sync_ready("────\n❯ yes, merge it\n────", connected=True), "a draft"
+
+
+_TRUST_SCREEN = ("Accessing workspace:\n /tmp\n Is this a project you created or one you trust?\n ❯ No, exit\n"
+                 "   Yes, I trust this folder\n")
+
+
+def _decline_trust(cockpit, name, d, monkeypatch, status=1):
+    """The agent exits at the trust question: its screen still shows it (SPEC §6.4)."""
+    before = current_pid(cockpit, name)
+    monkeypatch.setattr(cockpit.tmux, "capture_tail", lambda pane, lines=6: _TRUST_SCREEN)
+    ctl(cockpit, name, exit=status)
+    assert wait_for(lambda: cockpit.agent_pane(name) is not None and cockpit.agent_pane(name).dead)
+    for _ in range(3):
+        d.clock.advance(6)          # past the exit-reason grace, should tmux report none
+        d.tick()
+    return before
+
+
+@pytest.mark.parametrize("status", [1, 0])      # "No, exit" exits 1, Esc 0
+def test_trust_declined_deletes_a_new_session(env, monkeypatch, status):
+    """Declining a new session's folder deletes the session instead of restarting it into the question again."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    monkeypatch.setattr("force.daemon.claude_mod.find_transcript", lambda claude_dir, sid: None)   # no conversation
+    d = Daemon(cockpit, FakeClock())
+    _decline_trust(cockpit, "portal", d, monkeypatch, status)
+    assert load(env.paths.registry).get("portal") is None
+    assert not cockpit.tmux.has_session("portal")
+    assert all(s.name != "portal" for s in read_snapshot(env.paths.snapshot).sessions)
+
+
+def test_trust_declined_keeps_a_session_with_a_conversation(env, monkeypatch):
+    """A session moved to a folder Claude does not trust yet is never deleted: it stays down, not restarted."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    d = Daemon(cockpit, FakeClock())
+    before = _decline_trust(cockpit, "portal", d, monkeypatch)
+    assert load(env.paths.registry).get("portal") is not None
+    assert current_pid(cockpit, "portal") == before and cockpit.agent_pane("portal").dead     # not restarted
+    v = next(s for s in read_snapshot(env.paths.snapshot).sessions if s.name == "portal")
+    assert v.state is State.DOWN and v.activity == "folder not trusted"
+    assert "trust-folder question was declined" in v.why
+
+
+def test_trust_phrase_after_a_status_file_is_a_crash():
+    """A pane that wrote a status file got past the question: the phrase on its screen is conversation text, and a
+    crash restarts it as usual."""
+    d, stub = _crash_stub()
+    stub.tmux = SimpleNamespace(capture_tail=lambda pane, lines=6: _TRUST_SCREEN)
+    stub.delete = lambda name: pytest.fail("deleted")
+    stub.agent_pane = lambda name: _StubPane(dead=True, dstat=1, pid=42)
+    d._seen_pid["x"] = 42
+    d._step_crash()
+    assert stub.restart_calls == ["x"]

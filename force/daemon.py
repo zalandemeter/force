@@ -135,6 +135,7 @@ def shown_activity(status, act: str | None) -> str | None:
 
 
 TRUST_ACTIVITY = "trust this folder?"
+TRUST_DECLINED_ACTIVITY = "folder not trusted"
 TRUST_MARKERS = ("yes, i trust this folder", "is this a project you created or one you trust")
 
 
@@ -624,6 +625,9 @@ class Daemon:
                 self._crash_unknown.pop(entry.name, None)
             else:
                 self._crash_unknown.pop(entry.name, None)
+            if self._declined_trust(entry, pane):
+                self._delete_if_new(entry)       # a restart would only ask again
+                continue
             if pane.dead_status == 0 and not pane.dead_signal:
                 continue  # exit status 0 -> leave DOWN
             restarts = self._crash_restarts.setdefault(entry.name, [])
@@ -756,6 +760,25 @@ class Daemon:
         except Exception:
             return False
         return any(m in screen for m in TRUST_MARKERS)
+
+    def _declined_trust(self, entry, pane) -> bool:
+        """SPEC §6.4: a dead Claude pane that still shows the trust question was answered "No, exit" or Esc. A pane
+        that wrote a status file got past the question: the phrase on its screen is conversation text."""
+        return (is_claude(entry) and pane.dead and self._seen_pid.get(entry.name) != pane.pid
+                and self._asks_trust(pane.pane_id))
+
+    def _delete_if_new(self, entry) -> None:
+        """SPEC §6.4, trust declined: delete a session that has no conversation yet (just created in that folder);
+        any other (moved there, Chuck) stays DOWN."""
+        if is_support(entry) or claude_mod.find_transcript(self.paths.claude_dir, entry.session_id) is not None:
+            return
+        try:
+            self.cockpit.delete(entry.name)
+            print(f"force: deleted {entry.name}: its folder was not trusted", file=sys.stderr)
+        except Exception as ex:
+            print(f"force: deleting {entry.name} (folder not trusted) failed: {ex}", file=sys.stderr)
+        self._registry = self._load()
+        self._pinfo_dirty = True
 
     def _step_pending_move(self) -> None:
         """`force move NAME DIR` on a busy session marks it; move it once it is no longer busy (§7.7)."""
@@ -941,6 +964,9 @@ class Daemon:
                     and pi.pane_alive and self._asks_trust(_pane.pane_id):
                 state, act = State.NEEDS_YOU, TRUST_ACTIVITY
                 clauses.append("screen shows the trust-folder question")
+            elif state is State.DOWN and _pane is not None and self._declined_trust(entry, _pane):
+                act = TRUST_DECLINED_ACTIVITY
+                clauses.append("the trust-folder question was declined")
             title = clean_title(_pane.title if _pane else None, name, host) or card.title
             # reported state (SPEC §43.2)
             rep = report_mod.read(self.paths, name)
