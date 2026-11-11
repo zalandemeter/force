@@ -1,17 +1,18 @@
-  [1;38;2;255;255;255mForce[0m  [38;2;128;128;128mkeys[0m
 
-  [38;2;217;119;87mCtrl+Space[0m     [38;2;198;198;198mthe Force menu: every action, each with its letter[0m
-  [38;2;217;119;87m[0m               [38;2;198;198;198m[38;2;128;128;128me.g. Ctrl+Space then n new session, j jump, f folder[0m[0m
-  [38;2;217;119;87m[0m               [38;2;198;198;198m[38;2;128;128;128malso Ctrl+\, or the [0m[38;2;198;198;198m? controls[0m[38;2;128;128;128m button in the top bar[0m[0m
-  [38;2;217;119;87mAlt+PgUp PgDn[0m  [38;2;198;198;198mprevious / next session[0m
-  [38;2;217;119;87mAlt+1…9[0m        [38;2;198;198;198msession N        Alt+↑ ↓  previous / next[0m
-  [38;2;217;119;87m[0m               [38;2;198;198;198m[38;2;128;128;128m(Tilix and Terminator keep these for their own panes)[0m[0m
-  [38;2;217;119;87mclick[0m          [38;2;198;198;198ma sidebar row, a header chip, the host chip[0m
-  [38;2;217;119;87mCtrl+Space ?[0m   [38;2;198;198;198mask Chuck, Force's assistant (or the sidebar's ask chuck)[0m
+  [1;38;2;255;255;255mForce keys[0m                               [38;2;138;138;138mCtrl+\ opens the menu too[0m
+  [38;2;60;60;60m──────────────────────────────────────────────────────────────────[0m
 
-  [38;2;217;119;87mcopy[0m           [38;2;198;198;198mdrag selects, right click copies[0m
-  [38;2;217;119;87mnew line[0m       [38;2;198;198;198mAlt+Enter or Ctrl+J; Shift+Enter where the term sends it[0m
-  [38;2;217;119;87mquit[0m           [38;2;198;198;198mCtrl+Space q or × in the top bar: sessions keep running[0m
-  [38;2;217;119;87mmode badge[0m     [38;2;198;198;198mA auto   E accept edits   P plan   M manual   B bypass[0m
+  [38;2;217;119;87mCtrl+Space      [0m[38;2;198;198;198mthe menu: every action, each with its letter[0m
+  [38;2;217;119;87mCtrl+Space ?    [0m[38;2;198;198;198mask Chuck, Force's assistant[0m
+  [38;2;217;119;87mAlt+↑ ↓         [0m[38;2;198;198;198mprevious / next session (also Alt+PgUp PgDn)[0m
+  [38;2;217;119;87mAlt+1…9         [0m[38;2;198;198;198msession N (Tilix and Terminator keep these)[0m
+  [38;2;217;119;87mclick           [0m[38;2;198;198;198ma sidebar row, a header chip, the host chip[0m
 
-  [38;2;128;128;128many key closes this help[0m
+  [38;2;217;119;87mdrag            [0m[38;2;198;198;198mselects; right click copies[0m
+  [38;2;217;119;87mAlt+Enter       [0m[38;2;198;198;198ma new line (also Ctrl+J)[0m
+  [38;2;217;119;87mCtrl+Space q    [0m[38;2;198;198;198mquit; sessions keep running (also × in the top bar)[0m
+
+  [38;2;217;119;87mmode badge      [0m[38;2;198;198;198mA auto · E edits · P plan · M manual · B bypass[0m
+
+                                                      [38;2;138;138;138many key  Close[0m
+

@@ -367,8 +367,9 @@ pub fn popup(t: &dyn Tmux, client: Option<&str>, env: &[(String, String)], w: u3
     t.run(&args).map(|_| ())
 }
 
-/// Chuck's card popup (SPEC §50): a rounded, quiet border and a slightly darker surface than the session behind.
-pub const CHUCK_POPUP_STYLE: [&str; 6] = ["-b", "rounded", "-S", "fg=#4e4e4e", "-s", "bg=#1c1c1c"];
+/// Chuck's card popup (SPEC §50): the bars' surface (#212121) and a rounded light grey border, as the menu's
+/// (force/cards.py POPUP_STYLE).
+pub const CHUCK_POPUP_STYLE: [&str; 6] = ["-b", "rounded", "-S", "fg=#4e4e4e,bg=#212121", "-s", "bg=#212121"];
 
 /// `popup` with extra display-popup options before the command (e.g. CHUCK_POPUP_STYLE).
 pub fn popup_with(t: &dyn Tmux, client: Option<&str>, env: &[(String, String)], w: u32, h: u32, extra: &[&str],

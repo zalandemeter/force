@@ -17,12 +17,13 @@ import sys
 from pathlib import Path
 
 SHARE = Path(__file__).resolve().parent.parent / "share"
+from .cards import POPUP_STYLE
 FORCE = "$FORCE_BIN"          # set by tmux.conf / tmux-ui.conf (the live launcher unless an instance, SPEC §2.1)
 APP = "#{@force_app}/share"
-HELP_W, HELP_H = 80, 19          # the help popup (share/help.ansi fits inside, tests/test_keys.py checks)
+HELP_W, HELP_H = 72, 20          # the key help card (share/help.ansi fits inside, tests/test_keys.py checks)
 DIALOGS = {"jump": (64, 20), "new": (64, 17), "archived": (72, 20)}    # popup sizes (cli.overlay_close reopens them)
 CHUCK_W, CHUCK_H = 72, 17        # Chuck's card (force support --ui, SPEC §50)
-CHUCK_STYLE = '-b rounded -S "fg=#4e4e4e" -s "bg=#1c1c1c"'    # as the sidebar's (tmux.rs CHUCK_POPUP_STYLE)
+CHUCK_STYLE = CARD_STYLE = POPUP_STYLE    # the cards' popups: the bars' surface, a light grey border (force/cards.py)
 
 # (key, label, action, core). None = a separator. Keys are letters (Shift is fine on any layout), Tab and ?,
 # never arrows: tmux matches an item's key before its own navigation, so arrows stay free to move in the menu.
@@ -57,7 +58,7 @@ def _common() -> dict[str, str]:
     return {
         "sidebar": f"run-shell -b \"{APP}/sidebar-toggle.sh '#{{socket_path}}' '#{{window_id}}'\"",
         "health": f"display-popup -E -w 90 -h 24 \"{APP}/doctor-popup.sh\"",
-        "help": f"display-popup -E -w {HELP_W} -h {HELP_H} \"{APP}/show-help.sh\"",
+        "help": f"display-popup {CARD_STYLE} -E -w {HELP_W} -h {HELP_H} \"{APP}/show-help.sh\"",
         "quit": "detach-client",
     }
 

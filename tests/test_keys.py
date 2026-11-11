@@ -170,3 +170,9 @@ def test_a_shell_selection_stays_until_a_right_click_copies_it(tmp_path):
     finally:
         subprocess.run(to + ["kill-server"], capture_output=True)
         subprocess.run(ti + ["kill-server"], capture_output=True)
+
+
+def test_help_card_is_generated():
+    import subprocess, sys
+    r = subprocess.run([sys.executable, "-m", "force.cards", "--check"], cwd=ROOT, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

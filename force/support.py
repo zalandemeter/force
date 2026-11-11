@@ -199,52 +199,7 @@ def ensure_session(cockpit) -> str:
 
 
 # --------------------------------------------------------------------------- the card --------------------
-# the card (SPEC §50): Force's palette; the popup is 72 x 17, so 70 x 15 inside its border
-_RGB = {"coral": (217, 119, 87), "white": (255, 255, 255), "name": (198, 198, 198), "grey": (138, 138, 138),
-        "dim": (95, 95, 95), "rule": (60, 60, 60), "ink": (38, 38, 38)}
-CARD_W = 68
-USES = (  # (rich icon, plain icon, what, how)
-    ("\uf059", "?", "How does something work?", "answers from your version's docs"),
-    ("\uf013", "*", "Set it up for me", "hosts, notifications, settings"),
-    ("\uf188", "!", "Report a bug or an idea", "checks for duplicates first"),
-    ("\uf0ad", "+", "Help fix it", "builds the fix and the pull request"),
-    ("\uf023", "#", "A security problem", "an email, never in public"),
-)
-
-
-def _c(text: str, fg: str | None = None, bg: str | None = None, bold: bool = False, color: bool = True) -> str:
-    if not color:
-        return text
-    codes = (["1"] if bold else []) + ([f"38;2;{';'.join(map(str, _RGB[fg]))}"] if fg else []) \
-        + ([f"48;2;{';'.join(map(str, _RGB[bg]))}"] if bg else [])
-    return f"\x1b[{';'.join(codes)}m{text}\x1b[0m" if codes else text
-
-
-def card_text(agent: str | None, rich: bool, color: bool = True, buttons: bool = True) -> str:
-    """Chuck's card: who he is, what he does, what it costs, and (in the popup) the two keys."""
-    label = {"claude": "Claude Code", "opencode": "OpenCode"}.get(agent or "", "agent")
-    face = "\uf118" if rich else ":)"
-    tag = "Force's assistant"
-    head_w = 2 + len(face) + 2 + len("Chuck")
-    lines = ["",
-             "  " + _c(face, "coral", color=color) + "  " + _c("Chuck", "white", bold=True, color=color)
-             + " " * (CARD_W - head_w - len(tag)) + _c(tag, "grey", color=color),
-             "  " + _c("─" * (CARD_W - 2), "rule", color=color),
-             ""]
-    for icon_r, icon_p, what, how in USES:
-        icon = icon_r if rich else icon_p
-        lines.append("  " + _c(icon, "coral", color=color) + "  " + _c(f"{what:<27}", "name", color=color)
-                     + _c(how, "grey", color=color))
-    lines += ["",
-              "  " + _c(f"Runs on your {label} and plan, so each answer uses your tokens.", "dim", color=color),
-              "  " + _c("Nothing goes to GitHub without your click.", "dim", color=color)]
-    if buttons:
-        enter = " Enter  Talk to Chuck "
-        esc = "Esc  Close"
-        pad = CARD_W - len(enter) - 3 - len(esc)
-        lines += ["", " " * pad + _c(enter, "ink", "coral", bold=True, color=color) + "   "
-                  + _c(esc, "grey", color=color), ""]
-    return "\n".join(lines)
+from .cards import CARD_W, USES, card_text    # noqa: E402,F401  (Chuck's card lives with the other cards)
 
 
 def open_command(cockpit, ui: bool = False) -> int:
