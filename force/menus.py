@@ -20,7 +20,9 @@ SHARE = Path(__file__).resolve().parent.parent / "share"
 FORCE = "$FORCE_BIN"          # set by tmux.conf / tmux-ui.conf (the live launcher unless an instance, SPEC §2.1)
 APP = "#{@force_app}/share"
 HELP_W, HELP_H = 80, 19          # the help popup (share/help.ansi fits inside, tests/test_keys.py checks)
-CHUCK_W, CHUCK_H = 72, 18        # Chuck's card (force support --ui, SPEC §50)
+DIALOGS = {"jump": (64, 20), "new": (64, 17), "archived": (72, 20)}    # popup sizes (cli.overlay_close reopens them)
+CHUCK_W, CHUCK_H = 72, 17        # Chuck's card (force support --ui, SPEC §50)
+CHUCK_STYLE = '-b rounded -S "fg=#4e4e4e" -s "bg=#1c1c1c"'    # as the sidebar's (tmux.rs CHUCK_POPUP_STYLE)
 
 # (key, label, action, core). None = a separator. Keys are letters (Shift is fine on any layout), Tab and ?,
 # never arrows: tmux matches an item's key before its own navigation, so arrows stay free to move in the menu.
@@ -71,7 +73,7 @@ def classic() -> tuple[str, dict[str, str]]:
         return f"run-shell -b \"{FORCE} {args} >/dev/null\""
 
     return s, {
-        "chuck": f"display-popup -E -w {CHUCK_W} -h {CHUCK_H} \"{FORCE} support --ui\"",
+        "chuck": f"display-popup {CHUCK_STYLE} -E -w {CHUCK_W} -h {CHUCK_H} \"{FORCE} support --ui\"",
         "jump": pop(64, 20, "jump"),
         "prev": "switch-client -l",
         "host": "display-message -d 4000 \" switching hosts needs the split layout: force ui split, then run force again \"",
@@ -106,13 +108,19 @@ def split() -> tuple[str, dict[str, str]]:
     def key(action: str) -> str:
         return f"run-shell -b \"{APP}/ui-key.sh '#{{socket_path}}' '#{{window_id}}' {action}\""
 
+    def host_first(kind: str, cmd: str) -> str:
+        """Chuck shown over a remote (SPEC §50): the window's host back in the main pane first, then the dialog with
+        that host's values (ui-main opens it: tmux fills a popup's -e values before a restore could change them)."""
+        return (f"if-shell -F \"#{{@force_overlay}}\" \"run-shell -b '{FORCE} ui-main --window #{{window_id}} --wait "
+                f"--dialog {kind} --client #{{client_name}}'\" \"{cmd.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))}\"")
+
     return s, {
-        "chuck": f"display-popup {env} -e \"FORCE_WINDOW=#{{window_id}}\" -E -w {CHUCK_W} -h {CHUCK_H} "
+        "chuck": f"display-popup {env} -e \"FORCE_WINDOW=#{{window_id}}\" {CHUCK_STYLE} -E -w {CHUCK_W} -h {CHUCK_H} "
                  f"\"{FORCE} support --ui\"",
-        "jump": pop(64, 20, "jump"),
+        "jump": host_first("jump", pop(*DIALOGS["jump"], "jump")),
         "prev": key("last"),
         "host": f"run-shell -b \"{FORCE} hosts-menu --client '#{{client_name}}' --window '#{{window_id}}'\"",
-        "new": pop(64, 17, "new"),
+        "new": host_first("new", pop(*DIALOGS["new"], "new")),
         "newshell": "command-prompt -p \" new shell name:\" "
                     f"\"run-shell -b \\\"{APP}/ui-key.sh '#{{socket_path}}' '#{{window_id}}' newshell '%%'\\\"\"",
         "rename": pop(64, 12, f"rename '{s}'"),
@@ -123,7 +131,7 @@ def split() -> tuple[str, dict[str, str]]:
         "upgrade": key("upgrade"),
         "archive": pop(64, 12, f"archive '{s}'"),
         "delete": pop(64, 12, f"delete '{s}'"),
-        "archived": pop(72, 20, "archived"),
+        "archived": host_first("archived", pop(*DIALOGS["archived"], "archived")),
         "restart-all": key("restart-all"),
         **_common(),
     }

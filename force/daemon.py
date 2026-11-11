@@ -1177,7 +1177,7 @@ class Daemon:
     def _step_switch(self) -> None:
         if self._skipping:
             return
-        live = self._live()
+        live = [e for e in self._live() if not is_support(e)]     # Alt+N, next, previous: not Chuck (SPEC §50)
         idx = {}
         for i in range(1, 10):
             idx[f"@force_idx_{i}"] = live[i - 1].name if (i - 1) < len(live) else None

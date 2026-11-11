@@ -127,6 +127,10 @@ pub struct App {
     nested: Option<String>,
     host_own: Option<String>,
     host_tmux: Option<Box<dyn Tmux>>,
+    /// the `@force_host_tmux` words `host_tmux` was built from (None: injected by a test, kept as it is)
+    host_tmux_prefix: Option<String>,
+    /// `@force_overlay` set: the main pane shows Chuck from this machine over a remote's list (SPEC §50)
+    overlay: bool,
 
     items: Vec<Item>,
     offset: usize,
@@ -305,6 +309,8 @@ impl App {
             nested: None,
             host_own: None,
             host_tmux: None,
+            host_tmux_prefix: None,
+            overlay: false,
             items: Vec::new(),
             offset: 0,
             list_h: 0,
@@ -574,8 +580,9 @@ impl App {
     fn chuck_status(&self) -> (bool, Option<State>) {
         let chuck = self.snapshot.as_ref().and_then(|s| s.sessions.iter().find(|s| s.support && !s.archived));
         match chuck {
-            Some(c) => (self.display_own() == Some(c.name.as_str()), Some(c.state)),
-            None => (false, None),
+            Some(c) => (self.overlay || self.display_own() == Some(c.name.as_str()), Some(c.state)),
+            // a remote's list has no Chuck of this machine: lit while he is shown over it
+            None => (self.overlay, None),
         }
     }
 
@@ -600,14 +607,21 @@ impl App {
         if nested.as_deref().map_or(false, |s| !s.is_empty()) {
             self.ui_mode = true;
             self.nested = nested;
-            if self.host_tmux.is_none() {
-                // build the host handle from @force_host_tmux words (cached; a test may pre-inject its own).
-                let prefix = self
-                    .tmux_pane
-                    .as_ref()
-                    .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_host_tmux}"));
+            // the host handle from @force_host_tmux words, rebuilt when they change (Chuck's overlay points them at
+            // this machine and back, SPEC §50); a handle a test injected is kept
+            let prefix = self
+                .tmux_pane
+                .as_ref()
+                .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_host_tmux}"));
+            if self.host_tmux.is_none() || (self.host_tmux_prefix.is_some() && self.host_tmux_prefix != prefix) {
                 self.host_tmux = Some(Box::new(tmux::HostTmux::from_option(prefix.as_deref().unwrap_or(""))));
+                self.host_tmux_prefix = Some(prefix.unwrap_or_default());
             }
+            self.overlay = self
+                .tmux_pane
+                .as_ref()
+                .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_overlay}"))
+                .map_or(false, |s| !s.is_empty());
             if let (Some(h), Some(nest)) = (&self.host_tmux, &self.nested) {
                 if let Some(c) = tmux::clients(h.as_ref()).into_iter().find(|c| &c.name == nest) {
                     self.host_own = Some(c.session);
@@ -935,6 +949,17 @@ impl App {
         // A click proves this window is looked at: the clicked card is current at once. The snapshot's `viewed`
         // follows only after the daemon's next tick (~1 s) and, on a ui on another computer, the snapshot copy.
         self.view_for(CLICK_VIEWED_MS);
+        if self.ui_mode && self.overlay {
+            // Chuck shown over a remote (SPEC §50): the window's host back in the main pane, on this card
+            if let Some(w) = self.tmux_pane.as_ref().and_then(|p| tmux::window_id(self.tmux.as_ref(), p)) {
+                let args = vec!["ui-main".to_string(), "--window".to_string(), w, "--target".to_string(),
+                                target.to_string()];
+                if let Err(e) = crate::header::Spawner::spawn(&crate::header::RealSpawner, &self.cockpit_bin, &args) {
+                    self.show_error(format!("switch: {}", e));
+                }
+            }
+            return;
+        }
         if self.ui_mode {
             // split mode: switch on the HOST (the nested client), then focus the main pane of my ui window.
             let client = match &self.nested {
@@ -992,7 +1017,8 @@ impl App {
             }
         }
         let command = format!("{} support --ui", tmux::shell_quote(&self.cockpit_bin));
-        if let Err(e) = tmux::popup(self.tmux.as_ref(), client.as_deref(), &env, 72, 18, &command) {
+        if let Err(e) = tmux::popup_with(self.tmux.as_ref(), client.as_deref(), &env, 72, 17,
+                                         &tmux::CHUCK_POPUP_STYLE, &command) {
             self.show_error(format!("chuck: {}", e));
         }
     }
@@ -2893,7 +2919,10 @@ mod tests {
         a.activate(CHUCK_TARGET);
         let log = log.lock().unwrap();
         let e = log.iter().find(|e| e.first().map(|s| s.as_str()) == Some("display-popup")).expect("a popup");
-        assert_eq!(&e[1..6], &["-E", "-w", "72", "-h", "18"]);
+        assert_eq!(&e[1..6], &["-E", "-w", "72", "-h", "17"]);
+        for w in crate::tmux::CHUCK_POPUP_STYLE {
+            assert!(e.iter().any(|x| x == w), "styled like the menu's: {w}");
+        }
         assert_eq!(e.last().unwrap(), &format!("{} support --ui", crate::tmux::shell_quote("/bin/true")));
     }
 
@@ -3878,6 +3907,27 @@ mod tests {
         let col = row_text(&g, y)[..label].chars().count();
         assert_eq!(g.row(y)[col].fg, m::GREY);
         assert_eq!(g.row(y)[1].fg, m::PANEL_RULE);
+    }
+
+    #[test]
+    fn chuck_over_a_remotes_list_lights_his_row() {
+        // a remote's list has no Chuck; @force_overlay says he is in the main pane (SPEC §50)
+        let (tmux, _) = FakeTmux::new();
+        let sessions = vec![sess("r0", 0, State::Idle, false, true)];
+        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] };
+        let mut a = app_with(tmux);
+        a.on_resize(28, 40);
+        a.set_now(NOW);
+        a.own = Some("chuck".into());
+        a.update_from_snapshot(Some(snap), NOW);
+        a.overlay = true;
+        let g = a.build_grid_at(NOW);
+        let y = chuck_row(&a, &g);
+        assert_eq!(g.row(y)[1].fg, m::ACCENT);
+        assert!(!a.items.iter().any(|i| i.is_session && i.current));
+        a.overlay = false;
+        let g = a.build_grid_at(NOW);
+        assert_eq!(g.row(chuck_row(&a, &g))[1].fg, m::PANEL_RULE);
     }
 
     #[test]
