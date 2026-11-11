@@ -29,12 +29,14 @@ def _q(url):
 
 
 def test_bug_link_fills_the_form_by_field_id():
-    url, short = support.issue_link("bug", "Sidebar flickers", {
-        "what": "it flickers", "where": "The cockpit itself (sidebar, header, menu, keys)", "version": "force 1.0.3"})
+    url, short = support.issue_link("bug", "Sidebar flickers", {"what": "it flickers", "version": "force 1.0.3"})
     assert url.startswith("https://github.com/zalandemeter/force/issues/new?")
     q = _q(url)
     assert q == {"template": "bug_report.yml", "title": "Sidebar flickers", "what": "it flickers",
-                 "where": "The cockpit itself (sidebar, header, menu, keys)", "version": "force 1.0.3"}
+                 "version": "force 1.0.3"}
+    # the dropdown is not in the link: GitHub documents query pre-fill for text fields only
+    with pytest.raises(support.SupportError, match="unknown field"):
+        support.issue_link("bug", "t", {"where": "Notifications"})
     assert short == []
     assert "+" not in url.split("?", 1)[1]            # spaces as %20 (a + would show up literally in some forms)
 
@@ -285,6 +287,14 @@ def test_pack_generator_writes_docs_commands_and_contributing(tmp_path):
     assert "Conventional Commit" in (tmp_path / "contributing.md").read_text()
     docs = (tmp_path / "docs.md").read_text()
     assert docs.startswith("<!-- generated") and "force new" in docs
+
+
+def test_link_fields_are_exactly_the_forms_text_fields():
+    import re as _re
+    for kind, f in (("bug", "bug_report.yml"), ("feature", "feature_request.yml")):
+        form = (REPO / ".github" / "ISSUE_TEMPLATE" / f).read_text()
+        text_ids = set(_re.findall(r"- type: (?:textarea|input)\n\s+id: (\S+)", form))
+        assert set(support.FIELDS[kind]) == text_ids, kind
 
 
 def test_the_brief_names_every_mcp_tool_group_and_the_rules():

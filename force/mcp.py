@@ -56,8 +56,9 @@ TOOLS: dict[str, tuple[str, dict, bool]] = {
     "issues_search": ("Search Force's GitHub issues, open and closed (no login; 10 searches a minute).",
                       _s("", words=_str("words to search for")), True),
     "issue_link": ("Build the pre-filled GitHub link for a new issue and copy it to the user's clipboard. "
-                   "Fields: bug: what, expected, steps, version, where, environment, doctor, logs; feature: "
-                   "problem, idea, alternatives. Filing is the user's click.",
+                   "Fields (text only): bug: what, expected, steps, version, environment, doctor, logs; feature: "
+                   "problem, idea, alternatives. The bug form's 'Which part' is picked by the user in the form. "
+                   "Filing is the user's click.",
                    {"type": "object", "additionalProperties": False, "required": ["kind", "title"],
                     "properties": {"kind": {"type": "string", "enum": ["bug", "feature"]},
                                    "title": {"type": "string"},

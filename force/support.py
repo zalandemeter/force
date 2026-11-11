@@ -42,8 +42,10 @@ NAME = "chuck"
 ROLE = "support"
 URL_LIMIT = 8000                # GitHub answers 414 above roughly 8 kB of URL
 TEMPLATES = {"bug": "bug_report.yml", "feature": "feature_request.yml"}
+# the form's text fields: GitHub fills these from the link's query (by field id). The bug form's `where` is a
+# dropdown, which GitHub does not document as fillable: it stays out of the link and the user picks it.
 FIELDS = {
-    "bug": ("what", "expected", "steps", "version", "where", "environment", "doctor", "logs"),
+    "bug": ("what", "expected", "steps", "version", "environment", "doctor", "logs"),
     "feature": ("problem", "idea", "alternatives"),
 }
 # when the link is too long, these fields are shortened first, in this order
