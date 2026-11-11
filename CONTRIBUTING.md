@@ -18,8 +18,9 @@ pull request against `main` ([below](#how-a-change-gets-in)).
 6. **The maintainer tries it.** Features are used before they are merged: the maintainer installs the branch build
    on a real machine (`scripts/install-build.sh HOST`, below) and gives feedback. Changes go onto the same branch,
    as more commits, until the feature is right.
-7. **Squash merge, on the maintainer's word only.** A pull request is merged when the maintainer says so, and
-   merged as one commit. Nobody else merges, whatever the checks say; an agent working on Force never does.
+7. **Squash merge.** The maintainer reviews the pull request and merges it as one commit, or asks for changes.
+   Agents that work on Force with the maintainer's access ([CLAUDE.md](CLAUDE.md)) never merge: they stop at the
+   pull request.
 
 | Type | For |
 |---|---|
