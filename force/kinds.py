@@ -32,7 +32,7 @@ class Card:
     effort: str | None = None
     mode: str | None = None
     title: str | None = None            # replaces the pane title (a shell's interactive program)
-    reply_ms: int | None = None         # when the agent last wrote you text (SPEC §5, unread)
+    reply_ms: int | None = None         # when the agent last wrote you a finding (SPEC §5, unread)
 
 
 class Kind:

@@ -41,7 +41,7 @@
     "unreadReplies": {
       "type": "boolean",
       "default": true,
-      "description": "turn a working session's icon blue when it wrote you something you have not seen"
+      "description": "turn a working session's card blue when it wrote you a finding you have not seen"
     },
     "autoUpgradeSessions": {
       "type": "boolean",

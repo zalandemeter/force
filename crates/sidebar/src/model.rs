@@ -51,8 +51,10 @@ pub const C_YOUR_TURN: Color = Color::Rgb(0x87, 0xc0, 0x8f);
 pub const C_DOWN: Color = Color::Rgb(0xd7, 0x5f, 0x5f);
 pub const C_YOUR_TURN_DIM: Color = Color::Rgb(0x79, 0xa5, 0x80); // #79a580
 pub const C_WORKING_DIM: Color = Color::Rgb(0xa6, 0x89, 0x4d); // #d7af5f at ~60% brightness
-/// The icon of a working session whose agent wrote a reply you have not seen (SPEC §5, `unread`).
+/// A working session whose agent wrote a finding you have not seen (SPEC §5, `unread`): its icon and edge ...
 pub const C_UNREAD: Color = Color::Rgb(0x5c, 0x9c, 0xf5); // #5c9cf5
+/// ... and its line-2 text: about 4.6:1 on the card, as readable as the working text.
+pub const C_UNREAD_TEXT: Color = Color::Rgb(0x5b, 0x8f, 0xd6); // #5b8fd6
 
 // Mode colours as the agents themselves show them (dark themes): Claude Code's autoAccept, planMode, warning (auto),
 // inactive (manual) and error (bypass); OpenCode's build and plan agents take its theme's secondary and accent.
@@ -107,12 +109,30 @@ pub fn glyph_color(s: State) -> Color {
     }
 }
 
-/// A card's icon colour: the state's, but blue for a working session with an unread reply (SPEC §5).
+/// A working session with a finding you have not seen (SPEC §5): its whole card is blue.
+pub fn shows_unread(state: State, unread: bool) -> bool {
+    unread && state == State::Working
+}
+
+pub fn is_unread(s: &Session) -> bool {
+    shows_unread(s.state, s.unread)
+}
+
+/// A card's icon colour: the state's, blue for an unread finding (SPEC §5).
 pub fn session_glyph_color(s: &Session) -> Color {
-    if s.unread && s.state == State::Working {
+    if is_unread(s) {
         C_UNREAD
     } else {
         glyph_color(s.state)
+    }
+}
+
+/// A card's edge colour: the state's, blue for an unread finding (SPEC §5).
+pub fn card_edge_color(state: State, unread: bool) -> Color {
+    if shows_unread(state, unread) {
+        C_UNREAD
+    } else {
+        edge_color(state)
     }
 }
 
@@ -502,6 +522,7 @@ pub fn line2(s: &Session, c: usize, tier: Tier) -> Vec<Glyph> {
             let act = truncate(&act, (avail as i64 - width(&tail) as i64).max(1) as usize);
             let (color, bold) = match s.state {
                 State::NeedsYou => (C_NEEDS_YOU, true),
+                State::Working if is_unread(s) => (C_UNREAD_TEXT, false),
                 State::Working => (C_WORKING_DIM, false),
                 State::YourTurn => (label_color(State::YourTurn), false),
                 _ => (GREY, false),
@@ -519,6 +540,7 @@ pub fn line2(s: &Session, c: usize, tier: Tier) -> Vec<Glyph> {
                 Some("archiving") => ("archiving", LABEL_GREY),
                 Some("moving") => ("moving", LABEL_GREY),
                 Some("moved") => ("moved", C_YOUR_TURN),
+                _ if is_unread(s) => (state_label(s.state), C_UNREAD_TEXT),
                 _ => (state_label(s.state), label_color(s.state)),
             };
             let shown_note = matches!(
@@ -1299,18 +1321,30 @@ mod tests {
 
     #[test]
     fn unread_working_icon_is_blue() {
-        // SPEC §5: only the icon of a working session with an unread reply turns blue; the spinner, edge and
-        // label stay the working ones, and the flag means nothing in other states
+        // SPEC §5: a working session with an unread finding has a blue card: icon and edge #5c9cf5, the line-2 text
+        // (activity, or the "working" label) #5b8fd6. The spinner keeps turning, the name and age stay grey, and
+        // the flag means nothing in other states.
         let mut s = sess(State::Working);
+        s.activity = Some("editing deploy.tf".into());
         assert_eq!(line1(&s, 0, 29, NAME, Tier::Plain)[2].color, C_WORKING);
+        assert_eq!(card_edge_color(s.state, s.unread), C_WORKING);
         s.unread = true;
         let l = line1(&s, 0, 29, NAME, Tier::Plain);
         assert_eq!(l[2].color, C_UNREAD);
         assert_eq!(l[2].ch, glyph(Tier::Plain, State::Working, 0));
-        assert_eq!(edge_color(s.state), C_WORKING);
-        assert_eq!(label_color(s.state), C_WORKING_DIM);
+        assert!(l.iter().any(|g| g.ch == 'p' && g.color == NAME), "the name stays grey");
+        assert!(l.iter().any(|g| g.ch != ' ' && g.color == AGE), "the age stays grey");
+        assert_eq!(card_edge_color(s.state, s.unread), C_UNREAD);
+        let l2 = line2(&s, 29, Tier::Plain);
+        assert!(l2.iter().any(|g| g.ch == 'e' && g.color == C_UNREAD_TEXT), "the activity is blue");
+        assert!(!l2.iter().any(|g| g.color == C_WORKING_DIM));
+        s.activity = None;
+        let l2 = line2(&s, 29, Tier::Plain);
+        assert!(glyphs_to_string(&l2).contains("working"));
+        assert!(l2.iter().any(|g| g.ch == 'k' && g.color == C_UNREAD_TEXT), "the label is blue");
         s.state = State::YourTurn;
         assert_eq!(session_glyph_color(&s), C_YOUR_TURN);
+        assert_eq!(card_edge_color(s.state, s.unread), C_YOUR_TURN);
     }
 
     #[test]

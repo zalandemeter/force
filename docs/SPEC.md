@@ -56,7 +56,7 @@ default; an invalid file is never overwritten by `force settings set`.
 | `icons` | `"auto"` | auto / on / off: the glyph tier (§28; field `glyphs`) |
 | `sidebarWidth` | 29 | sidebar width in columns |
 | `staleAfterHours` | 12 | idle longer than this → STALE |
-| `unreadReplies` | true | a working session's icon turns blue on a reply you have not seen (§5 `unread`) |
+| `unreadReplies` | true | a working session's card turns blue on a finding you have not seen (§5 `unread`) |
 | `autoUpgradeSessions` | true | restart idle, outdated sessions on the new release (§5) |
 | `autoUpgradeIdleMinutes` | 10 | idle time before that |
 | `layout` | `"split"` | split / classic (§39) |
@@ -159,14 +159,24 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
 
 - `outdated` is a separate boolean flag (shown as cyan `↑`), not a state.
 - `unread` is a separate boolean flag, not a state: the session is WORKING, not viewed by any client, and its
-  agent has written a reply text since you last looked at it (`reply_ms > last_seen_ms`). `reply_ms` is the
-  time of the newest text the agent wrote to you: the `timestamp` of the newest non-sidechain assistant record
-  with a non-empty `text` block in a Claude Code transcript; for OpenCode, the tick on which the text of the
-  last message (read while busy, §36) changed, never its first sight after a (re)start; shells have none. The
-  daemon keeps the newest `reply_ms` it has seen per session in memory; with `unreadReplies` off the flag is
-  never set. The sidebar draws an unread WORKING
-  session's icon blue (`#5c9cf5`, the spinner unchanged; its edge, label and activity keep the working
-  colours); opening the session clears it on the next tick.
+  agent wrote you a **finding** since you last looked at it (`reply_ms > last_seen_ms`). Claude Code narrates
+  between tool calls ("Let me check the config…"; median 118 characters, 95 % under 200): narration never
+  counts, or every working session off screen would turn blue within seconds.
+  - **Finding** (`activity.is_finding`): a text block of at least 300 characters (`FINDING_CHARS`), or of at
+    least 100 (`FINDING_STRUCTURED_CHARS`) with two list items, a heading, a table (two `|…|` rows) or a code
+    block.
+  - **Mid-turn**: a tool call follows it before the next prompt. A finding that ends the turn is its answer,
+    which YOUR_TURN already shows.
+  - `reply_ms`, Claude Code: the `timestamp` of the newest such text block in the transcript's main thread
+    (sidechains and API error records do not count; tool results are not prompts). OpenCode: the tick on which
+    the count of such text parts in the last assistant message (a text part followed by a tool part; read while
+    busy, §36) changed, never its first sight after a (re)start. Shells have none.
+  - The daemon keeps the newest `reply_ms` per `session_id` in memory and drops it when the session leaves the
+    registry, so a session created again under a deleted one's name starts without it. With `unreadReplies` off
+    the flag is never set; opening the session clears it on the next tick.
+  - The sidebar draws the whole card blue: icon and edge `#5c9cf5`, the line-2 activity (or the "working" label)
+    `#5b8fd6` (about 4.6:1 on the card, like the working text). The spinner keeps turning; name and age stay
+    grey.
 - `since_ms` (for the age column) = `statusUpdatedAt` when a status file exists, else pane start.
 - **turn_done_ms**: the daemon records `now` when it observes a session go from `busy`/`waiting`
   to `idle` (not on first sight, not after a (re)start). Persisted in `$FORCE_STATE/seen.json`.
@@ -439,7 +449,7 @@ guarded by tests/test_dev_tree.py).
   the version. The sidebar is the full list; the header never repeats it.
 - **Theme**: one palette for header, sidebar, dialogs, toasts and popups: greys of
   the tmux status line (`#262626`, `#303030`, `#3a3a3a`), coral `#d97757` as the only accent,
-  no blue but the icon of a working session with an unread reply (§5).
+  no blue but the card of a working session with an unread finding (§5: `#5c9cf5`, text `#5b8fd6`).
 - **Sidebar**: a coral `▌` marker column on the current session's rows (text, not a CSS border);
   no keyboard cursor; no scrollbar; `     archived (n)` and `   + new session` aligned with the names.
 - **Dialogs**: padded frame, sentence-case title, labelled fields, coloured status row (× / ✓), a

@@ -1208,7 +1208,8 @@ def test_trust_phrase_after_a_status_file_is_a_crash():
 
 
 def test_unread_reply_while_working(env, monkeypatch):
-    """SPEC §5 unread: a working session that wrote text after you last looked is flagged until you open it."""
+    """SPEC §5 unread: a working session that wrote a finding after you last looked is flagged until you open
+    it."""
     cockpit = env.make_cockpit()
     add_live(cockpit, "portal")
     clk = FakeClock(start=1_800_000_000.0)
@@ -1250,6 +1251,33 @@ def test_unread_reply_while_working(env, monkeypatch):
     clk.advance(1)
     d.tick()
     assert view().unread is False and "unread" not in view().why
+
+
+def test_unread_forgotten_with_the_session(env, monkeypatch):
+    """A session deleted and created again under its name starts without its predecessor's finding (SPEC §5)."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    clk = FakeClock(start=1_800_000_000.0)
+    d = Daemon(cockpit, clk)
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda: [])
+    monkeypatch.setattr("force.daemon.activity.scan",
+                        lambda path, max_len=60: (None, None, None, int(clk() * 1000) - 500))
+    ctl(cockpit, "portal", status="busy")
+    assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
+    d.tick()
+    old = entry(env.paths, "portal").session_id
+    assert old in d._reply
+    cockpit.delete("portal")
+    d.tick()
+    assert old not in d._reply
+    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: (None, None, None, None))
+    add_live(cockpit, "portal")
+    ctl(cockpit, "portal", status="busy")
+    assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
+    clk.advance(1)
+    d.tick()
+    v = next(s for s in read_snapshot(env.paths.snapshot).sessions if s.name == "portal")
+    assert v.state is State.WORKING and v.unread is False
 
 
 def test_opencode_reply_only_on_change():

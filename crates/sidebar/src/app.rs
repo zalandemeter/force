@@ -84,6 +84,8 @@ struct Item {
     is_session: bool,
     current: bool,
     state: State,
+    /// a working session with an unread finding: its edge is blue (SPEC §5).
+    unread: bool,
     /// grid columns [from, to) this item owns when it shares its row with another (the one-row actions).
     cols: Option<(usize, usize)>,
 }
@@ -1323,6 +1325,7 @@ impl App {
                 is_session: false,
                 current: false,
                 state: State::Idle,
+                unread: false,
                 cols: None,
             });
             return (items, 1);
@@ -1402,6 +1405,7 @@ impl App {
                 is_session: true,
                 current,
                 state: s.state,
+                unread: s.unread,
                 cols: None,
             });
             running += height;
@@ -1437,6 +1441,7 @@ impl App {
             is_session: false,
             current: false,
             state: State::Idle,
+            unread: false,
             cols,
         };
         if left.len() + 2 + right.len() <= rule_n {
@@ -1749,9 +1754,9 @@ impl App {
                     // the edge `▍` in column 1: the state's colour, coral for the own card, swept top to bottom when the
                     // own session changes; drawn after the shimmer, which must not recolour it
                     let edge = if it.current {
-                        lerp_bg(m::edge_color(it.state), m::ACCENT, own_alpha)
+                        lerp_bg(m::card_edge_color(it.state, it.unread), m::ACCENT, own_alpha)
                     } else {
-                        m::edge_color(it.state)
+                        m::card_edge_color(it.state, it.unread)
                     };
                     let edge_show = match sweep {
                         Some(st) if it.current && own_alpha > 0.0 && viewed => (line_idx as f64) < st,
@@ -1990,6 +1995,7 @@ impl App {
                 is_session: true,
                 current,
                 state: s.state,
+                unread: s.unread,
                 cols: None,
             };
             let mb = 0.0;
@@ -2006,9 +2012,9 @@ impl App {
             let base = set_pulse(base, &self.fx, &it, now_ms, viewed);
             let bg = attention_bg(&self.fx, &it, now_ms, viewed, lerp_bg(base, m::BG, mb));
             let edge = if current {
-                lerp_bg(m::edge_color(s.state), m::ACCENT, own_alpha)
+                lerp_bg(m::card_edge_color(s.state, s.unread), m::ACCENT, own_alpha)
             } else {
-                m::edge_color(s.state)
+                m::card_edge_color(s.state, s.unread)
             };
 
             // row background over the full width
@@ -3508,6 +3514,22 @@ mod tests {
         assert!(row.starts_with(" ─ \u{F067}  new ─"), "the new label leads the rule: {row:?}");
         assert!(row.ends_with(" ─"), "the rule runs into the last column: {row:?}");
         assert!(row.contains("\u{F187}  archived"), "{row:?}");
+    }
+
+    // --- an unread finding colours the card's edge (SPEC §5) ------------------------
+    #[test]
+    fn unread_card_edge_is_blue() {
+        let (tmux, _) = FakeTmux::new();
+        let mut a = app_with(tmux);
+        let mut s0 = sess("s0", 0, State::Working, false, false);
+        s0.unread = true;
+        let s1 = sess("s1", 1, State::Working, false, false);
+        a.set_now(NOW);
+        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s0, s1], usage: None, limits: vec![] }), NOW);
+        let g = a.build_grid_at(NOW);
+        assert_eq!(g.row(BRAND_H)[1].fg, m::C_UNREAD, "unread card edge");
+        assert_eq!(g.row(BRAND_H + 1)[1].fg, m::C_UNREAD, "the edge runs down the card");
+        assert_eq!(g.row(BRAND_H + 3)[1].fg, m::C_WORKING, "a working card without a finding stays amber");
     }
 
     // --- hidden own card renders NON-current (neutral) ------------------------------

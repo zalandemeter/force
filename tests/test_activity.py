@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from force.activity import _model_short, describe, describe_config, scan
+from force.activity import _model_short, describe, describe_config, is_finding, scan
 
 
 def write(path, records):
@@ -235,25 +235,107 @@ def test_synthetic_api_error_records_are_skipped(tmp_path):
     assert "API Error" not in (describe(p) or "")
 
 
-def test_scan_reply_ms_newest_text_record(tmp_path):
-    """SPEC §5 unread: the newest main-thread assistant text, not tools, thinking, sidechains or API errors."""
-    def rec(content, ts, **kw):
-        return {"type": "assistant", "timestamp": ts, "message": {"content": content}, **kw}
+# --- findings (SPEC §5, unread) ---------------------------------------------------------------
+NARRATION = [
+    "Let me check the config file to see how the cache is set up.",
+    "Now I'll run the tests.",
+    "The tests pass. Let me also look at the linter output before I commit, and then update the changelog entry "
+    "so the release notes stay accurate.",                                                      # 173: still narration
+    "Found it.\n\nLet me fix the import and rerun the failing test.",
+    "Two things to check:\n- the cache key\n- the throttle",                                     # a list, but short
+]
+FINDINGS = [
+    # a report: long enough on its own
+    "The flaky test is a race, not a timeout. `wait_for` polls the status file every 50 ms, but the fake agent "
+    "rewrites it with a plain open/write, so a poll can read it half-written and get invalid JSON, which the "
+    "helper treats as no status. On a loaded CI runner that window is wide enough to hit about one run in thirty. "
+    "Writing through a temp file and os.replace fixes it.",
+    # shorter, but a list
+    "The migration touches three tables and one of them is large:\n- `events` (40 M rows): needs a batched backfill\n"
+    "- `users`: a new nullable column, instant\n- `sessions`: an index, built concurrently",
+    # a heading
+    "## Root cause\nThe registry lock is taken twice when a rename and a move land in the same daemon tick, so the "
+    "second one waits for itself.",
+    # a table
+    "| test | before | after |\n|---|---|---|\n| startup | 1.9 s | 0.6 s |\n| first paint | 2.4 s | 0.9 s |\n"
+    "| reload | 0.8 s | 0.3 s |",
+    # a code block
+    "The crash comes from this line in the parser, which assumes a trailing newline:\n```python\nhead, tail = "
+    "text.rsplit(\"\\n\", 1)\n```\nAn input without one raises ValueError.",
+]
+
+
+@pytest.mark.parametrize("text", NARRATION)
+def test_narration_is_not_a_finding(text):
+    assert not is_finding(text)
+
+
+@pytest.mark.parametrize("text", FINDINGS)
+def test_reports_lists_headings_tables_code_are_findings(text):
+    assert is_finding(text)
+
+
+def _rec(kind, ts, **kw):
+    """A transcript record: ("text", s), ("tool",), ("result",) or ("prompt", s), `ts` seconds after 10:00."""
+    stamp = f"2026-11-11T10:00:{ts:02d}.000Z"
+    if kind[0] == "text":
+        return {"type": "assistant", "timestamp": stamp, "message": {"content": [{"type": "text", "text": kind[1]}]},
+                **kw}
+    if kind[0] == "tool":
+        return {"type": "assistant", "timestamp": stamp,
+                "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {}}]}, **kw}
+    if kind[0] == "result":
+        return {"type": "user", "timestamp": stamp,
+                "message": {"content": [{"type": "tool_result", "content": "ok"}]}, **kw}
+    return {"type": "user", "timestamp": stamp, "message": {"content": kind[1]}, **kw}
+
+
+def _ms(ts):
+    return 1794391200000 + ts * 1000           # 2026-11-11T10:00:00Z
+
+
+def test_scan_reply_ms_is_the_newest_finding_mid_turn(tmp_path):
+    """Narration between tool calls never counts; a finding counts once a tool call follows it in the turn."""
     p = write(tmp_path / "t.jsonl", [
-        rec([{"type": "text", "text": "first"}], "2026-11-11T10:00:00.000Z"),
-        rec([{"type": "text", "text": "here is the plan"}], "2026-11-11T10:00:05.500Z"),
-        rec([{"type": "tool_use", "name": "Bash", "input": {}}], "2026-11-11T10:00:06.000Z"),
-        rec([{"type": "thinking", "thinking": "hm"}], "2026-11-11T10:00:07.000Z"),
-        rec([{"type": "text", "text": "   "}], "2026-11-11T10:00:08.000Z"),
-        rec([{"type": "text", "text": "sub-agent"}], "2026-11-11T10:00:09.000Z", isSidechain=True),
-        rec([{"type": "text", "text": "API error"}], "2026-11-11T10:00:10.000Z", isApiErrorMessage=True),
-        {"type": "user", "timestamp": "2026-11-11T10:00:11.000Z", "message": {"content": "go on"}},
+        _rec(("prompt", "why does CI fail?"), 0),
+        _rec(("text", NARRATION[0]), 1), _rec(("tool",), 2), _rec(("result",), 3),
+        _rec(("text", FINDINGS[0]), 10), _rec(("tool",), 11), _rec(("result",), 12),
+        _rec(("text", NARRATION[1]), 13), _rec(("tool",), 14),
     ])
-    assert scan(p)[3] == 1794391205500
+    assert scan(p)[3] == _ms(10)
+    narration_only = write(tmp_path / "n.jsonl", [
+        _rec(("prompt", "go"), 0), *[_rec(("text", t), 1) for t in NARRATION], _rec(("tool",), 2),
+    ])
+    assert scan(narration_only)[3] is None
 
 
-def test_scan_reply_ms_none(tmp_path):
-    assert scan(write(tmp_path / "a.jsonl", [tool("Bash")]))[3] is None
-    # the newest text record without a usable timestamp: not an older one's
-    older = dict(assistant([{"type": "text", "text": "a"}]), timestamp="2026-11-11T10:00:00Z")
-    assert scan(write(tmp_path / "b.jsonl", [older, assistant([{"type": "text", "text": "b"}])]))[3] is None
+def test_scan_reply_ms_finding_and_tool_call_in_one_record(tmp_path):
+    rec = _rec(("text", FINDINGS[1]), 5)
+    rec["message"]["content"].append({"type": "tool_use", "name": "Edit", "input": {}})
+    assert scan(write(tmp_path / "t.jsonl", [_rec(("prompt", "go"), 0), rec]))[3] == _ms(5)
+
+
+def test_scan_reply_ms_not_at_the_end_of_a_turn(tmp_path):
+    """A finding that ends its turn is the turn's answer (your turn), even once the next turn calls tools."""
+    end = [_rec(("prompt", "go"), 0), _rec(("tool",), 1), _rec(("result",), 2), _rec(("text", FINDINGS[0]), 3)]
+    assert scan(write(tmp_path / "a.jsonl", end))[3] is None
+    nxt = end + [_rec(("prompt", "now fix it"), 4), _rec(("text", NARRATION[0]), 5), _rec(("tool",), 6)]
+    assert scan(write(tmp_path / "b.jsonl", nxt))[3] is None
+
+
+def test_scan_reply_ms_ignores_sidechains_and_api_errors(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "go"), 0),
+        _rec(("text", FINDINGS[0]), 1, isSidechain=True), _rec(("tool",), 2, isSidechain=True),
+        _rec(("text", FINDINGS[2]), 3, isApiErrorMessage=True), _rec(("tool",), 4),
+    ])
+    assert scan(p)[3] is None
+
+
+def test_scan_reply_ms_without_a_timestamp(tmp_path):
+    """The newest finding without a usable timestamp: None, not an older finding's time."""
+    newest = _rec(("text", FINDINGS[1]), 5)
+    del newest["timestamp"]
+    p = write(tmp_path / "t.jsonl", [_rec(("prompt", "go"), 0), _rec(("text", FINDINGS[0]), 1), _rec(("tool",), 2),
+                                     newest, _rec(("tool",), 6)])
+    assert scan(p)[3] is None

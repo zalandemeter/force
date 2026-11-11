@@ -246,7 +246,7 @@ class Daemon:
         # session activity cache: session_id -> ((st_mtime_ns, st_size) | None, clock-time, value).
         # Recompute only when the transcript changed AND at least 3 s of clock time has passed (SPEC §15).
         self._activity: dict[str, tuple] = {}
-        self._reply: dict[str, int] = {}          # name -> newest reply_ms seen (SPEC §5, unread)
+        self._reply: dict[str, int] = {}          # session_id -> newest reply_ms seen (SPEC §5, unread)
         self._oc_reply: dict[str, tuple] = {}     # OpenCode sessions: name -> (pid, opencode.reply_key) last read
         self._oc_meta: dict[str, object] = {}     # OpenCode sessions: name -> opencode.Meta (SPEC §36)
         self._oc_last: dict[str, tuple] = {}      # name -> (status, meta, clock) of the last answer from its API
@@ -565,7 +565,7 @@ class Daemon:
         _rename_seen_key(self.paths.seen, old, new)
         for cache in (self._readings, self._shell_prog, self._oc_meta, self._oc_last, self._oc_agent,
                       self._claude_name, self._auto_name_last, self._note_state, self._note_down,
-                      self._reply, self._oc_reply):
+                      self._oc_reply):
             if old in cache:
                 cache[new] = cache.pop(old)
         # the rest of this tick works on the new name: a stale registry would show the old one down for a tick,
@@ -1016,12 +1016,13 @@ class Daemon:
                 act = pending_restart_activity(state) or act
             if entry.extra.get("pending_move") and state == State.WORKING:
                 act = "moves after this turn"
-            if card.reply_ms is not None and card.reply_ms > self._reply.get(name, 0):
-                self._reply[name] = card.reply_ms
-            is_unread = self.cfg.unread_replies and unread(state, self._reply.get(name), seen.get(name, Seen()),
+            sid = entry.session_id
+            if card.reply_ms is not None and card.reply_ms > self._reply.get(sid, 0):
+                self._reply[sid] = card.reply_ms
+            is_unread = self.cfg.unread_replies and unread(state, self._reply.get(sid), seen.get(name, Seen()),
                                                            name in viewed)
             if is_unread:
-                clauses.append(f"unread: wrote you {max(0, now_ms - self._reply[name]) // 1000} s ago, "
+                clauses.append(f"unread: a finding written {max(0, now_ms - self._reply[sid]) // 1000} s ago, "
                                "not viewed since")
             note = None
             mark = None if is_shell(entry) else self.cockpit.restarted(name)
@@ -1049,6 +1050,12 @@ class Daemon:
                 note=note, kind=kind_of(entry), why="; ".join(clauses), title=title,
                 support=is_support(entry), unread=is_unread))
         self._views = views
+        # a session that went away takes its reply times along: one created again under its name starts without them
+        ids, names = {e.session_id for e in self._registry}, {e.name for e in self._registry}
+        for k in [k for k in self._reply if k not in ids]:
+            del self._reply[k]
+        for k in [k for k in self._oc_reply if k not in names]:
+            del self._oc_reply[k]
         limits = self._limits(live)
         snap = Snapshot(generated_ms=now_ms, latest_version=lv, sessions=views,
                         usage=({"five_hour": limits[0].get("five_hour"), "seven_day": limits[0].get("seven_day")}

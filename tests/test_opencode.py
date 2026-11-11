@@ -15,6 +15,7 @@ from force.claude import AgentStatus
 from force.opencode import Meta, argv, free_port, read_status
 from force.registry import Entry, is_claude, is_opencode, kind, load, locked
 from force.state import State, read_snapshot
+from test_activity import FINDINGS, NARRATION
 from test_daemon import FakeClock, wait_for
 
 
@@ -530,14 +531,18 @@ def test_daemon_keeps_an_opencode_state_when_its_api_misses_an_answer(env, monke
 
 
 def test_reply_key():
-    """SPEC §5 unread: what the agent wrote in a message, by message id and text length."""
+    """SPEC §5 unread: the findings an assistant message wrote mid-turn, counted per message; narration and a finding
+    that ends the message (the turn's answer) do not count."""
     text = lambda t: {"type": "text", "text": t}
-    msg = {"info": {"id": "m1", "role": "assistant"}, "parts": [text("hello"), {"type": "tool", "tool": "bash"}]}
-    assert opencode.reply_key(msg) == "m1:5"
-    msg["parts"].append(text(" there"))
-    assert opencode.reply_key(msg) == "m1:11"               # streaming text grows the key
-    assert opencode.reply_key({"info": {"id": "u", "role": "user"}, "parts": [text("do it")]}) is None
-    assert opencode.reply_key({"info": {"id": "m2", "role": "assistant"},
-                               "parts": [{"type": "tool", "tool": "bash"}, text("  ")]}) is None
-    assert opencode.reply_key({"id": "m3", "role": "assistant", "parts": [text("x")]}) == "m3:1"
+    tool = {"type": "tool", "tool": "bash"}
+    msg = {"info": {"id": "m1", "role": "assistant"}, "parts": [text(NARRATION[0]), tool]}
+    assert opencode.reply_key(msg) is None                      # narration
+    msg["parts"] += [text(FINDINGS[0])]
+    assert opencode.reply_key(msg) is None                      # a finding with nothing after it yet
+    msg["parts"] += [tool]
+    assert opencode.reply_key(msg) == "m1:1"                    # ... and once a tool call follows
+    msg["parts"] += [text(FINDINGS[1]), tool]
+    assert opencode.reply_key(msg) == "m1:2"
+    assert opencode.reply_key({"info": {"id": "u", "role": "user"}, "parts": [text(FINDINGS[0]), tool]}) is None
+    assert opencode.reply_key({"id": "m3", "role": "assistant", "parts": [text(FINDINGS[2]), tool]}) == "m3:1"
     assert opencode.reply_key(None) is None

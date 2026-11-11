@@ -174,7 +174,7 @@ def color(state: State) -> str:
 
 
 def unread(state: State, reply_ms: int | None, seen: Seen, viewed: bool) -> bool:
-    """SPEC §5 `unread`: a WORKING session, not on any client's screen, whose agent wrote you text since you
+    """SPEC §5 `unread`: a WORKING session, not on any client's screen, whose agent wrote you a finding since you
     last looked at it."""
     return (state is State.WORKING and not viewed and reply_ms is not None
             and reply_ms > seen.last_seen_ms)
@@ -289,7 +289,7 @@ class SessionView:
     support: bool = False        # Chuck, the support session (SPEC §50): the sidebar shows it last, with its face
     why: str | None = None       # why the card shows its state (SPEC §43.3)
     title: str | None = None     # cleaned pane title (SPEC §43.4)
-    unread: bool = False         # WORKING with a reply you have not seen (SPEC §5)
+    unread: bool = False         # WORKING with a finding you have not seen (SPEC §5)
 
 
 @dataclass

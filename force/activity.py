@@ -14,6 +14,14 @@ from pathlib import Path
 
 _TAIL = 256 * 1024           # read at most this many bytes from the end of the transcript
 
+# A finding (SPEC §5, unread): text long enough to be a report, not the narration Claude Code writes between tool
+# calls ("Let me check the config…"; median 118 characters, 95 % under 200).
+FINDING_CHARS = 300
+FINDING_STRUCTURED_CHARS = 100      # ... or this long with a list, a heading, a table or a code block
+_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S", re.M)
+_HEADING = re.compile(r"^\s*#{1,6}\s+\S", re.M)
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.M)
+
 # Leading markdown markers to strip from a text block's first line: # heading, * bullet, - bullet,
 # > quote, ` code-span, and `1.` numbered-list items.
 _MD_LEAD = re.compile(r"^(?:#{1,6}\s*|[*>\-\s]+|\d+\.\s*|`+)")
@@ -163,22 +171,37 @@ def _timestamp_ms(value: object) -> int | None:
     return int(dt.timestamp() * 1000)
 
 
-def _has_text(blocks: list) -> bool:
-    """A non-empty text block: the agent wrote you something (SPEC §5, unread)."""
-    return any(isinstance(b, dict) and b.get("type") == "text" and str(b.get("text") or "").strip()
-               for b in blocks)
+def is_finding(text: str) -> bool:
+    """Text worth reading (SPEC §5, unread): at least FINDING_CHARS long, or FINDING_STRUCTURED_CHARS with two
+    list items, a heading, a table or a code block. Shorter text is narration."""
+    t = text.strip()
+    if len(t) >= FINDING_CHARS:
+        return True
+    if len(t) < FINDING_STRUCTURED_CHARS:
+        return False
+    return (len(_LIST_ITEM.findall(t)) >= 2 or _HEADING.search(t) is not None
+            or len(_TABLE_ROW.findall(t)) >= 2 or "```" in t)
+
+
+def _is_prompt(record: dict) -> bool:
+    """A user record that starts a turn: anything but the tool results Claude Code also records as user."""
+    message = record.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else None
+    return not (isinstance(blocks, list)
+                and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks))
 
 
 def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, str | None, int | None]:
     """(activity, model_short, effort, reply_ms) from the tail of `transcript`: `activity` from the newest
     concrete assistant turn, `model_short`/`effort` from the newest non-sidechain assistant record, and
-    `reply_ms` (SPEC §5, unread) from the newest one with a non-empty text block. All four are read from the
-    file in a single pass. Each is None when the file is missing/unreadable or no suitable record is found."""
+    `reply_ms` (SPEC §5, unread) from the newest finding (`is_finding`) written mid-turn: a tool call follows it
+    before the next prompt. All four are read from the file in a single pass. Each is None when the file is
+    missing/unreadable or no suitable record is found."""
     lines = _scan_tail(transcript)
     if lines is None:
         return None, None, None, None
     model = effort = reply_ms = None
-    newest = replied = False
+    newest = replied = tool_after = False
     desc = None
     for line in reversed(lines):
         if not line.strip():
@@ -187,11 +210,11 @@ def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, s
             record = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue            # malformed line: ignore
-        if not isinstance(record, dict):
+        if not isinstance(record, dict) or record.get("isSidechain"):
             continue
+        if record.get("type") == "user" and _is_prompt(record):
+            tool_after = False          # walking back past a prompt: the tool calls seen belong to a later turn
         if record.get("type") != "assistant":
-            continue
-        if record.get("isSidechain"):
             continue
         message = record.get("message")
         # Claude Code records API errors (e.g. no network right after a reboot) as assistant messages
@@ -212,9 +235,15 @@ def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, s
             d = _describe_blocks(blocks)
             if d:
                 desc = _truncate(_single(d), max_len)
-        if not replied and _has_text(blocks):
-            replied = True
-            reply_ms = _timestamp_ms(record.get("timestamp"))
+        for b in reversed(blocks):
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use":
+                tool_after = True
+            elif (not replied and tool_after and b.get("type") == "text"
+                  and is_finding(str(b.get("text") or ""))):
+                replied = True
+                reply_ms = _timestamp_ms(record.get("timestamp"))
     return desc, model, effort, reply_ms
 
 

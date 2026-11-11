@@ -29,6 +29,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from .activity import is_finding
 from .claude import AgentStatus
 
 _TIMEOUT = 0.4
@@ -94,7 +95,7 @@ class Meta:
     activity: str | None = None  # "running a command", "editing app.py", ... while busy
     version: str | None = None  # the version this TUI runs
     title: str | None = None    # the session's own title (OpenCode names sessions after their first message)
-    reply: str | None = None    # the last assistant message's text, as "<message id>:<length>" (SPEC §5)
+    reply: str | None = None    # the last assistant message's findings, as "<message id>:<count>" (SPEC §5)
 
 
 _installed: tuple[float, str | None] = (0.0, None)
@@ -176,8 +177,9 @@ def activity_from_parts(parts) -> str | None:
 
 
 def reply_key(message) -> str | None:
-    """What the agent has written you in a message (SPEC §5, unread): "<message id>:<text length>" for an
-    assistant message with non-empty text parts, else None (the user's own message, tools only)."""
+    """The findings an assistant message has written you mid-turn (SPEC §5, unread): "<message id>:<count>" for
+    its text parts that are findings (`activity.is_finding`) with a tool part after them, else None (narration,
+    a reply that ends the turn, the user's own message)."""
     if not isinstance(message, dict):
         return None
     info = message.get("info") if isinstance(message.get("info"), dict) else message
@@ -186,8 +188,10 @@ def reply_key(message) -> str | None:
     parts = message.get("parts")
     if not isinstance(parts, list):
         return None
-    n = sum(len(p.get("text") or "") for p in parts
-            if isinstance(p, dict) and p.get("type") == "text" and str(p.get("text") or "").strip())
+    parts = [p for p in parts if isinstance(p, dict)]
+    n = sum(1 for i, p in enumerate(parts)
+            if p.get("type") == "text" and is_finding(str(p.get("text") or ""))
+            and any(q.get("type") == "tool" for q in parts[i + 1:]))
     if not n:
         return None
     return f"{info.get('id') or ''}:{n}"
