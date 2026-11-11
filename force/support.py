@@ -199,24 +199,52 @@ def ensure_session(cockpit) -> str:
 
 
 # --------------------------------------------------------------------------- the card --------------------
-CARD = """\
-  {face}  Chuck, Force's assistant
-
-  Ask me how something in Force works. I can also:
-    · set things up for you, like a new remote host or a notification
-    · check whether a problem is already reported, and write a bug
-      report or an idea you can submit
-    · help fix it: build the fix and prepare a pull request
-
-  I run on your own {agent} and plan, so each answer uses your
-  tokens. Nothing goes to GitHub without your click.
-
-  Enter  talk to Chuck        Esc  close"""
+# the card (SPEC §50): Force's palette; the popup is 72 x 17, so 70 x 15 inside its border
+_RGB = {"coral": (217, 119, 87), "white": (255, 255, 255), "name": (198, 198, 198), "grey": (138, 138, 138),
+        "dim": (95, 95, 95), "rule": (60, 60, 60), "ink": (38, 38, 38)}
+CARD_W = 68
+USES = (  # (rich icon, plain icon, what, how)
+    ("\uf059", "?", "How does something work?", "answers from your version's docs"),
+    ("\uf013", "*", "Set it up for me", "hosts, notifications, settings"),
+    ("\uf188", "!", "Report a bug or an idea", "checks for duplicates first"),
+    ("\uf0ad", "+", "Help fix it", "builds the fix and the pull request"),
+    ("\uf023", "#", "A security problem", "an email, never in public"),
+)
 
 
-def card_text(agent: str | None, rich: bool) -> str:
+def _c(text: str, fg: str | None = None, bg: str | None = None, bold: bool = False, color: bool = True) -> str:
+    if not color:
+        return text
+    codes = (["1"] if bold else []) + ([f"38;2;{';'.join(map(str, _RGB[fg]))}"] if fg else []) \
+        + ([f"48;2;{';'.join(map(str, _RGB[bg]))}"] if bg else [])
+    return f"\x1b[{';'.join(codes)}m{text}\x1b[0m" if codes else text
+
+
+def card_text(agent: str | None, rich: bool, color: bool = True, buttons: bool = True) -> str:
+    """Chuck's card: who he is, what he does, what it costs, and (in the popup) the two keys."""
     label = {"claude": "Claude Code", "opencode": "OpenCode"}.get(agent or "", "agent")
-    return CARD.format(face="" if rich else ":)", agent=label)
+    face = "\uf118" if rich else ":)"
+    tag = "Force's assistant"
+    head_w = 2 + len(face) + 2 + len("Chuck")
+    lines = ["",
+             "  " + _c(face, "coral", color=color) + "  " + _c("Chuck", "white", bold=True, color=color)
+             + " " * (CARD_W - head_w - len(tag)) + _c(tag, "grey", color=color),
+             "  " + _c("─" * (CARD_W - 2), "rule", color=color),
+             ""]
+    for icon_r, icon_p, what, how in USES:
+        icon = icon_r if rich else icon_p
+        lines.append("  " + _c(icon, "coral", color=color) + "  " + _c(f"{what:<27}", "name", color=color)
+                     + _c(how, "grey", color=color))
+    lines += ["",
+              "  " + _c(f"Runs on your {label} and plan, so each answer uses your tokens.", "dim", color=color),
+              "  " + _c("Nothing goes to GitHub without your click.", "dim", color=color)]
+    if buttons:
+        enter = " Enter  Talk to Chuck "
+        esc = "Esc  Close"
+        pad = CARD_W - len(enter) - 3 - len(esc)
+        lines += ["", " " * pad + _c(enter, "ink", "coral", bold=True, color=color) + "   "
+                  + _c(esc, "grey", color=color), ""]
+    return "\n".join(lines)
 
 
 def open_command(cockpit, ui: bool = False) -> int:
@@ -231,7 +259,10 @@ def open_command(cockpit, ui: bool = False) -> int:
         problem = None if agent else ("Chuck needs Claude Code or OpenCode. Install Claude Code with: "
                                       "curl -fsSL https://claude.ai/install.sh | bash")
     rich = os.environ.get("FORCE_GLYPHS") == "rich"
-    print("\n" + card_text(agent, rich) if ui else card_text(agent, rich).rsplit("\n\n", 1)[0])
+    if ui:
+        print("\x1b[?25l" + card_text(agent, rich), end="", flush=True)    # no blinking cursor on the card
+    else:
+        print(card_text(agent, rich, color=sys.stdout.isatty(), buttons=False))
     if problem:
         print("\n  " + problem)
         if ui:
@@ -276,12 +307,13 @@ def _wait_key() -> str:
 
 def _switch(cockpit, name: str) -> int:
     """Show `name` in this terminal: split mode switches the host's nested client (FORCE_CLIENT, as the dialogs
-    do), classic mode the client the popup belongs to. A ui window showing a remote host (FORCE_HOST) comes back
-    to this machine, on Chuck's session: he runs here."""
+    do), classic mode the client the popup belongs to. A ui window showing a remote host (FORCE_HOST) keeps
+    showing it in the sidebar; only its main pane shows Chuck, who runs here (cli.overlay_open)."""
     window = os.environ.get("FORCE_WINDOW")
     if os.environ.get("FORCE_HOST") and window:
-        from .cli import ui_host_command
-        return ui_host_command(cockpit, "local", window, target_name=name)
+        # the window shows a remote: Chuck in its main pane, the sidebar keeps the remote's sessions
+        from .cli import overlay_open
+        return overlay_open(cockpit, window, name)
     argv = ["tmux", "-L", cockpit.paths.tmux_socket, "switch-client"]
     client = os.environ.get("FORCE_CLIENT")
     if client:

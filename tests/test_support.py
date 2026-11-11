@@ -215,15 +215,16 @@ def test_chuck_takes_another_name_when_chuck_is_taken(cockpit):
 
 def test_the_card_fits_its_popup():
     for agent in ("claude", "opencode", None):
-        lines = support.card_text(agent, rich=True).split("\n")
-        assert max(len(x) for x in lines) <= 72 - 2 and len(lines) + 1 <= 18 - 2      # inside the border
+        import re as _re
+        lines = [_re.sub(r"\x1b\[[0-9;]*m", "", x) for x in support.card_text(agent, rich=True).split("\n")]
+        assert max(len(x) for x in lines) <= 72 - 2 and len(lines) <= 17 - 2      # inside the border
 
 
 def test_no_agent_installed_shows_the_card_and_the_way_out(cockpit, monkeypatch, capsys):
     monkeypatch.setattr(cli, "available_kinds", lambda c: ["shell"])
     assert support.open_command(cockpit, ui=False) == 1
     out = capsys.readouterr().out
-    assert "Chuck, Force's assistant" in out and "claude.ai/install.sh" in out
+    assert "Chuck" in out and "Force's assistant" in out and "claude.ai/install.sh" in out
 
 
 def test_support_agent_setting(cockpit, monkeypatch):
@@ -396,15 +397,13 @@ def test_mcp_serves_line_delimited_json(env):
     assert lines[1]["error"]["code"] == -32700
 
 
-def test_a_window_showing_a_remote_comes_back_here_for_chuck(cockpit, monkeypatch):
+def test_a_window_showing_a_remote_shows_chuck_over_it(cockpit, monkeypatch):
     seen = {}
     monkeypatch.setenv("FORCE_HOST", "devbox")
     monkeypatch.setenv("FORCE_WINDOW", "@3")
-    monkeypatch.setattr(cli, "ui_host_command",
-                        lambda c, name, window, attention=False, target_name=None: seen.update(
-                            name=name, window=window, target=target_name) or 0)
+    monkeypatch.setattr(cli, "overlay_open", lambda c, window, name: seen.update(window=window, name=name) or 0)
     assert support._switch(cockpit, "chuck") == 0
-    assert seen == {"name": "local", "window": "@3", "target": "chuck"}
+    assert seen == {"window": "@3", "name": "chuck"}
 
 
 def test_the_repo_override_is_for_testing_and_checked():
@@ -492,3 +491,43 @@ def test_the_brief_sends_vulnerabilities_by_email():
     assert "no issue, no comment, no pull request" in brief
     policy = (REPO / ".github" / "SECURITY.md").read_text()
     assert "hello@useforce.cc" in policy
+
+
+# --- Chuck over a remote: his session in the main pane, the remote's list stays (SPEC §50) ------------------------
+def test_chuck_over_a_remote_and_back(env, monkeypatch):
+    import dataclasses
+    from force import remote
+    cockpit = env.make_cockpit()
+    cockpit.cfg = dataclasses.replace(cockpit.cfg, ui="split")
+    monkeypatch.setattr(remote, "remote_tmux", lambda paths, r, run=None: "tmux")
+    remote.save(cockpit.paths, [remote.Remote("devbox", "devbox")])
+    name = cli.build_ui_session(cockpit, "portal", "ui-r", 120, 30, remote.get(cockpit.paths, "devbox"))
+    ui = cockpit.ui_tmux
+    main = next(p for p in ui.panes() if p.session == name and p.role == "agent")
+    win = ui.run("display", "-p", "-t", main.pane_id, "#{window_id}")
+    opt = lambda k: ui.run("show", "-wqv", "-t", win, k)
+    start = lambda: ui.run("display", "-p", "-t", main.pane_id, "#{pane_start_command}")
+    remote_tmux = opt("@force_host_tmux")
+
+    assert cli.overlay_open(cockpit, win, "chuck") == 0
+    assert opt("@force_overlay") == "chuck" and opt("@force_session") == "chuck" and opt("@force_host") == ""
+    assert opt("@force_host_tmux") == f"tmux -L {cockpit.paths.tmux_socket}"
+    assert opt("@force_nested").startswith("/dev/")
+    assert "nested chuck" in start() and "--remote" not in start()
+    assert json.loads(opt("@force_overlay_back"))["host"] == "devbox"
+    # the sidebar and header panes are left as they are (they keep the remote's list)
+    assert {p.role for p in ui.panes() if p.session == name} >= {"agent", "sidebar", "header"}
+
+    assert cli.overlay_close(cockpit, win, target="api") == 0
+    assert opt("@force_overlay") == "" and opt("@force_overlay_back") == ""
+    assert opt("@force_host") == "devbox" and opt("@force_session") == "api"
+    assert opt("@force_host_tmux") == remote_tmux
+    assert "nested api --remote devbox" in start()
+    assert cli.overlay_close(cockpit, win) == 0, "nothing to do without an overlay"
+
+
+def test_menu_dialogs_restore_the_host_first():
+    split = menus.render("split")
+    for kind in ("jump", "new", "archived"):
+        assert f"ui-main --window #{{window_id}} --wait --dialog {kind} --client #{{client_name}}" in split
+    assert "ui-main" not in menus.render("classic")
