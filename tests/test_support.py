@@ -155,6 +155,10 @@ def test_prepare_dir_writes_the_brief_and_the_mcp_config(env, monkeypatch):
     assert (d / "faq.md").exists() and (d / "architecture.md").exists()
     oc = json.loads((d / "opencode.json").read_text())
     assert oc["mcp"]["force"] == {"type": "local", "command": ["/x/force-dev", "mcp"], "enabled": True}
+    perm = oc["permission"]
+    assert perm["force_*"] == "ask" and perm["force_settings_get"] == "allow"
+    assert "force_settings_set" not in perm, "a change tool falls under force_*: ask"
+    assert list(perm).index("force_*") < list(perm).index("force_status"), "the specific allows come after"
 
 
 def test_claude_launch_keeps_chuck_to_his_own_context(env):
@@ -391,3 +395,12 @@ def test_a_window_showing_a_remote_comes_back_here_for_chuck(cockpit, monkeypatc
                             name=name, window=window, target=target_name) or 0)
     assert support._switch(cockpit, "chuck") == 0
     assert seen == {"name": "local", "window": "@3", "target": "chuck"}
+
+
+def test_the_repo_override_is_for_testing_and_checked():
+    code = "from force import support; print(support.REPO)"
+    run = lambda v: subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True,
+                                   env={**os.environ, "FORCE_SUPPORT_REPO": v}).stdout.strip()
+    assert run("tmux/tmux") == "tmux/tmux"
+    assert run("not a repo; rm -rf") == "zalandemeter/force"
+    assert run("") == "zalandemeter/force"

@@ -32,6 +32,10 @@ from pathlib import Path
 from . import config, registry
 
 REPO = "zalandemeter/force"
+# testing only: another public repository's issues (owner/name), e.g. to try the duplicate path on real issues
+_override = os.environ.get("FORCE_SUPPORT_REPO", "")
+if re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", _override):
+    REPO = _override
 GITHUB = "https://github.com"
 API = "https://api.github.com"
 NAME = "chuck"
@@ -108,11 +112,16 @@ def mcp_command() -> list[str]:
 
 
 def opencode_config() -> dict:
+    """Chuck's OpenCode: Force's MCP server, and approval for every change (OpenCode matches permission keys as
+    patterns on tool names, `force_*`; the read tools after it are allowed)."""
+    from .mcp import READ_TOOLS
     cmd = mcp_command()
+    permission = {"edit": "ask", "bash": "ask", "webfetch": "ask", "force_*": "ask"}
+    permission.update({f"force_{t}": "allow" for t in READ_TOOLS})
     return {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {"force": {"type": "local", "command": cmd, "enabled": True}},
-        "permission": {"edit": "ask", "bash": "ask", "webfetch": "ask"},
+        "permission": permission,
     }
 
 
