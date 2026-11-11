@@ -159,7 +159,7 @@ def test_doctor_popup_runs_force_bin(tmp_path):
     env = dict(os.environ, FORCE_BIN=str(fake), HOME=str(tmp_path))
     subprocess.run(["bash", str(REPO / "share" / "doctor-popup.sh")], env=env, stdin=subprocess.DEVNULL,
                    capture_output=True, timeout=15)
-    assert log.read_text().strip() == "doctor --fix"
+    assert log.read_text().strip() == "doctor --fix --card"
 
 
 def _dev(args, home, instance=None):

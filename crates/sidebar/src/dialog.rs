@@ -25,6 +25,8 @@ pub const ERROR: Color = Color::Rgb(0xd7, 0x5f, 0x5f);
 pub const SUCCESS: Color = Color::Rgb(0x87, 0xaf, 0x87);
 pub const WARNING: Color = Color::Rgb(0xd7, 0xaf, 0x5f);
 pub const WHITE: Color = Color::Rgb(0xff, 0xff, 0xff);
+pub const RULE: Color = Color::Rgb(0x3c, 0x3c, 0x3c); // #3c3c3c the cards' rule under the title
+pub const BG_INK: Color = Color::Rgb(0x26, 0x26, 0x26); // #262626 text on the coral button
 pub const C_NEEDS_YOU: Color = Color::Rgb(0xe8, 0x80, 0x6f);
 pub const C_YOUR_TURN: Color = Color::Rgb(0x87, 0xc0, 0x8f);
 pub const C_DOWN: Color = Color::Rgb(0xd7, 0x5f, 0x5f);
@@ -745,15 +747,53 @@ impl Dialog {
         Some((x as u16, y as u16))
     }
 
+    /// The keys, as on Force's cards (force/cards.py): right-aligned on the row above the last, the first (the
+    /// main action) as a coral button ` Enter  Create `, the others in grey (`Esc  Cancel`).
     fn draw_footer(&self, buf: &mut Buffer) {
-        let y = self.h.saturating_sub(1);
-        let mut x = CONTENT_LEFT;
-        for (i, (key, word)) in self.footer_sections().iter().enumerate() {
+        let y = self.h.saturating_sub(2);
+        let parts: Vec<(String, bool)> = self
+            .footer_sections()
+            .iter()
+            .enumerate()
+            .map(|(i, (key, word))| {
+                let text = format!("{}  {}", cap_key(key), cap_first(word));
+                if i == 0 { (format!(" {} ", text), true) } else { (text, false) }
+            })
+            .collect();
+        let width: usize = parts.iter().map(|(t, _)| t.chars().map(chw).sum::<usize>()).sum::<usize>()
+            + SPACER * parts.len().saturating_sub(1);
+        let right = self.w.saturating_sub(CONTENT_LEFT);
+        let mut x = right.saturating_sub(width).max(CONTENT_LEFT);
+        for (i, (text, button)) in parts.iter().enumerate() {
             if i > 0 {
                 x += SPACER;
             }
-            x = put(buf, x, y, key, ACCENT);
-            x = put(buf, x, y, &format!(" {}", word), FG_DIM);
+            if *button {
+                for ch in text.chars() {
+                    x = set_cell(buf, x, y, ch, BG_INK, ACCENT, true);
+                }
+            } else {
+                x = put(buf, x, y, text, FG_DIM);
+            }
+        }
+    }
+
+    /// The title row and its rule, as on Force's cards: the icon in coral (rich tier), the title in white bold.
+    fn draw_title(&self, buf: &mut Buffer, icon: char, text: &str) {
+        let mut x = CONTENT_LEFT;
+        if self.tier == Tier::Rich {
+            x = set_cell(buf, x, 1, icon, ACCENT, BG, false);
+            x += crate::glyphs::gap(self.tier).chars().count();
+        }
+        for ch in text.chars() {
+            if x >= self.w.saturating_sub(CONTENT_LEFT) {
+                break;
+            }
+            x = set_cell(buf, x, 1, ch, WHITE, BG, true);
+        }
+        let mut rx = CONTENT_LEFT;
+        while rx < self.w.saturating_sub(CONTENT_LEFT) {
+            rx = set_cell(buf, rx, 2, '─', RULE, BG, false);
         }
     }
 
@@ -784,7 +824,7 @@ impl Dialog {
     fn draw_new(&mut self, buf: &mut Buffer) {
         // rows: 1 title, 3 `Kind`, 4 chips, 6 `Name`, 7 name input, 9 `Folder`, 10 folder input,
         //       12 status, last row footer (blank rows between the groups).
-        put(buf, CONTENT_LEFT, 1, &title(self.tier, "New session", '\u{F067}'), WHITE);
+        self.draw_title(buf, '\u{F067}', "New session");
         put(buf, CONTENT_LEFT, 3, "Kind", FG_DIM);
         // the selected chip is raised; coral while the kind row has focus
         let sel_fg = if self.new_focus == NewFocus::Kind { ACCENT } else { WHITE };
@@ -801,16 +841,14 @@ impl Dialog {
     }
 
     fn draw_rename(&mut self, buf: &mut Buffer) {
-        let title = title(self.tier, &format!("Rename {}", self.name.clone().unwrap_or_default()), '\u{F040}');
-        put(buf, CONTENT_LEFT, 1, &title, WHITE);
+        self.draw_title(buf, '\u{F040}', &format!("Rename {}", self.name.clone().unwrap_or_default()));
         put(buf, CONTENT_LEFT, 3, "New name", FG_DIM);
         self.draw_input(buf, 4, &self.rename_input, self.rename_cursor, "", true);
         self.status_text_y(buf, 6);
     }
 
     fn draw_move(&mut self, buf: &mut Buffer) {
-        let title = title(self.tier, &format!("Move {}", self.name.clone().unwrap_or_default()), '\u{F07B}');
-        put(buf, CONTENT_LEFT, 1, &title, WHITE);
+        self.draw_title(buf, '\u{F07B}', &format!("Move {}", self.name.clone().unwrap_or_default()));
         put(buf, CONTENT_LEFT, 3, "Folder", FG_DIM);
         self.draw_input(buf, 4, &self.move_input, self.move_cursor, "", true);
         // a shell session restarts in the new folder: one dim warning row under the field
@@ -827,8 +865,7 @@ impl Dialog {
             (_, false) => ('\u{F1F8}', format!("Delete {}?", self.name.clone().unwrap_or_default())),
             (_, true) => ('\u{F1F8}', format!("Force-delete {}?", self.name.clone().unwrap_or_default())),
         };
-        let title = title(self.tier, &raw, icon);
-        put(buf, CONTENT_LEFT, 1, &title, WHITE);
+        self.draw_title(buf, icon, &raw);
         let body = match self.kind {
             Kind::Archive => "Stops the session and keeps its conversation. Restore it any time from the archived list (Ctrl+Space A).",
             _ => "Stops it and removes it from Force for good; it cannot be restored. (Archive keeps it instead.)",
@@ -871,9 +908,9 @@ impl Dialog {
     }
 
     fn draw_archived(&mut self, buf: &mut Buffer) {
-        let _ = put(buf, CONTENT_LEFT, 1, &title(self.tier, "Archived sessions", '\u{F187}'), WHITE);
+        self.draw_title(buf, '\u{F187}', "Archived sessions");
         let list_top = ARCH_LIST_TOP;
-        let bottom = self.h.saturating_sub(2);
+        let bottom = self.h.saturating_sub(3);
         let list_h = bottom.saturating_sub(list_top);
         let entries = archived_sorted(&self.entries);
         if entries.is_empty() {
@@ -910,10 +947,10 @@ impl Dialog {
     }
 
     fn draw_jump(&mut self, buf: &mut Buffer) {
-        let _ = put(buf, CONTENT_LEFT, 1, &title(self.tier, "Jump to session", '\u{F002}'), WHITE);
+        self.draw_title(buf, '\u{F002}', "Jump to session");
         self.draw_input(buf, JUMP_FILTER_Y, &self.jump_filter, self.jump_cursor, "type to filter", true);
         let list_top = JUMP_LIST_TOP;
-        let bottom = self.h.saturating_sub(2);
+        let bottom = self.h.saturating_sub(3);
         let list_h = bottom.saturating_sub(list_top);
         if self.jump_shown.is_empty() {
             let msg = "no session matches";
@@ -1076,7 +1113,7 @@ impl Dialog {
                     return;
                 }
                 let list_top = ARCH_LIST_TOP;
-                let bottom = self.h.saturating_sub(2);
+                let bottom = self.h.saturating_sub(3);
                 let visible = (bottom - list_top) / 2;
                 let top = scroll_top(self.arch_cursor, visible, entries.len());
                 if row < list_top {
@@ -1093,7 +1130,7 @@ impl Dialog {
                     return;
                 }
                 let list_top = JUMP_LIST_TOP;
-                let bottom = self.h.saturating_sub(2);
+                let bottom = self.h.saturating_sub(3);
                 let visible = (bottom - list_top).max(1);
                 let top = scroll_top(self.jump_sel, visible, self.jump_shown.len());
                 if row < list_top {
@@ -1481,13 +1518,26 @@ fn chw(ch: char) -> usize {
     ch.width().unwrap_or(1)
 }
 
-/// RICH dialog titles get a leading icon + space (PLAIN keeps today's bare title). Width is unchanged because
-/// every RICH icon is exactly 1 column.
-fn title(tier: Tier, title: &str, icon: char) -> String {
-    if tier == Tier::Rich {
-        format!("{}{}{}", icon, crate::glyphs::gap(tier), title)
-    } else {
-        title.to_string()
+/// A key as the cards write it: `enter` -> `Enter`, `ctrl+s` -> `Ctrl+S`, `y` -> `Y`.
+fn cap_key(key: &str) -> String {
+    key.split('+')
+        .map(|p| {
+            let mut c = p.chars();
+            match c.next() {
+                Some(f) if p.chars().count() == 1 => f.to_uppercase().collect::<String>(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn cap_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
     }
 }
 
@@ -1923,13 +1973,25 @@ mod tests {
 
     #[test]
     fn rich_dialog_title_icon_and_status_glyphs() {
-        // RICH titles get a leading icon + a 2-cell slot gap; PLAIN keeps the bare title.
-        assert_eq!(title(Tier::Plain, "New", '\u{F067}'), "New");
-        assert_eq!(title(Tier::Rich, "New", '\u{F067}'), "\u{F067}  New");
-        assert_eq!(title(Tier::Rich, "Rename", '\u{F040}'), "\u{F040}  Rename");
-        assert_eq!(title(Tier::Rich, "Archived", '\u{F187}'), "\u{F187}  Archived");
-        assert_eq!(title(Tier::Rich, "Delete", '\u{F1F8}'), "\u{F1F8}  Delete");
-        assert_eq!(title(Tier::Rich, "Jump", '\u{F002}'), "\u{F002}  Jump");
+        // the cards' title: the icon in coral (RICH), the title in white bold, a rule under it; PLAIN: no icon
+        let reg = std::path::PathBuf::from("/nonexistent/registry.json");
+        let snap = std::path::PathBuf::from("/nonexistent/snapshot.json");
+        let mut d = Dialog::new(Kind::Rename, Some("x".into()), &reg, &snap, Box::new(FakeRunner::new()), Tier::Rich, 64, 11);
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 64, 11));
+        d.draw(&mut buf);
+        assert_eq!(buf[(2u16, 1u16)].symbol(), "\u{F040}");
+        assert_eq!(buf[(2u16, 1u16)].fg, ACCENT);
+        assert_eq!(buf[(5u16, 1u16)].symbol(), "R");
+        assert_eq!(buf[(5u16, 1u16)].fg, WHITE);
+        assert_eq!(buf[(2u16, 2u16)].symbol(), "─");
+        assert_eq!(buf[(2u16, 2u16)].fg, RULE);
+        // the main action is a coral button on the bottom right, a blank row under it
+        let row: String = (0..64u16).map(|x| buf[(x, 9u16)].symbol().to_string()).collect();
+        assert!(row.trim_end().ends_with("Enter  Rename    Esc  Cancel") || row.contains(" Enter  Rename "), "{row:?}");
+        let ex = row.find("Enter").unwrap() as u16;
+        assert_eq!(buf[(ex, 9u16)].bg, ACCENT);
+        let last: String = (0..64u16).map(|x| buf[(x, 10u16)].symbol().to_string()).collect();
+        assert!(last.trim().is_empty());
         // status ✓/× swap to font icons in RICH
         assert_eq!(status_parts(Tier::Plain, StatusKind::Ok).0, Some('✓'));
         assert_eq!(status_parts(Tier::Rich, StatusKind::Ok).0, Some('\u{F058}'));
@@ -2519,7 +2581,7 @@ mod layout_tests {
         assert_eq!(buf[(ph, 7u16)].bg, BG_RAISED);
         let c = (0..64u16).find(|&x| buf[(x, 4u16)].symbol() == "C").expect("Claude chip");
         assert_eq!(buf[(c, 4u16)].bg, BG_SELECTED, "selected chip text on the chip background");
-        assert!(contains(&row_text(&buf, 16), "enter"), "footer on last row: {:?}", row_text(&buf, 16));
+        assert!(contains(&row_text(&buf, 15), "Enter"), "footer above the last row: {:?}", row_text(&buf, 15));
     }
 
     #[test]
@@ -2620,7 +2682,7 @@ mod layout_tests {
         assert!(contains(&row_text(&buf, 1), "Rename x"), "title on row 1: {:?}", row_text(&buf, 1));
         assert!(contains(&row_text(&buf, 3), "New name"), "label on row 3: {:?}", row_text(&buf, 3));
         assert!(contains(&row_text(&buf, 4), "▍"), "input on row 4: {:?}", row_text(&buf, 4));
-        assert!(contains(&row_text(&buf, 16), "enter rename"), "footer: {:?}", row_text(&buf, 16));
+        assert!(contains(&row_text(&buf, 15), "Enter  Rename"), "footer: {:?}", row_text(&buf, 15));
     }
 
     #[test]
@@ -2633,9 +2695,9 @@ mod layout_tests {
         assert!(contains(&row_text(&buf, 1), "Move p"), "title on row 1: {:?}", row_text(&buf, 1));
         assert!(contains(&row_text(&buf, 3), "Folder"), "label on row 3: {:?}", row_text(&buf, 3));
         assert!(contains(&row_text(&buf, 4), "▍"), "input on row 4: {:?}", row_text(&buf, 4));
-        assert!(contains(&row_text(&buf, 11), "enter move"), "footer: {:?}", row_text(&buf, 11));
-        assert!(contains(&row_text(&buf, 11), "tab complete"), "footer: {:?}", row_text(&buf, 11));
-        assert!(contains(&row_text(&buf, 11), "esc cancel"), "footer: {:?}", row_text(&buf, 11));
+        assert!(contains(&row_text(&buf, 10), "Enter  Move"), "footer: {:?}", row_text(&buf, 10));
+        assert!(contains(&row_text(&buf, 10), "Tab  Complete"), "footer: {:?}", row_text(&buf, 10));
+        assert!(contains(&row_text(&buf, 10), "Esc  Cancel"), "footer: {:?}", row_text(&buf, 10));
         assert!(!contains(&row_text(&buf, 6), "shell restarts"), "claude: no warning: {:?}", row_text(&buf, 6));
     }
 
@@ -2646,8 +2708,8 @@ mod layout_tests {
         let mut d = Dialog::new(Kind::Move, Some("p".into()), &reg, &snap, Box::new(FakeRunner::new()), Tier::Plain, 64, 12);
         let buf = render(&mut d, 64, 12);
         assert!(contains(&row_text(&buf, 6), "the shell restarts in the new folder"), "shell warning: {:?}", row_text(&buf, 6));
-        assert!(contains(&row_text(&buf, 11), "enter move"), "footer preserved: {:?}", row_text(&buf, 11));
-        assert!(!contains(&row_text(&buf, 11), "shell restarts"), "warning must not overlap the footer");
+        assert!(contains(&row_text(&buf, 10), "Enter  Move"), "footer preserved: {:?}", row_text(&buf, 10));
+        assert!(!contains(&row_text(&buf, 10), "shell restarts"), "warning must not overlap the footer");
         // status lands below the warning
         d.move_input = "/nonexistent/x".into();
         d.validate_move();
@@ -2664,9 +2726,9 @@ mod layout_tests {
         assert!(contains(&row_text(&buf, 1), "Archive x?"), "title: {:?}", row_text(&buf, 1));
         assert!(contains(&row_text(&buf, 3), "Stops the session"), "body on row 3: {:?}", row_text(&buf, 3));
         assert!(d.busy);
-        assert!(contains(&row_text(&buf, 16), "f force"), "busy footer: {:?}", row_text(&buf, 16));
+        assert!(contains(&row_text(&buf, 15), "F  Force"), "busy footer: {:?}", row_text(&buf, 15));
         // body must not reach the footer row
-        assert!(!contains(&row_text(&buf, 16), "Stops the session"), "body overlapping footer: {:?}", row_text(&buf, 16));
+        assert!(!contains(&row_text(&buf, 15), "Stops the session"), "body overlapping footer: {:?}", row_text(&buf, 15));
     }
 
     #[test]
@@ -2678,7 +2740,7 @@ mod layout_tests {
         assert!(contains(&row_text(&buf, 1), "Archived sessions"), "title: {:?}", row_text(&buf, 1));
         assert!(contains(&row_text(&buf, 3), "old"), "name on row 3: {:?}", row_text(&buf, 3));
         assert!(contains(&row_text(&buf, 4), "archived 2025-10-09 · "), "meta: {:?}", row_text(&buf, 4));
-        assert!(contains(&row_text(&buf, 16), "enter restore"), "footer: {:?}", row_text(&buf, 16));
+        assert!(contains(&row_text(&buf, 15), "Enter  Restore"), "footer: {:?}", row_text(&buf, 15));
     }
 
     #[test]
@@ -2713,8 +2775,8 @@ mod layout_tests {
         let buf = render(&mut d, 64, 17);
         assert!(contains(&row_text(&buf, 1), "Jump to session"), "title: {:?}", row_text(&buf, 1));
         assert!(contains(&row_text(&buf, 3), "▍"), "filter input on row 3: {:?}", row_text(&buf, 3));
-        assert!(contains(&row_text(&buf, 16), "enter jump"), "footer: {:?}", row_text(&buf, 16));
-        assert!(contains(&row_text(&buf, 16), "esc close"), "footer: {:?}", row_text(&buf, 16));
+        assert!(contains(&row_text(&buf, 15), "Enter  Jump"), "footer: {:?}", row_text(&buf, 15));
+        assert!(contains(&row_text(&buf, 15), "Esc  Close"), "footer: {:?}", row_text(&buf, 15));
     }
 
     #[test]

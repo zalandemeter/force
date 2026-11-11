@@ -252,8 +252,8 @@ def test_snapshot_marks_chuck():
 def test_question_mark_asks_chuck_and_k_shows_the_keys():
     for mode in ("classic", "split"):
         text = menus.render(mode)
-        assert '"Ask Chuck…" "?"' in text and "support --ui" in text
-        assert '"Keys…" "k"' in text and "show-help.sh" in text
+        assert 'Ask Chuck…" "?"' in text and "support --ui" in text      # after the item's icon format
+        assert 'Keys…" "k"' in text and "show-help.sh" in text
     assert "FORCE_WINDOW=#{window_id}" in menus.render("split")
 
 

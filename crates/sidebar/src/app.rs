@@ -931,11 +931,11 @@ impl App {
     // --- actions ------------------------------------------------------------------
     fn activate(&mut self, target: &str) {
         if target == ARCHIVED_TARGET {
-            self.popup("archived", None, 72, 20);
+            self.popup("archived", None, 72, 21);
             return;
         }
         if target == NEW_TARGET {
-            self.popup("new", None, 64, 17);
+            self.popup("new", None, 64, 18);
             return;
         }
         if target == CHUCK_TARGET {
@@ -2929,8 +2929,8 @@ mod tests {
     #[test]
     fn popup_argv_for_each_kind() {
         for (kind, w, h, name) in [
-            ("new", 64u32, 17u32, None),
-            ("archived", 72u32, 20u32, None),
+            ("new", 64u32, 18u32, None),
+            ("archived", 72u32, 21u32, None),
             ("rename", 64u32, 12u32, Some("a'b")),
             ("move", 64u32, 12u32, Some("proj 2")),
             ("archive", 64u32, 11u32, Some("proj 2")),
@@ -3102,7 +3102,7 @@ mod tests {
         a.nested = Some("/dev/pts/42".into());
         a.host_own = Some("s1".into());
         a.set_tier(Tier::Plain);
-        a.popup("new", None, 64, 17);
+        a.popup("new", None, 64, 18);
         let log = log.lock().unwrap();
         let e = log.iter().find(|e| e.first().map(|s| s.as_str()) == Some("display-popup")).expect("display-popup recorded");
         assert_eq!(e[6], "-c");

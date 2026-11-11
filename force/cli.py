@@ -931,8 +931,11 @@ def hosts_menu_command(cockpit: Cockpit, client: str, window: str) -> int:
     keys = iter("123456789")
     current = cockpit.ui_tmux.run("display", "-p", "-t", window, "#{@force_host}")
     hosts = [("this machine", "local")] + [(r.name, r.name) for r in remote_mod.load(cockpit.paths) if r.enabled]
+    # the Force menu's look (menus.py): coral icons in the rich tier, the current host marked with a coral dot, notes in grey
+    icon = lambda ch: f"#{{?{menus_mod.RICH},#[fg={menus_mod.CORAL}]{ch}#[default]  ,}}"
     for label, host in hosts:
-        mark = "● " if (host == "local" and not current) or host == current else "  "
+        on = (host == "local" and not current) or host == current
+        mark = f"#[fg={menus_mod.CORAL}]●#[default] " if on else "  "
         if host == "local":
             st = _attention_note(cockpit.paths.snapshot) if registry.load(cockpit.paths.registry).live() else " (new shell)"
         else:
@@ -940,11 +943,14 @@ def hosts_menu_command(cockpit: Cockpit, client: str, window: str) -> int:
             snap = remote_mod.remote_dir(cockpit.paths, host) / "snapshot.json"
             st = f" ({state})" if state != "connected" else \
                 _attention_note(snap) if _has_sessions(snap) else " (new shell)"
-        items += [f"{mark}{label}{st}", next(keys, ""),
+        note = f"#[fg={menus_mod.GREY}]{st}#[default]" if st else ""
+        items += [f"{mark}{icon(chr(0xF109) if host == 'local' else chr(0xF233))}{label}{note}", next(keys, ""),
                   f"run-shell -b {shlex.quote(shlex.join([cockpit.cockpit_bin, 'ui-host', host, '--window', window]) + ' >/dev/null 2>&1')}"]
     if len(hosts) == 1:
         items += ["", "-add a host: force host add NAME [SSH]", "", ""]
-    args = ["display-menu", "-O", "-c", client, "-x", "C", "-y", "C", "-T", "#[align=centre] hosts ", *items]
+    title = (f"#[align=centre] #{{?{menus_mod.RICH},#[fg={menus_mod.CORAL}]{chr(0xF233)} ,}}"
+             f"#[fg={menus_mod.WHITE} bold]Hosts#[fg={menus_mod.GREY} nobold] · switch ")
+    args = ["display-menu", "-O", "-c", client, "-x", "C", "-y", "C", "-T", title, *items]
     out = os.environ.get("FORCE_MENU_OUT")
     if out:
         # opened by a click (share/menu.sh): the binding runs this file with source-file, so the menu has the click
@@ -1461,8 +1467,17 @@ def forget_command(cockpit: Cockpit, name: str) -> int:
     return 0
 
 
-def doctor_command(cockpit: Cockpit, fix: bool) -> int:
+def doctor_command(cockpit: Cockpit, fix: bool, card: bool = False) -> int:
     from .doctor import run_doctor
+    if card:
+        # the menu's health check popup: the cards' look (force/cards.py), the title at once, the results as
+        # they come
+        from . import cards
+        print(cards.doctor_head(), flush=True)
+        rc = run_doctor(cockpit, fix=fix, systemd=_systemd_usable(),
+                        out=lambda line: print("\n".join(cards.doctor_line(line)), flush=True))
+        print(cards.doctor_foot(), flush=True)
+        return rc
     # the systemd units are only checked where Force uses them (not without systemd, not for an instance)
     return run_doctor(cockpit, fix=fix, systemd=_systemd_usable())
 
@@ -2369,6 +2384,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="health check of the cockpit (--fix repairs what it can)")
     p.add_argument("--fix", action="store_true")
+    p.add_argument("--card", action="store_true", help=argparse.SUPPRESS)    # the menu's popup (doctor-popup.sh)
 
     fonts_p = sub.add_parser(
         "fonts",
@@ -2553,7 +2569,7 @@ def _dispatch(args) -> int:
         from . import smoke
         return smoke.command(cockpit.paths, cockpit.cfg, args.if_due, args.last)
     if cmd == "doctor":
-        return doctor_command(cockpit, args.fix)
+        return doctor_command(cockpit, args.fix, getattr(args, "card", False))
     if cmd == "fonts":
         return fonts_command(args.args)
     if cmd == "terminals":

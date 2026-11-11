@@ -50,12 +50,12 @@ def test_borders_paint_the_theme_background(conf):
     """Border cells are not pane cells, so window-style does not reach them: without a bg they show the
     terminal's own background (Ubuntu's aubergine GNOME Terminal drew purple lines between the panes). The pane
     borders are drawn in the shell colour #212121 of the sidebar and header (fg too: no line, one frame), and menus
-    and popups sit on that colour with a #3c3c3c rule, so they stand off the agent panes behind them."""
+    and popups sit on that colour with the cards' #4e4e4e rule, so they stand off the agent panes behind them."""
     lines = [ln.split("#  ", 1)[0].split("   #", 1)[0].rstrip() for ln in (ROOT / "share" / conf).read_text().splitlines()]
     for line in ('set -g pane-border-style "fg=#212121,bg=#212121"',
                  'set -g pane-active-border-style "fg=#212121,bg=#212121"',
                  'set -g popup-style "bg=#212121"',
-                 'set -g popup-border-style "fg=#3c3c3c,bg=#212121"',
-                 'set -g menu-style "bg=#212121,fg=colour252"',
-                 'set -g menu-border-style "fg=#3c3c3c,bg=#212121"'):
+                 'set -g popup-border-style "fg=#4e4e4e,bg=#212121"',
+                 'set -g menu-style "bg=#212121,fg=#c6c6c6"',
+                 'set -g menu-border-style "fg=#4e4e4e,bg=#212121"'):
         assert line in lines, line

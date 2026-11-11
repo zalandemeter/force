@@ -417,7 +417,7 @@ def test_hosts_menu_lists_hosts_and_hints_without_remotes(env, monkeypatch):
     remote.save(cockpit.paths, [remote.Remote("buildbox", "buildbox")])
     cli.hosts_menu_command(cockpit, "/dev/pts/1", "@1")
     items = calls[-1]
-    assert any(str(a).startswith("  buildbox") for a in items)
+    assert any(str(a).startswith("  ") and "buildbox" in str(a) for a in items)
     assert not any("add a remote" in str(a) for a in items)
 
 
@@ -504,8 +504,8 @@ def test_hosts_menu_offers_a_new_shell_on_an_empty_remote(env, monkeypatch):
         (d / "snapshot.json").write_text(json.dumps({"sessions": sessions}))
     cli.hosts_menu_command(cockpit, "/dev/pts/1", "@1")
     items = [str(a) for a in calls[-1]]
-    assert "  e (new shell)" in items
-    assert "  f · 1 need you" in items
+    assert any("e#[fg=#8a8a8a] (new shell)" in str(a) for a in items)
+    assert any("f#[fg=#8a8a8a] · 1 need you" in str(i) for i in items)
 
 
 def test_remote_tmux_is_asked_once_and_kept(tmp_path, monkeypatch):

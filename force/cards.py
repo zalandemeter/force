@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 
 RGB = {"coral": (217, 119, 87), "white": (255, 255, 255), "name": (198, 198, 198), "grey": (138, 138, 138),
-       "dim": (95, 95, 95), "rule": (60, 60, 60), "ink": (38, 38, 38)}
+       "dim": (95, 95, 95), "rule": (60, 60, 60), "ink": (38, 38, 38),
+       "ok": (135, 192, 143), "bad": (240, 100, 94)}       # the sidebar's your-turn green, needs-you red
 # display-popup options for the cards: the bars' surface, a rounded light grey border (tmux.rs CHUCK_POPUP_STYLE)
 POPUP_STYLE = '-b rounded -S "fg=#4e4e4e,bg=#212121" -s "bg=#212121"'
 CARD_W = 68          # text width; the popups are 72 wide (border + one column of air on each side)
@@ -104,6 +105,35 @@ def keys_text(color: bool = True) -> str:
             lines.append("  " + c(f"{key:<{KEY_COL}}", "coral", color=color) + c(what, "name", color=color))
     lines += ["", keys_right(("any key", "Close"), color=color), ""]
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- the health check ------------
+def doctor_head(color: bool = True) -> str:
+    return "\n".join(head("", "Health check", "force doctor --fix", color))
+
+
+def doctor_line(line: str, color: bool = True) -> list[str]:
+    """One line of `force doctor` as card rows: a green ✓ or a red ✗ in the key column, the text wrapped."""
+    mark, rest = (line[:1], line[1:].strip()) if line[:1] in ("✓", "✗") else ("", line.strip())
+    fg = {"✓": "ok", "✗": "bad"}.get(mark)
+    width = CARD_W - 4
+    words, rows, cur = rest.split(), [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width:
+            rows.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}" if cur else w
+    rows.append(cur)
+    out = []
+    for i, r in enumerate(rows):
+        lead = c(mark, fg, bold=True, color=color) if (i == 0 and mark) else " "
+        out.append("  " + lead + " " + c(r[:width], "name", color=color))
+    return out
+
+
+def doctor_foot(color: bool = True) -> str:
+    return "\n".join(["", keys_right(("any key", "Close"), color=color)])
 
 
 HELP_FILE = Path(__file__).resolve().parent.parent / "share" / "help.ansi"

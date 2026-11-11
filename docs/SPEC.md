@@ -975,6 +975,7 @@ keyboard mode. The keys that reach tmux in each terminal determine the bindings:
 | switching | `M-PPage`/`M-NPage` previous/next (every terminal); `M-1…9`, `M-Up/Down` kept |
 | sidebar | no keyboard mode: no cursor, no hint rows; any key hands focus to the agent pane |
 | help | menu key `k`: share/help.ansi, written by `python3 -m force.cards` (a test keeps it current): the same card as Chuck's (title and rule, keys in coral, "any key Close"), 18 lines, popup 72×20 with the cards' style (`-b rounded`, border `fg=#4e4e4e`, surface `#212121` as the bars), no cursor |
+| look | every popup and menu in the cards' style (force/cards.py): the bars' surface `#212121`, rounded `#4e4e4e` borders; the menus (Force menu, hosts) a coral Nerd Font icon per item in the rich tier and a styled title, selected `#363636` white bold; the dialogs a coral icon and white bold title over a `#3c3c3c` rule, the main action as a coral button and the other keys in grey on the bottom right (a blank row under them, so each dialog is one row taller); the health check (`force doctor --fix --card`) green ✓ and red ✗ rows |
 
 ### 44.1 Copying without select mode
 

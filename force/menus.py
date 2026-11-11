@@ -21,7 +21,7 @@ from .cards import POPUP_STYLE
 FORCE = "$FORCE_BIN"          # set by tmux.conf / tmux-ui.conf (the live launcher unless an instance, SPEC §2.1)
 APP = "#{@force_app}/share"
 HELP_W, HELP_H = 72, 20          # the key help card (share/help.ansi fits inside, tests/test_keys.py checks)
-DIALOGS = {"jump": (64, 20), "new": (64, 17), "archived": (72, 20)}    # popup sizes (cli.overlay_close reopens them)
+DIALOGS = {"jump": (64, 21), "new": (64, 18), "archived": (72, 21)}    # popup sizes (cli.overlay_close reopens them)
 CHUCK_W, CHUCK_H = 72, 17        # Chuck's card (force support --ui, SPEC §50)
 CHUCK_STYLE = CARD_STYLE = POPUP_STYLE    # the cards' popups: the bars' surface, a light grey border (force/cards.py)
 
@@ -57,7 +57,7 @@ ITEMS = [
 def _common() -> dict[str, str]:
     return {
         "sidebar": f"run-shell -b \"{APP}/sidebar-toggle.sh '#{{socket_path}}' '#{{window_id}}'\"",
-        "health": f"display-popup -E -w 90 -h 24 \"{APP}/doctor-popup.sh\"",
+        "health": f"display-popup {CARD_STYLE} -E -w {HELP_W} -h {HELP_H} \"{APP}/doctor-popup.sh\"",
         "help": f"display-popup {CARD_STYLE} -E -w {HELP_W} -h {HELP_H} \"{APP}/show-help.sh\"",
         "quit": "detach-client",
     }
@@ -75,21 +75,21 @@ def classic() -> tuple[str, dict[str, str]]:
 
     return s, {
         "chuck": f"display-popup {CHUCK_STYLE} -E -w {CHUCK_W} -h {CHUCK_H} \"{FORCE} support --ui\"",
-        "jump": pop(64, 20, "jump"),
+        "jump": pop(*DIALOGS["jump"], "jump"),
         "prev": "switch-client -l",
         "host": "display-message -d 4000 \" switching hosts needs the split layout: force ui split, then run force again \"",
-        "new": pop(64, 17, "new"),
+        "new": pop(*DIALOGS["new"], "new"),
         "newshell": "command-prompt -p \" new shell name:\" "
                     f"\"run-shell \\\"{FORCE} new '%%' --shell --no-switch\\\" ; switch-client -t '=%%'\"",
-        "rename": pop(64, 12, f"rename '{s}'"),
-        "folder": pop(64, 12, f"move '{s}'"),
+        "rename": pop(64, 13, f"rename '{s}'"),
+        "folder": pop(64, 13, f"move '{s}'"),
         "up": force(f"move '{s}' up"),
         "down": force(f"move '{s}' down"),
         "restart": force(f"restart '{s}'"),
         "upgrade": force(f"upgrade '{s}'"),
-        "archive": pop(64, 12, f"archive '{s}'"),
-        "delete": pop(64, 12, f"delete '{s}'"),
-        "archived": pop(72, 20, "archived"),
+        "archive": pop(64, 13, f"archive '{s}'"),
+        "delete": pop(64, 13, f"delete '{s}'"),
+        "archived": pop(*DIALOGS["archived"], "archived"),
         "restart-all": force("restart --all"),
         **_common(),
     }
@@ -124,14 +124,14 @@ def split() -> tuple[str, dict[str, str]]:
         "new": host_first("new", pop(*DIALOGS["new"], "new")),
         "newshell": "command-prompt -p \" new shell name:\" "
                     f"\"run-shell -b \\\"{APP}/ui-key.sh '#{{socket_path}}' '#{{window_id}}' newshell '%%'\\\"\"",
-        "rename": pop(64, 12, f"rename '{s}'"),
-        "folder": pop(64, 12, f"move '{s}'"),
+        "rename": pop(64, 13, f"rename '{s}'"),
+        "folder": pop(64, 13, f"move '{s}'"),
         "up": key("up"),
         "down": key("down"),
         "restart": key("restart"),
         "upgrade": key("upgrade"),
-        "archive": pop(64, 12, f"archive '{s}'"),
-        "delete": pop(64, 12, f"delete '{s}'"),
+        "archive": pop(64, 13, f"archive '{s}'"),
+        "delete": pop(64, 13, f"delete '{s}'"),
         "archived": host_first("archived", pop(*DIALOGS["archived"], "archived")),
         "restart-all": key("restart-all"),
         **_common(),
@@ -154,14 +154,32 @@ def _variants() -> list[tuple[int, list]]:
     return out
 
 
+# The menu in the cards' style (force/cards.py): a coral icon before each item in the rich tier (Nerd Font
+# symbols; the plain tier has none, it may lack them), the title with Force's bolt. tmux expands the formats.
+ICONS = {
+    "jump": "\uf002", "prev": "\uf0ec", "host": "\uf233", "new": "\uf067", "newshell": "\uf120",
+    "rename": "\uf040", "folder": "\uf07b", "up": "\uf062", "down": "\uf063", "restart": "\uf01e",
+    "upgrade": "\uf0aa", "archive": "\uf187", "delete": "\uf1f8", "archived": "\uf07c", "restart-all": "\uf021",
+    "sidebar": "\uf0db", "health": "\uf21e", "chuck": "\uf118", "help": "\uf11c", "quit": "\uf011",
+}
+CORAL, WHITE, GREY = "#d97757", "#ffffff", "#8a8a8a"
+RICH = "#{==:#{@force_glyphs},rich}"
+
+
+def _label(action: str, text: str) -> str:
+    """An item: its icon in coral and two spaces (rich tier only), then the text in the menu's colour."""
+    return f"#{{?{RICH},#[fg={CORAL}]{ICONS[action]}#[default]  ,}}{text}"
+
+
 def render(mode: str) -> str:
     session, cmds = {"classic": classic, "split": split}[mode]()
-    title = f"#[align=centre] Force · #{{=/24/…:{session[2:-1]}}} "
+    title = (f"#[align=centre] #{{?{RICH},#[fg={CORAL}]\uf0e7 ,}}#[fg={WHITE} bold]Force#[fg={GREY} nobold] · "
+             f"#{{=/24/…:{session[2:-1]}}} ")
 
     def menu(items) -> str:
         words = ["display-menu", "-O", "-x", "C", "-y", "C", "-T", _quote(title)]
         for it in items:
-            words += ['""'] if it is None else [_quote(it[1]), _quote(it[0]), _quote(cmds[it[2]])]
+            words += ['""'] if it is None else [_quote(_label(it[2], it[1])), _quote(it[0]), _quote(cmds[it[2]])]
         return " ".join(words)
 
     variants = _variants()
