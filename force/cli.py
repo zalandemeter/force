@@ -443,6 +443,8 @@ def build_ui_session(cockpit: Cockpit, target: str, name: str, cols: int, rows: 
     ui.run("set-option", "-w", "-t", main, "@force_host_tmux", host_tmux)
     # the app path as given (normally the ~/.local/share/force/app symlink), not resolved: a resolved release
     # path kept the ui server's bindings on that release's scripts after every upgrade
+    # the launcher the menus run ($FORCE_BIN, SPEC §2.1): also on a ui server started by an older release
+    ui.run("set-environment", "-g", "FORCE_BIN", config.launcher_path())
     for k, v in (("@force_app", _app_dir(cockpit)),
                  ("@force_state", str(cockpit.paths.state)), ("@force_rich_terms", cockpit.cfg.rich_terminals)):
         ui.set_option(k, v)

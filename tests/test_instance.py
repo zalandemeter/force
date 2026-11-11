@@ -202,3 +202,25 @@ def test_dev_sh_stop_without_anything_running(tmp_path):
 
 def test_dev_sh_parses():
     assert subprocess.run(["bash", "-n", str(REPO / "dev.sh")]).returncode == 0
+
+
+# --- upgrades: servers started by an older release ------------------------------------------------------------
+def test_daemon_publishes_force_bin_to_servers_started_without_it(env, monkeypatch):
+    """`force update` restarts the daemon but not the tmux servers: their config (which sets FORCE_BIN for the
+    menus) is the old one. The new daemon sets FORCE_BIN on the host and the ui server."""
+    from test_daemon import FakeClock
+    from force.daemon import Daemon
+    cockpit = env.make_cockpit()
+    monkeypatch.delenv("FORCE_BIN", raising=False)
+    # both servers up with a config that knows nothing about FORCE_BIN (the fixture's)
+    cockpit.tmux.start_server()
+    subprocess.run(["tmux", "-L", env.socket + "-ui", "-f", str(env.tmp / "tmux-ui.conf"), "new-session", "-d",
+                    "-s", "u"], capture_output=True, timeout=15)
+    for sock in (env.socket, env.socket + "-ui"):
+        subprocess.run(["tmux", "-L", sock, "set-environment", "-gu", "FORCE_BIN"], capture_output=True, timeout=15)
+    Daemon(cockpit, FakeClock()).tick()
+    want = f"FORCE_BIN={config.launcher_path()}"
+    for sock in (env.socket, env.socket + "-ui"):
+        out = subprocess.run(["tmux", "-L", sock, "show-environment", "-g", "FORCE_BIN"], capture_output=True,
+                             text=True, timeout=15).stdout.strip()
+        assert out == want, sock

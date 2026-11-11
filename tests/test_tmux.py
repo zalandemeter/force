@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 
 from force.tmux import Tmux, Pane
 
@@ -219,5 +220,11 @@ def test_pane_title_with_tab_joined(env, monkeypatch):
 def test_pane_current_command(env):
     t = env.tmux
     t.new_session("tc", 80, 24, "/tmp", "exec sleep 100")   # exec: no shell in between, whatever the default shell
-    pane = [p for p in t.panes() if p.session == "tc"][0]
+    # until the exec has happened the pane still runs the shell (a loaded machine takes a moment)
+    deadline = time.time() + 5
+    while True:
+        pane = [p for p in t.panes() if p.session == "tc"][0]
+        if pane.command == "sleep" or time.time() > deadline:
+            break
+        time.sleep(0.05)
     assert pane.command == "sleep"
