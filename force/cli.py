@@ -36,7 +36,8 @@ def make_cockpit(env: dict[str, str] | None = None) -> Cockpit:
     cfg = config.load_config(paths.config_file)
     config.ensure_dirs(paths)
     tmux = Tmux(paths.tmux_socket, paths.tmux_conf)
-    cockpit_bin = shutil.which("force") or str(Path.home() / ".local/bin/force")
+    # an instance's launcher (SPEC §2.1) names itself in FORCE_BIN; the live install is `force` on PATH
+    cockpit_bin = os.environ.get("FORCE_BIN") or shutil.which("force") or str(Path.home() / ".local/bin/force")
     # OpenCode: Force's own copy when managed (SPEC §36), else the one on PATH
     opencode.set_managed(paths.home / "opencode" if cfg.opencode_managed else None)
     return Cockpit(paths, cfg, tmux, cockpit_bin)
@@ -295,7 +296,10 @@ def attach_command(cockpit: Cockpit, name: str | None, no_intro: bool = False, g
 def _systemd_usable(any_units: bool = False) -> bool:
     """systemd user services usable: `systemctl` on PATH, its user instance answers, and (for the host
     start) the force-tmux.service unit is installed. `any_units` (uninstall): any force*.service/timer
-    in ~/.config/systemd/user counts instead of the specific force-tmux.service."""
+    in ~/.config/systemd/user counts instead of the specific force-tmux.service. Never for a development
+    instance (SPEC §2.1): the units belong to the live install."""
+    if config.instance() is not None:
+        return False
     if shutil.which("systemctl") is None:
         return False
     try:
@@ -311,10 +315,10 @@ def _systemd_usable(any_units: bool = False) -> bool:
 
 
 def _launcher() -> str:
-    """How a `force daemon` was (or would be) started: the ~/.local/bin/force launcher when it is ours
-    and executable, else this process's argv[0]."""
+    """How a `force daemon` was (or would be) started: the launcher (FORCE_BIN for an instance, SPEC §2.1, else
+    ~/.local/bin/force) when it is executable, else this process's argv[0]."""
     try:
-        p = Path.home() / ".local/bin" / "force"
+        p = Path(config.launcher_path())
         if os.access(p, os.X_OK):
             return str(p)
     except OSError:
@@ -325,7 +329,7 @@ def _launcher() -> str:
 def _daemon_lock_held(cockpit: Cockpit) -> bool:
     """True when another process holds <state>/daemon.lock (a running daemon). Never blocks."""
     try:
-        with open(cockpit.paths.daemon_lock, "w") as f:
+        with open(cockpit.paths.daemon_lock, "a") as f:     # "a": never truncate the daemon's pid
             try:
                 import fcntl
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -353,6 +357,11 @@ def _start_daemon(cockpit: Cockpit) -> None:
             pass
 
 
+def _app_dir(cockpit: Cockpit) -> str:
+    """The release this cockpit runs (<app>, the parent of share/tmux.conf): tmux's @force_app."""
+    return os.path.abspath(Path(cockpit.paths.tmux_conf).parent.parent)
+
+
 def _start_host(cockpit: Cockpit) -> bool:
     """This machine's host part (force-tmux + daemon) running; False when its tmux server does not come up.
     With systemd usable it starts the units as today; otherwise it starts the tmux server and the daemon itself
@@ -369,8 +378,12 @@ def _start_host(cockpit: Cockpit) -> bool:
                 pass
     else:
         if not cockpit.tmux.server_running():
+            # @force_app / @force_state at once (tmux.conf's defaults are the live install's paths; the
+            # daemon sets them too, but menus can be opened before its first tick)
             subprocess.call(["tmux", "-L", cockpit.paths.tmux_socket, "-f", str(cockpit.paths.tmux_conf),
-                           "start-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             "start-server", ";", "set", "-g", "@force_app", _app_dir(cockpit), ";",
+                             "set", "-g", "@force_state", str(cockpit.paths.state)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if not _daemon_lock_held(cockpit):
             _start_daemon(cockpit)
     deadline = time.time() + 10
@@ -430,7 +443,7 @@ def build_ui_session(cockpit: Cockpit, target: str, name: str, cols: int, rows: 
     ui.run("set-option", "-w", "-t", main, "@force_host_tmux", host_tmux)
     # the app path as given (normally the ~/.local/share/force/app symlink), not resolved: a resolved release
     # path kept the ui server's bindings on that release's scripts after every upgrade
-    for k, v in (("@force_app", os.path.abspath(Path(cockpit.paths.tmux_conf).parent.parent)),
+    for k, v in (("@force_app", _app_dir(cockpit)),
                  ("@force_state", str(cockpit.paths.state)), ("@force_rich_terms", cockpit.cfg.rich_terminals)):
         ui.set_option(k, v)
     if ui.get_option("@force_sidebar") != "off":
@@ -1338,7 +1351,8 @@ def forget_command(cockpit: Cockpit, name: str) -> int:
 
 def doctor_command(cockpit: Cockpit, fix: bool) -> int:
     from .doctor import run_doctor
-    return run_doctor(cockpit, fix=fix)
+    # the systemd units are only checked where Force uses them (not without systemd, not for an instance)
+    return run_doctor(cockpit, fix=fix, systemd=_systemd_usable())
 
 
 def import_command(cockpit: Cockpit, dry_run: bool, pid: int | None, name: str | None,
@@ -2500,11 +2514,34 @@ def _prepend_tmux_bin() -> None:
     os.environ["PATH"] = os.pathsep.join([dstr] + parts)
 
 
+def _instance_refusal(words: list[str]) -> int | None:
+    """A development instance (SPEC §2.1) never touches what the live install owns: its launcher, units, PATH
+    blocks, fonts and releases. Exit 2 for the commands that would; None otherwise."""
+    inst = config.instance()
+    if inst is None or not words:
+        return None
+    how = {"update": "update it from the checkout with ./dev.sh",
+           "uninstall": "remove it with ./dev.sh reset",
+           "fonts": "fonts belong to the live install", "terminals": "fonts belong to the live install"}
+    if words[0] in how:
+        print(f"force: this is the {inst} instance (FORCE_INSTANCE={inst}); {how[words[0]]}", file=sys.stderr)
+        return 2
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
+    try:
+        config.instance()
+    except ValueError as e:
+        print(f"force: {e}", file=sys.stderr)
+        return 2
     _prepend_tmux_bin()
     words = list(sys.argv[1:] if argv is None else argv)
     if words == ["--skill"]:
         return skill_command(None)
+    refused = _instance_refusal(words)
+    if refused is not None:
+        return refused
     fwd = _forward(words)
     if fwd is not None:
         return fwd

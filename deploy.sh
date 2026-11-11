@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Deploy the force working tree to the live cockpit.
+# Deploy the force working tree to the live cockpit (with FORCE_INSTANCE set: to that development instance,
+# SPEC §2.1; ./dev.sh does that).
 #
 # The live cockpit never runs from this repo: it imports from ~/.local/share/force/app, a symlink to
 # an immutable copy under releases/. This script tests the working tree, copies it into a new
@@ -15,6 +16,14 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 BASE="$HOME/.local/share/force"
+SOCK=force
+# FORCE_INSTANCE: deploy into that development instance instead (SPEC §2.1; ./dev.sh sets it)
+if [[ -n "${FORCE_INSTANCE:-}" ]]; then
+  [[ "$FORCE_INSTANCE" =~ ^[a-z][a-z0-9]{0,15}$ ]] \
+    || { echo "deploy: FORCE_INSTANCE must be a short lowercase name (a-z, 0-9)" >&2; exit 2; }
+  BASE="$HOME/.local/share/force-$FORCE_INSTANCE"
+  SOCK="force-$FORCE_INSTANCE"
+fi
 REL="$BASE/releases"
 APP="$BASE/app"
 KEEP=10
@@ -66,6 +75,9 @@ if [[ "${1:-}" == "--rollback" ]]; then
 fi
 
 CARGO="$(select_cargo)"
+# where cargo puts the binaries: CARGO_TARGET_DIR when set (scripts/devbox.sh), else each crate's target/
+SIDEBAR_TARGET="${CARGO_TARGET_DIR:-$REPO/crates/sidebar/target}"
+INTRO_TARGET="${CARGO_TARGET_DIR:-$REPO/crates/intro/target}"
 
 if [[ "${1:-}" != "--no-test" ]]; then
   if ! "$PY" -c 'import pytest' >/dev/null 2>&1; then
@@ -90,10 +102,10 @@ if [[ -f "$REPO/crates/sidebar/Cargo.toml" ]]; then
   (cd "$REPO/crates/sidebar" && nice -n 10 "$CARGO" build --release -q) \
     || { echo "deploy: Rust sidebar does not build, not deployed" >&2; rm -rf "$dest"; exit 1; }
   mkdir -p "$dest/share/bin"
-  cp "$REPO/crates/sidebar/target/release/force-sidebar" "$dest/share/bin/force-sidebar"
+  cp "$SIDEBAR_TARGET/release/force-sidebar" "$dest/share/bin/force-sidebar"
   for b in force-header force-dialog; do
-    if [[ -x "$REPO/crates/sidebar/target/release/$b" ]]; then
-      cp "$REPO/crates/sidebar/target/release/$b" "$dest/share/bin/$b"
+    if [[ -x "$SIDEBAR_TARGET/release/$b" ]]; then
+      cp "$SIDEBAR_TARGET/release/$b" "$dest/share/bin/$b"
     fi
   done
 fi
@@ -104,7 +116,7 @@ if [[ -f "$REPO/crates/intro/Cargo.toml" ]]; then
   (cd "$REPO/crates/intro" && nice -n 10 "$CARGO" build --release -q) \
     || { echo "deploy: intro does not build, not deployed" >&2; rm -rf "$dest"; exit 1; }
   mkdir -p "$dest/share/bin"
-  cp "$REPO/crates/intro/target/release/force-intro" "$dest/share/bin/force-intro"
+  cp "$INTRO_TARGET/release/force-intro" "$dest/share/bin/force-intro"
 fi
 
 # Force's own static tmux (SPEC §46), when scripts/build-release.sh has built it here: the release then runs
@@ -118,15 +130,15 @@ echo "deploy: checking release $id"
 (cd /tmp && PYTHONPATH="$dest" "$PY" -c "import importlib, pkgutil, force
 for m in pkgutil.iter_modules(force.__path__): importlib.import_module('force.' + m.name)") \
   || { echo "deploy: release does not import, not deployed" >&2; rm -rf "$dest"; exit 1; }
-if tmux -L force has-session 2>/dev/null; then
-  tmux -L force source-file -n "$dest/share/tmux.conf" \
+if tmux -L "$SOCK" has-session 2>/dev/null; then
+  tmux -L "$SOCK" source-file -n "$dest/share/tmux.conf" \
     || { echo "deploy: tmux.conf does not parse, not deployed" >&2; rm -rf "$dest"; exit 1; }
-  tmux -L force source-file -n "$dest/share/tmux-ui.conf" \
+  tmux -L "$SOCK" source-file -n "$dest/share/tmux-ui.conf" \
     || { echo "deploy: tmux-ui.conf does not parse, not deployed" >&2; rm -rf "$dest"; exit 1; }
 fi
 
 ln -sfn "$dest" "$APP.tmp" && mv -T "$APP.tmp" "$APP"
-echo "deploy: live -> $id (the daemon reloads within a few seconds)"
+echo "deploy: ${FORCE_INSTANCE:-live} -> $id (the daemon reloads within a few seconds)"
 
 # keep the newest $KEEP releases, never the live one
 ls -1d "$REL"/*/ | sed 's:/$::' | sort | head -n -"$KEEP" | while read -r old; do

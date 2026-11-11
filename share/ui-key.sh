@@ -10,7 +10,7 @@ htmux=$(t display -p -t "$W" '#{@force_host_tmux}')
 nested=$(t display -p -t "$W" '#{@force_nested}')
 sess=$(t display -p -t "$W" '#{@force_session}')
 [ -n "$htmux" ] || htmux="tmux -L force"
-f() { FORCE_HOST="$host" "$HOME/.local/bin/force" "$@"; }
+f() { FORCE_HOST="$host" "${FORCE_BIN:-$HOME/.local/bin/force}" "$@"; }
 # The session the nested client shows now, asked from its host (@force_session can lag a switch by a
 # sidebar poll); published to the window, and the sidebar and header poked to redraw. A remote's shell
 # reads the format, so it is quoted for it.

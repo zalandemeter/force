@@ -410,6 +410,10 @@ class Daemon:
                 # tmux.conf reads header files from @force_state; publish ours once per server.
                 if not getattr(self, "_state_published", False):
                     self.cockpit.tmux.set_option("@force_state", str(self.paths.state))
+                    # the release the menus run scripts from: tmux.conf's default is the live install's
+                    # (a development instance, SPEC §2.1, runs its own)
+                    self.cockpit.tmux.set_option(
+                        "@force_app", os.path.abspath(Path(self.paths.tmux_conf).parent.parent))
                     # tier.sh / presize.sh: which terminals get the rich glyph tier (SPEC §28)
                     self.cockpit.tmux.set_option("@force_rich_terms", self.cfg.rich_terminals)
                     # switched.sh signals the ui panes that show a session (split mode, SPEC §39)
@@ -1484,12 +1488,16 @@ def main(cockpit: Cockpit, interval: float = 1.0) -> int:
     lock_path = cockpit.paths.state / "daemon.lock"
     # `lf` is opened by Python, which defaults to O_CLOEXEC, so the lock fd never survives the
     # reload execv (SPEC §6.11) and the fresh process takes the lock itself.
-    with open(lock_path, "w") as lf:
+    with open(lock_path, "a") as lf:      # "a": a second daemon must not wipe the running one's pid
         try:
             fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             print("force daemon already running", file=sys.stderr)
             return 1
+        # the pid, for `force uninstall` and ./dev.sh stop (lock holders open the file without truncating it)
+        lf.truncate(0)
+        lf.write(f"{os.getpid()}\n")
+        lf.flush()
         stop = threading.Event()
 
         def handler(_signum, _frame):

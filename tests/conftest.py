@@ -14,6 +14,10 @@ from force.tmux import Tmux
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# a development instance's variables (SPEC §2.1) from the developer's shell must not leak into the tests
+os.environ.pop("FORCE_INSTANCE", None)
+os.environ.pop("FORCE_BIN", None)
+
 
 def make_fakecockpit(tmp: Path, paths) -> str:
     """A tmp script that stands in for the force CLI (which is written elsewhere). Implements `run NAME`

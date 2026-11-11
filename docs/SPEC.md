@@ -66,6 +66,22 @@ Advanced, accepted but not listed by `force settings` (only `--all`): `crashRest
 `crashWindowMinutes` 10, `startGraceSeconds` 30, `richTerminals`, `introCellAspect`, `reloadOnChange`,
 `sharing`.
 
+### 2.1 Instances (development)
+
+`FORCE_INSTANCE=<i>` (`^[a-z][a-z0-9]{0,15}$`; unset or empty = the live install; anything else: every command
+exits 2) runs a second, separate Force beside the live one. Its defaults become `~/.local/share/force-<i>`,
+`~/.local/state/force-<i>`, `~/.config/force-<i>/settings.json` and the sockets `force-<i>` / `force-<i>-ui`
+(explicit variables still win); the Claude config dir is shared. `FORCE_BIN` names the launcher that runs it
+(default `~/.local/bin/force`): `tmux.conf` / `tmux-ui.conf` set it in the server's global environment when the
+starting process had none, the menus run `$FORCE_BIN`, the scripts `${FORCE_BIN:-…}`, the header the same.
+
+An instance never touches what the live install owns: no systemd (it starts its tmux server, with `@force_app`
+and `@force_state` set, and its daemon itself, §1), and `force update`, `uninstall`, `fonts`, `terminals` and
+`force.setup` refuse (exit 2). `force doctor` checks the units only where systemd is used. `./dev.sh` builds the
+checkout into the `dev` instance (`deploy.sh` with `FORCE_INSTANCE`) and writes its launcher
+`~/.local/bin/force-dev`; `./dev.sh stop` stops its servers and daemon (the pid the daemon writes into
+`daemon.lock`), `./dev.sh reset` also deletes its four paths.
+
 ## 3. Registry (`$FORCE_HOME/registry.json`)
 
 ```json

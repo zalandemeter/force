@@ -1,0 +1,11 @@
+{
+  "name": "Force",
+  "image": "ghcr.io/zalandemeter/force-dev:latest",
+  "workspaceFolder": "/work",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/work,type=bind",
+  "containerEnv": { "CARGO_TARGET_DIR": "/home/dev/target" },
+  "mounts": ["source=force-devbox-home,target=/home/dev,type=volume"],
+  "customizations": {
+    "vscode": { "extensions": ["ms-python.python", "rust-lang.rust-analyzer", "timonwong.shellcheck"] }
+  }
+}

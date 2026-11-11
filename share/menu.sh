@@ -8,6 +8,6 @@
 kind=$1; S=$2; C=$3; W=$4; OUT=$5
 rm -f "$OUT"
 case $kind in
-  hosts) FORCE_MENU_OUT="$OUT" "$HOME/.local/bin/force" hosts-menu --client "$C" --window "$W" ;;
+  hosts) FORCE_MENU_OUT="$OUT" "${FORCE_BIN:-$HOME/.local/bin/force}" hosts-menu --client "$C" --window "$W" ;;
 esac
 exit 0

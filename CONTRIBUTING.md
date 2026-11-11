@@ -3,7 +3,33 @@
 Thanks for wanting to help. Bug reports and ideas go through the
 [issue forms](https://github.com/zalandemeter/force/issues/new/choose). A security problem goes by email to
 hello@useforce.cc, never into a public issue or pull request ([SECURITY.md](.github/SECURITY.md)). For code, open a
-pull request against `main`: CI runs the tests on it.
+pull request against `main` ([below](#how-a-change-gets-in)).
+
+## How a change gets in
+
+1. **Fork** the repository on GitHub (the Fork button) and clone your fork. Maintainers branch in the repository
+   itself; nobody pushes to `main`, which only takes merged pull requests.
+2. **Branch** from `main`, named `<type>/<short-slug>`: `fix/sidebar-flicker`, `feat/notify-on-crash`.
+3. **Commit** as often as you like, each message a [Conventional Commit](https://www.conventionalcommits.org):
+   `<type>(<optional scope>): <what changes, in the imperative>`, such as `fix(sidebar): stop the flicker on resize`.
+4. **Try it**: the tests, the sandbox (`./dev.sh`), and for installer changes `scripts/try-release.sh` (below).
+5. **Open a pull request** against `main`, its title a Conventional Commit too: it becomes the one commit on `main`.
+   CI must pass: the tests on Python 3.11 to 3.13, the Rust crates, the website build and the title check.
+6. **Squash merge**: a maintainer reviews it, then merges it as one commit, or asks for changes.
+
+| Type | For |
+|---|---|
+| `feat` | something new for users |
+| `fix` | a bug fix |
+| `docs` | documentation and the website text |
+| `refactor` | a code change that changes no behaviour |
+| `perf` | faster or lighter |
+| `test` | tests only |
+| `build` | the release build, the installer, the dev image |
+| `ci` | the workflows |
+| `chore` | anything else (dependencies, housekeeping) |
+
+A breaking change adds `!` after the type (`feat!: …`) and says what breaks in the pull request.
 
 ## The repository
 
@@ -15,21 +41,56 @@ pull request against `main`: CI runs the tests on it.
 | `share/` | files the app installs: tmux configs, helper scripts, the installer template, the agent guide (`skill.md`) |
 | `systemd/` | the user units |
 | `tests/` | the test suite (pytest) |
-| `build/`, `scripts/` | the release build: the builder container, `build-release.sh`, the installer filler, the notices generator |
+| `build/`, `scripts/` | the release build (the builder container, `build-release.sh`, the installer filler, the notices generator), the development image (`build/dev/`, `devbox.sh`) and `try-release.sh` |
+| `dev.sh`, `deploy.sh`, `install.sh` | the sandbox, and installing from the checkout |
 | `website/` | https://useforce.cc: the landing page, the docs page and the tools that build them ([website/README.md](website/README.md)) |
 | `docs/` | the design ([SPEC.md](docs/SPEC.md), cited in the code as `SPEC §N`) and [OPERATING.md](docs/OPERATING.md) |
-| `.github/` | CI, release and website workflows, issue forms |
+| `.github/`, `.devcontainer/` | CI, release, website and image workflows, issue forms; the dev container |
 
 ## Working on it
 
-You need Python 3.11+, tmux, git and Rust (stable).
+You need Python 3.11+, tmux, git and Rust (stable), or only Docker:
 
 ```sh
-./install.sh               # developer install from this checkout: test venv, then ./deploy.sh and setup
-./deploy.sh                # after a change: tests, build, a new release beside the old ones, atomic switch
+scripts/devbox.sh                          # a shell in the development image, in this checkout
+scripts/devbox.sh python3 -m pytest -q     # or any command in it
 ```
 
-Running sessions keep running through a deploy. `./deploy.sh --rollback` goes back one release.
+The image (`ghcr.io/zalandemeter/force-dev`, built from `build/dev/Dockerfile`) has everything below; the
+container runs as you, on your checkout. `.devcontainer/` opens the same image in VS Code or Codespaces.
+
+CI builds the website on every pull request too (the built site is attached to the run as `website-preview`). A
+merge to `main` is the only thing that deploys: users get code only from tagged releases, and the website deploys
+from `main`.
+
+### Try your change in the sandbox
+
+`./dev.sh` runs your checkout as a second, separate Force: the dev instance. It has its own data, settings and tmux
+servers, and no background services. If Force is installed on the machine, that Force keeps running untouched.
+
+```sh
+./dev.sh                   # tests, build, deploy the checkout into the sandbox; again after every change
+force-dev                  # open it (force-dev new, force-dev list, … work like force)
+./dev.sh stop              # stop its tmux servers and daemon
+./dev.sh reset             # stop it and delete the sandbox
+```
+
+### Try a release before it exists
+
+```sh
+scripts/try-release.sh            # build the release tarball, install it with the real install.sh in a fresh
+                                  # ubuntu:24.04 container as a new user, and run checks
+scripts/try-release.sh --shell    # then a shell in that container, to try it by hand
+scripts/try-release.sh --image debian:12
+```
+
+Nothing is published and nothing on your machine changes; it needs Docker.
+
+### Your own install
+
+`./install.sh` installs Force from this checkout as your everyday Force (test venv, then `./deploy.sh` and
+setup), and `./deploy.sh` updates it after a change. That is your live install: try changes in the sandbox
+first. Running sessions keep running through a deploy, and `./deploy.sh --rollback` goes back one release.
 
 Tests:
 
@@ -47,8 +108,9 @@ After a change to a `Cargo.lock`, regenerate `THIRD-PARTY-NOTICES.md` with `scri
 
 ## Releases
 
-1. Set the version in `pyproject.toml` (plain `X.Y.Z`) and merge to `main`.
-2. Tag it and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+1. Try it: `scripts/try-release.sh`.
+2. Set the version in `pyproject.toml` (plain `X.Y.Z`) in a pull request (`chore: release X.Y.Z`) and merge it.
+3. Tag it and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 The release workflow checks that the tag matches `pyproject.toml`, runs the tests, builds the tarball in the
 builder container (static binaries, Force's own tmux), attests its provenance, publishes the GitHub Release with

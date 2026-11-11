@@ -328,6 +328,11 @@ def run_setup(rel, py, no_fonts=False, no_services=False, self_test=False, env=N
 
 
 def main(argv=None) -> int:
+    # a development instance (SPEC §2.1) never writes the live install's launcher, units, PATH blocks or fonts
+    inst = os.environ.get("FORCE_INSTANCE")
+    if inst:
+        print(f"force: this is the {inst} instance (FORCE_INSTANCE={inst}); set it up with ./dev.sh", file=sys.stderr)
+        return 2
     try:
         return _main(argv)
     except SetupError as e:

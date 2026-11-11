@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 SHARE = Path(__file__).resolve().parent.parent / "share"
-FORCE = "$HOME/.local/bin/force"
+FORCE = "$FORCE_BIN"          # set by tmux.conf / tmux-ui.conf (the live launcher unless an instance, SPEC §2.1)
 APP = "#{@force_app}/share"
 HELP_W, HELP_H = 80, 18          # the help popup (share/help.ansi fits inside, tests/test_keys.py checks)
 

@@ -63,3 +63,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: python website/tools/build.py _site
+      - name: Preview of the built site (pull requests; download it from the run's Artifacts)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-preview
+          path: _site
+          retention-days: 7

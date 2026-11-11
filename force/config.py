@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, fields
@@ -199,6 +200,30 @@ def is_wsl(env: dict[str, str] | None = None, proc: Path = Path("/proc")) -> boo
         return False
 
 
+INSTANCE_RE = re.compile(r"^[a-z][a-z0-9]{0,15}$")
+INSTANCE_ERROR = "FORCE_INSTANCE must be a short lowercase name (a-z, 0-9)"
+
+
+def instance(env: dict[str, str] | None = None) -> str | None:
+    """The development instance this process belongs to (SPEC §2.1), or None for the live install.
+
+    FORCE_INSTANCE unset or empty = the live install. An invalid name raises ValueError (INSTANCE_ERROR)."""
+    env = os.environ if env is None else env
+    name = env.get("FORCE_INSTANCE") or ""
+    if not name:
+        return None
+    if not INSTANCE_RE.match(name):
+        raise ValueError(INSTANCE_ERROR)
+    return name
+
+
+def launcher_path(env: dict[str, str] | None = None) -> str:
+    """The `force` launcher that runs this install: FORCE_BIN (set by an instance's launcher, SPEC §2.1), else
+    ~/.local/bin/force."""
+    env = os.environ if env is None else env
+    return env.get("FORCE_BIN") or os.path.join(os.path.expanduser("~"), ".local", "bin", "force")
+
+
 def get_paths(env: dict[str, str] | None = None) -> Paths:
     """Resolve all paths from env (default os.environ), applying SPEC §2 defaults. Does not create dirs."""
     if env is None:
@@ -209,15 +234,18 @@ def get_paths(env: dict[str, str] | None = None) -> Paths:
     # the daemon sees (and source-files) the tmux.conf of whatever release is live now.
     repo_share = Path(os.path.abspath(__file__)).parent.parent / "share" / "tmux.conf"
 
+    # a development instance (SPEC §2.1) gets its own defaults; explicit FORCE_* variables still win
+    inst = instance(env)
+    name = f"force-{inst}" if inst else "force"
     return Paths(
-        home=Path(expand(env.get("FORCE_HOME", "~/.local/share/force"))),
-        state=Path(expand(env.get("FORCE_STATE", "~/.local/state/force"))),
+        home=Path(expand(env.get("FORCE_HOME", f"~/.local/share/{name}"))),
+        state=Path(expand(env.get("FORCE_STATE", f"~/.local/state/{name}"))),
         claude_dir=Path(expand(env.get("FORCE_CLAUDE_DIR", "~/.claude"))),
         claude_bin=_claude_bin(env, expand),
-        tmux_socket=env.get("FORCE_TMUX_SOCKET", "force"),
+        tmux_socket=env.get("FORCE_TMUX_SOCKET", name),
         tmux_conf=Path(expand(env.get("FORCE_TMUX_CONF", str(repo_share)))),
-        config_file=Path(expand(env.get("FORCE_CONFIG", "~/.config/force/settings.json"))),
-        ui_socket=env.get("FORCE_UI_SOCKET", "force-ui"),
+        config_file=Path(expand(env.get("FORCE_CONFIG", f"~/.config/{name}/settings.json"))),
+        ui_socket=env.get("FORCE_UI_SOCKET", f"{name}-ui"),
     )
 
 

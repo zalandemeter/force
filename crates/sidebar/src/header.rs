@@ -152,6 +152,15 @@ fn pill_from(s: &Session) -> Pill {
 
 /// A host marker pill: row 1 is `{needs} need you` when needs > 0 else `{turn} finished`; the pill
 /// state is NeedsYou when needs > 0 else YourTurn.
+/// The `force` launcher to run: FORCE_BIN (a development instance's launcher, SPEC §2.1) when set, else the
+/// live install's ~/.local/bin/force.
+fn force_bin(force_bin: Option<String>, home: Option<String>) -> String {
+    match force_bin {
+        Some(b) if !b.is_empty() => b,
+        _ => format!("{}/.local/bin/force", home.unwrap_or_default()),
+    }
+}
+
 fn host_marker(h: &hosts::OtherHost) -> Pill {
     let state = if h.needs > 0 { State::NeedsYou } else { State::YourTurn };
     let label = if h.needs > 0 {
@@ -732,8 +741,7 @@ impl Header {
                 return;
             }
         };
-        let home = std::env::var("HOME").unwrap_or_default();
-        let bin = format!("{}/.local/bin/force", home);
+        let bin = force_bin(std::env::var("FORCE_BIN").ok(), std::env::var("HOME").ok());
         let args = ["ui-host", name, "--window", &win, "--attention"]
             .iter()
             .map(|s| s.to_string())
@@ -1837,7 +1845,14 @@ mod tests {
     }
 
     #[test]
-    fn host_marker_click_runs_spawner() {
+    fn force_bin_prefers_the_instance_launcher() {
+        assert_eq!(force_bin(Some("/x/force-dev".into()), Some("/home/u".into())), "/x/force-dev");
+        assert_eq!(force_bin(Some(String::new()), Some("/home/u".into())), "/home/u/.local/bin/force");
+        assert_eq!(force_bin(None, Some("/home/u".into())), "/home/u/.local/bin/force");
+    }
+
+    #[test]
+        fn host_marker_click_runs_spawner() {
         let dir = temp_state("click");
         write_snapshot(&dir, "snapshot.json", NOW, serde_json::json!([sess_json("me", "IDLE")]));
         write_snapshot(&dir, "remotes/buildbox/snapshot.json", NOW, serde_json::json!([sess_json("a", "NEEDS_YOU")]));
@@ -1849,7 +1864,7 @@ mod tests {
         let click = layout.clicks.iter().find(|c| c.action == Action::Host("buildbox".into())).cloned().unwrap();
         h.run_action(&click.action);
         let calls = sp_log(h.spawner.as_ref());
-        assert_eq!(calls[0].0, format!("{}/.local/bin/force", std::env::var("HOME").unwrap_or_default()));
+        assert_eq!(calls[0].0, force_bin(std::env::var("FORCE_BIN").ok(), std::env::var("HOME").ok()));
         assert_eq!(calls[0].1, ["ui-host", "buildbox", "--window", "@7", "--attention"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
