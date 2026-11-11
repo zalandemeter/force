@@ -106,9 +106,14 @@ def _schema(s: dict) -> dict:
 def tool_list() -> list[dict]:
     out = []
     for name, (desc, schema, ro) in TOOLS.items():
-        out.append({"name": name, "description": desc, "inputSchema": _schema(schema),
-                    "annotations": {"readOnlyHint": ro, "destructiveHint": False, "idempotentHint": ro,
-                                    "openWorldHint": name in ("issues_search", "host_add", "host_upgrade")}})
+        tool = {"name": name, "description": desc, "inputSchema": _schema(schema),
+                "annotations": {"readOnlyHint": ro, "destructiveHint": False, "idempotentHint": ro,
+                                "openWorldHint": name in ("issues_search", "host_add", "host_upgrade")}}
+        if not ro:
+            # a change to the user's Force always asks, whatever the agent's permission mode (Claude Code honours
+            # this in auto and bypass mode too)
+            tool["_meta"] = {"anthropic/requiresUserInteraction": True}
+        out.append(tool)
     return out
 
 

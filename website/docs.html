@@ -265,6 +265,7 @@
           <tr><th scope="row"><code>opencodeManaged</code></th><td><code>false</code></td><td>Keep Force's own copy of OpenCode on the latest release.</td></tr>
           <tr><th scope="row"><code>checkForUpdates</code></th><td><code>true</code></td><td>The daily check for a new Force.</td></tr>
           <tr><th scope="row"><code>supportAgent</code></th><td><code>auto</code></td><td>The agent Chuck runs on: <code>claude</code>, <code>opencode</code>, or the first one installed.</td></tr>
+          <tr><th scope="row"><code>supportModel</code></th><td>the agent's</td><td>Chuck's model: for Claude Code <code>opus</code>, <code>sonnet</code> or an id; for OpenCode <code>provider/model</code>.</td></tr>
         </tbody>
       </table>
     </section>
@@ -296,7 +297,11 @@
           <a href="mailto:hello@useforce.cc">hello@useforce.cc</a> for you to send.</li>
       </ul>
       <p>He runs on your own Claude Code or OpenCode (setting <code>supportAgent</code>) and your plan, so his answers
-        use your tokens. He never asks for passwords or logins, and nothing reaches GitHub without your click.</p>
+        use your tokens. OpenCode brings any provider it knows; <code>supportModel</code> picks his model. On Claude
+        Code he works in auto mode, but every change to your Force, and a push in fix mode, waits for your click.
+        He never asks for passwords or logins, and nothing reaches GitHub without your click.</p>
+<pre class="code"><span class="p">$</span> force settings set supportAgent opencode             <span class="c"># a fresh Chuck on OpenCode</span>
+<span class="p">$</span> force settings set supportModel deepseek/deepseek-chat <span class="c"># his model (provider/model)</span></pre>
 <pre class="code"><span class="p">$</span> force support                          <span class="c"># his card, then his session</span>
 <span class="p">$</span> force support search sidebar flicker   <span class="c"># issues that match, open and closed</span></pre>
     </section>

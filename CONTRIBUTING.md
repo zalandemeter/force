@@ -39,7 +39,9 @@ A breaking change adds `!` after the type (`feat!: …`) and says what breaks in
 ## Contribute with Chuck
 
 Chuck, Force's assistant (<kbd>?</kbd> inside Force, or `force support`), knows this repository and this flow. Ask
-him to fix an issue and he forks nothing on his own: he clones your fork, branches `fix/N-slug`, writes the fix and a
+him to fix an issue and he forks nothing on his own: he clones your fork once, into
+`~/.local/share/force/support/src`, and reuses that clone for every fix after; each fix gets a branch `fix/N-slug`
+from upstream `main`. He writes the fix and a
 test, runs the tests in the development image and tries the change in the sandbox, shows you the diff, pushes after
 you say yes, and gives you the pre-filled pull request to open. It runs on your own agent and plan, and every step
 is optional.

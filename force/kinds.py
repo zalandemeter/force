@@ -83,8 +83,9 @@ class Claude(Kind):
         extra_settings, extra_args = None, None
         if entry.extra.get("role") == "support":       # Chuck (SPEC §50)
             from . import support
-            support.prepare_dir(cockpit.paths)
-            extra_settings, extra_args = support.claude_launch(cockpit.paths)
+            model = cockpit.cfg.support_model or ""
+            support.prepare_dir(cockpit.paths, model)
+            extra_settings, extra_args = support.claude_launch(cockpit.paths, model)
         argv = claude_mod.build_argv(cockpit.paths.claude_bin, cockpit.paths.claude_dir, entry.name, entry.session_id,
                                      statusline, memory_dir=entry.extra.get("memory_dir"),
                                      remote_control=not os.environ.get("FORCE_NO_REMOTE_CONTROL"),
@@ -149,7 +150,7 @@ class OpenCode(Kind):
         env = {"OPENCODE_DISABLE_AUTOUPDATE": "1"}
         if entry.extra.get("role") == "support":       # Chuck (SPEC §50): his folder's opencode.json and AGENTS.md
             from . import support
-            support.prepare_dir(cockpit.paths)
+            support.prepare_dir(cockpit.paths, cockpit.cfg.support_model or "")
         return opencode_mod.argv(port, entry.extra.get("oc_session"), entry.cwd, binary), env
 
     def read(self, d, entry, pane):

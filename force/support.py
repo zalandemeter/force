@@ -13,7 +13,7 @@ a login.
   force support search WORDS       issues that match (open and closed)
   force support link bug|feature --title T [--field id=value …]   the pre-filled new-issue link, copied
   force support comment N [--file F]                               the comment text copied, the issue's link
-  force support fix N --user GITHUB_NAME                           fix mode: the user's fork in <support>/src
+  force support fix N [--user GITHUB_NAME]                         fix mode: the user's fork, cloned once to <support>/src
   force support pr --title T [--body-file F]                       the pre-filled pull request link, copied
   force support security --title T [--file F]                      a vulnerability by email: mailto: link, copied
 """
@@ -78,7 +78,7 @@ def version() -> str:
 
 
 # --------------------------------------------------------------------------- the folder ------------------
-def prepare_dir(paths) -> Path:
+def prepare_dir(paths, model: str = "") -> Path:
     """Write Chuck's folder from the running release's pack (every open: an update brings the new pack).
     CHUCK.md becomes CLAUDE.md and AGENTS.md; opencode.json registers `force mcp` for OpenCode."""
     d = support_dir(paths)
@@ -94,7 +94,7 @@ def prepare_dir(paths) -> Path:
     schema = Path(paths.tmux_conf).parent / "settings.schema.json"
     if schema.exists():
         _write(d / "settings.schema.json", schema.read_text())
-    _write(d / "opencode.json", json.dumps(opencode_config(), indent=2) + "\n")
+    _write(d / "opencode.json", json.dumps(opencode_config(model), indent=2) + "\n")
     return d
 
 
@@ -114,24 +114,27 @@ def mcp_command() -> list[str]:
     return [config.launcher_path(), "mcp"]
 
 
-def opencode_config() -> dict:
+def opencode_config(model: str = "") -> dict:
     """Chuck's OpenCode: Force's MCP server, and approval for every change (OpenCode matches permission keys as
     patterns on tool names, `force_*`; the read tools after it are allowed)."""
     from .mcp import READ_TOOLS
     cmd = mcp_command()
     permission = {"edit": "ask", "bash": "ask", "webfetch": "ask", "force_*": "ask"}
     permission.update({f"force_{t}": "allow" for t in READ_TOOLS})
-    return {
+    out = {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {"force": {"type": "local", "command": cmd, "enabled": True}},
         "permission": permission,
     }
+    if model:
+        out["model"] = model           # provider/model: any provider OpenCode knows
+    return out
 
 
-def claude_launch(paths) -> tuple[dict, list[str]]:
+def claude_launch(paths, model: str = "") -> tuple[dict, list[str]]:
     """Extra settings and arguments for Chuck's Claude Code (SPEC §50): only his own instructions (the user's
     CLAUDE.md files and rules are skipped, no auto memory), only Force's MCP server, its read tools allowed."""
-    from .mcp import READ_TOOLS
+    from .mcp import READ_TOOLS, TOOLS
     d = support_dir(paths)
     excludes = [str(paths.claude_dir / "CLAUDE.md"), str(paths.claude_dir / "rules") + "/**"]
     for a in d.parents:
@@ -142,12 +145,21 @@ def claude_launch(paths) -> tuple[dict, list[str]]:
         "claudeMdExcludes": excludes,
         "autoMemoryEnabled": False,
         # the read tools need no approval; the change tools ask every time (force/mcp.py)
-        "permissions": {"allow": [f"mcp__force__{t}" for t in READ_TOOLS]},
+        "permissions": {"allow": [f"mcp__force__{t}" for t in READ_TOOLS],
+                        # auto mode decides the rest itself; an explicit ask rule still forces the prompt
+                        # (fix mode: pushing to the user's fork is theirs to approve too)
+                        "ask": [f"mcp__force__{t}" for t in TOOLS if t not in READ_TOOLS]
+                        + ["Bash(git push)", "Bash(git push *)"]},
     }
     mcp = {"mcpServers": {"force": {"type": "stdio", "command": mcp_command()[0], "args": mcp_command()[1:]}}}
-    # the normal permission mode whatever the user's default (a bypass would let change tools run unasked)
-    return settings, ["--mcp-config", json.dumps(mcp, separators=(",", ":")), "--strict-mcp-config",
-                      "--permission-mode", "default"]
+    # auto mode, whatever the user's default: routine reads and lookups need no click; every change to the user's
+    # Force still asks (the ask rules above, and the change tools' requiresUserInteraction)
+    args = ["--mcp-config", json.dumps(mcp, separators=(",", ":")), "--strict-mcp-config", "--permission-mode", "auto",
+            # the installed release (source, SPEC) is his reference: reading it is part of his work, not an outside read
+            "--add-dir", str(app_dir(paths))]
+    if model:
+        args += ["--model", model]
+    return settings, args
 
 
 # --------------------------------------------------------------------------- the session -----------------
@@ -175,16 +187,38 @@ def agent_for(cockpit) -> str | None:
 def ensure_session(cockpit) -> str:
     """Chuck's session, created or brought back from the archive; its name."""
     from . import cli
-    prepare_dir(cockpit.paths)
+    model = cockpit.cfg.support_model or ""
+    prepare_dir(cockpit.paths, model)
     reg = registry.load(cockpit.paths.registry)
     e = find_entry(reg)
-    if e is not None and not e.archived:
-        return e.name
-    if e is not None:
+    kind = agent_for(cockpit)
+    if e is not None and e.archived:
         if cli.unarchive_command(cockpit, e.name) != 0:
             raise SupportError(f"could not bring {e.name} back from the archive")
+    if e is not None and kind is not None and registry.kind(e) != kind:
+        # supportAgent changed: a conversation cannot move between agents, so the same session starts fresh on
+        # the new one (a new conversation id, the old agent's ids dropped), then restarts
+        import uuid
+        with registry.locked(cockpit.paths.home) as r:
+            live = r.get(e.name)
+            if live is not None:
+                for k in [k for k in live.extra if k.startswith("oc_") or k in ("kind", "memory_dir")]:
+                    del live.extra[k]
+                if kind != "claude":
+                    live.extra["kind"] = kind
+                live.extra["support_model"] = model
+                live.session_id = str(uuid.uuid4())
+        cli.restart_command(cockpit, e.name)
         return e.name
-    kind = agent_for(cockpit)
+    if e is not None:
+        if (e.extra.get("support_model") or "") != model:
+            # supportModel changed: the same conversation, restarted on the new model
+            with registry.locked(cockpit.paths.home) as r:
+                live = r.get(e.name)
+                if live is not None:
+                    live.extra["support_model"] = model
+            cli.restart_command(cockpit, e.name)
+        return e.name
     if kind is None:
         raise SupportError("Chuck needs Claude Code or OpenCode. Install Claude Code with: "
                            "curl -fsSL https://claude.ai/install.sh | bash")
@@ -193,7 +227,7 @@ def ensure_session(cockpit) -> str:
     if name is None:
         raise SupportError("no free name for Chuck's session")
     if cli.create_session(cockpit, name, str(support_dir(cockpit.paths)), no_switch=True, kind=kind,
-                          extra={"role": ROLE}) != 0:
+                          extra={"role": ROLE, "support_model": model}) != 0:
         raise SupportError("could not start Chuck's session")
     return name
 
@@ -431,13 +465,18 @@ def issue_title(number: int, opener=urllib.request.urlopen) -> str | None:
         return None
 
 
-def fix_setup(paths, number: int, user: str, title: str | None = None, run=subprocess.run,
+def fix_setup(paths, number: int, user: str | None = None, title: str | None = None, run=subprocess.run,
               upstream: str | None = None, fork: str | None = None) -> tuple[Path, str]:
-    """Clone the user's fork into <support>/src (or reuse it), add the upstream remote, and create the branch
-    fix/N-slug from upstream main. Returns (the clone, the branch)."""
-    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", user or ""):
-        raise SupportError("give your GitHub user name: force support fix N --user NAME")
+    """The user's fork, cloned once into <support>/src and reused for every fix after (the user name is only needed
+    the first time), the upstream remote, and the branch fix/N-slug from upstream main. Returns (the clone, the
+    branch). Refuses while the branch checked out now has uncommitted work."""
     src = support_dir(paths) / "src"
+    if (src / ".git").exists() and not user:
+        # the name given the first time, kept in the clone (else the one in its github.com origin)
+        r = run(["git", "config", "--get", "force.githubUser"], cwd=str(src), capture_output=True, text=True)
+        user = (r.stdout or "").strip() or current_branch(src, run)[1]
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", user or ""):
+        raise SupportError("give your GitHub user name the first time: force support fix N --user NAME")
     fork = fork or f"{GITHUB}/{user}/force.git"
     upstream = upstream or f"{GITHUB}/{REPO}.git"
 
@@ -453,6 +492,12 @@ def fix_setup(paths, number: int, user: str, title: str | None = None, run=subpr
         if r.returncode != 0:
             raise SupportError(f"cannot clone your fork {fork}: fork the repository first "
                                f"({GITHUB}/{REPO}/fork)")
+    git("config", "force.githubUser", user)
+    dirty = git("status", "--porcelain").strip()
+    if dirty:
+        here = git("rev-parse", "--abbrev-ref", "HEAD").strip()
+        files = ", ".join(line[3:] for line in dirty.splitlines()[:5])
+        raise SupportError(f"{here} in {src} has uncommitted changes ({files}): commit or stash them first")
     remotes = git("remote").split()
     if "upstream" not in remotes:
         git("remote", "add", "upstream", upstream)
@@ -587,7 +632,7 @@ def add_parser(sub) -> None:
     c.add_argument("--file")
     f = ss.add_parser("fix", help="fix mode: clone your fork and branch fix/N-slug from upstream main")
     f.add_argument("number", type=int)
-    f.add_argument("--user", required=True, help="your GitHub user name (your fork: github.com/USER/force)")
+    f.add_argument("--user", help="your GitHub user name (your fork: github.com/USER/force); only the first time")
     f.add_argument("--title", help="the issue title for the branch name (default: read from GitHub)")
     sec = ss.add_parser("security", help="a vulnerability report by email (never a public issue): the mailto: "
                                          "link, the report copied (text from --file or stdin)")

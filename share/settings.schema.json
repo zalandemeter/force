@@ -87,6 +87,11 @@
         "opencode"
       ]
     },
+    "supportModel": {
+      "type": "string",
+      "default": "",
+      "description": "Chuck's model: Claude Code an alias or id (opus, sonnet), OpenCode provider/model (any provider it knows)"
+    },
     "crashRestartMax": {
       "type": "integer",
       "default": 3,

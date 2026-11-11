@@ -142,8 +142,17 @@ def test_fix_clones_the_fork_and_branches_from_upstream_main(env, tmp_path):
     # again: the clone and the branch are reused
     assert support.fix_setup(env.paths, 12, "alice", "Sidebar flickers on resize!", upstream=str(up),
                              fork=str(fork)) == (src, branch)
+    # the next fix reuses the clone: no user name needed, a new branch from upstream main
+    src2, branch2 = support.fix_setup(env.paths, 13, None, "Header pill wrong", upstream=str(up), fork=str(fork))
+    assert src2 == src and branch2 == "fix/13-header-pill-wrong"
+    # unsaved work on the branch checked out: refused, with the branch and the file
+    (src / "WIP.md").write_text("half done\n")
+    with pytest.raises(support.SupportError, match="fix/13-header-pill-wrong .* uncommitted changes .*WIP.md"):
+        support.fix_setup(env.paths, 14, None, "Another", upstream=str(up), fork=str(fork))
+    (src / "WIP.md").unlink()
     with pytest.raises(support.SupportError, match="user name"):
-        support.fix_setup(env.paths, 12, "bad name!", "x")
+        support.fix_setup(env.paths.__class__(**{**env.paths.__dict__, "home": env.tmp / "elsewhere"}), 12,
+                          "bad name!", "x")
 
 
 # --- the folder and the launch ---------------------------------------------------------------------------------
@@ -174,7 +183,14 @@ def test_claude_launch_keeps_chuck_to_his_own_context(env):
     allowed = settings["permissions"]["allow"]
     assert "mcp__force__status" in allowed and "mcp__force__settings_set" not in allowed
     assert args[0] == "--mcp-config" and args[2] == "--strict-mcp-config"
-    assert args[3:5] == ["--permission-mode", "default"], "never a bypass for Chuck"
+    assert args[3:5] == ["--permission-mode", "auto"], "auto, whatever the user's default"
+    assert args[5:7] == ["--add-dir", str(support.app_dir(env.paths))]
+    ask = settings["permissions"]["ask"]
+    assert "mcp__force__settings_set" in ask and "mcp__force__host_add" in ask and "mcp__force__status" not in ask
+    assert "Bash(git push *)" in ask and "Bash(git push)" in ask
+    assert "--model" not in args
+    _s, with_model = support.claude_launch(env.paths, "sonnet")
+    assert with_model[-2:] == ["--model", "sonnet"]
     cfg = json.loads(args[1])
     assert cfg["mcpServers"]["force"]["args"] == ["mcp"]
 
@@ -531,3 +547,47 @@ def test_menu_dialogs_restore_the_host_first():
     for kind in ("jump", "new", "archived"):
         assert f"ui-main --window #{{window_id}} --wait --dialog {kind} --client #{{client_name}}" in split
     assert "ui-main" not in menus.render("classic")
+
+
+# --- the agent and the model follow the settings (SPEC §50) ------------------------------------------------------
+def test_change_tools_require_the_users_click_in_every_mode():
+    for t in mcp.tool_list():
+        needs = t.get("_meta", {}).get("anthropic/requiresUserInteraction") is True
+        assert needs == (t["name"] not in mcp.READ_TOOLS), t["name"]
+
+
+def test_opencode_gets_the_model(env):
+    assert "model" not in support.opencode_config()
+    assert support.opencode_config("deepseek/deepseek-v4")["model"] == "deepseek/deepseek-v4"
+    d = support.prepare_dir(env.paths, "openai/gpt-5")
+    assert json.loads((d / "opencode.json").read_text())["model"] == "openai/gpt-5"
+
+
+def test_a_new_support_agent_starts_a_fresh_chuck(cockpit, monkeypatch):
+    import dataclasses
+    monkeypatch.setattr(cli, "available_kinds", lambda c: ["claude", "opencode", "shell"])
+    assert support.ensure_session(cockpit) == "chuck"
+    before = registry.load(cockpit.paths.registry).get("chuck")
+    assert registry.kind(before) == "claude"
+    restarted = []
+    monkeypatch.setattr(cli, "restart_command", lambda c, name, all_=False: restarted.append(name) or 0)
+    cockpit.cfg = dataclasses.replace(cockpit.cfg, support_agent="opencode")
+    assert support.ensure_session(cockpit) == "chuck", "the same session, not chuck-2"
+    after = registry.load(cockpit.paths.registry).get("chuck")
+    assert registry.kind(after) == "opencode" and after.session_id != before.session_id
+    assert registry.is_support(after) and restarted == ["chuck"]
+
+
+def test_a_new_support_model_restarts_chuck_with_his_conversation(cockpit, monkeypatch):
+    import dataclasses
+    assert support.ensure_session(cockpit) == "chuck"
+    restarted = []
+    monkeypatch.setattr(cli, "restart_command", lambda c, name, all_=False: restarted.append(name) or 0)
+    support.ensure_session(cockpit)
+    assert restarted == [], "same model: nothing to do"
+    cockpit.cfg = dataclasses.replace(cockpit.cfg, support_model="sonnet")
+    support.ensure_session(cockpit)
+    assert restarted == ["chuck"]
+    assert registry.load(cockpit.paths.registry).get("chuck").extra["support_model"] == "sonnet"
+    support.ensure_session(cockpit)
+    assert restarted == ["chuck"], "once"

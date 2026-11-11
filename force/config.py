@@ -97,6 +97,8 @@ class Config:
     notify_when_viewed: bool = False
     # the agent Chuck, the support assistant (SPEC §50), runs on: auto = the first installed of Claude Code, OpenCode
     support_agent: str = "auto"
+    # Chuck's model: "" = the agent's default; Claude Code an alias or id (opus, sonnet, …), OpenCode provider/model
+    support_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,8 @@ SETTINGS = [
                "also notify about a session a terminal is showing"),
     SettingSpec("supportAgent", "support_agent", "choice", ("auto", "claude", "opencode"), True,
                "the agent Chuck, the support assistant, runs on: auto | claude | opencode"),
+    SettingSpec("supportModel", "support_model", "string", (), True,
+               "Chuck's model: Claude Code an alias or id (opus, sonnet), OpenCode provider/model (any provider it knows)"),
     SettingSpec("crashRestartMax", "crash_restart_max", "int", (), False,
                "how often a session is restarted after a crash"),
     SettingSpec("crashWindowMinutes", "crash_window_minutes", "number", (), False,
