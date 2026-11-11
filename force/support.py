@@ -15,6 +15,7 @@ a login.
   force support comment N [--file F]                               the comment text copied, the issue's link
   force support fix N --user GITHUB_NAME                           fix mode: the user's fork in <support>/src
   force support pr --title T [--body-file F]                       the pre-filled pull request link, copied
+  force support security --title T [--file F]                      a vulnerability by email: mailto: link, copied
 """
 from __future__ import annotations
 
@@ -376,6 +377,23 @@ def issue_link(kind: str, title: str, fields: dict[str, str]) -> tuple[str, list
     return url, shortened
 
 
+SECURITY_EMAIL = "hello@useforce.cc"
+MAILTO_LIMIT = 1800             # mail apps cut longer mailto: links; the body is copied in full anyway
+
+
+def security_mailto(title: str, body: str) -> str:
+    """The `mailto:` link of a vulnerability report (never a public issue, SPEC §50): the subject, and the body
+    when it fits."""
+    if not title.strip():
+        raise SupportError("the report needs a title")
+    q = {"subject": f"Security: {title.strip()}"}
+    url = f"mailto:{SECURITY_EMAIL}?" + urllib.parse.urlencode({**q, "body": body}, quote_via=urllib.parse.quote)
+    if len(url) > MAILTO_LIMIT:
+        url = f"mailto:{SECURITY_EMAIL}?" + urllib.parse.urlencode(
+            {**q, "body": "(paste the report here: it is on your clipboard)"}, quote_via=urllib.parse.quote)
+    return url
+
+
 def comment_link(number: int) -> str:
     return f"{GITHUB}/{REPO}/issues/{int(number)}#issuecomment-new"
 
@@ -525,6 +543,15 @@ def command(cockpit, args) -> int:
             src, branch = fix_setup(cockpit.paths, args.number, args.user, args.title)
             print(f"{src}\n{branch}")
             return 0
+        if action == "security":
+            body = Path(args.file).expanduser().read_text() if args.file else sys.stdin.read()
+            if not body.strip():
+                raise SupportError("the report is empty")
+            copied = copy(body, cockpit.paths)
+            print(security_mailto(args.title, body))
+            print(f"(send it to {SECURITY_EMAIL}; never as a public issue"
+                  + ("; the report is copied" if copied else "") + ")", file=sys.stderr)
+            return 0
         if action == "pr":
             src = support_dir(cockpit.paths) / "src"
             if not (src / ".git").exists():
@@ -575,6 +602,10 @@ def add_parser(sub) -> None:
     f.add_argument("number", type=int)
     f.add_argument("--user", required=True, help="your GitHub user name (your fork: github.com/USER/force)")
     f.add_argument("--title", help="the issue title for the branch name (default: read from GitHub)")
+    sec = ss.add_parser("security", help="a vulnerability report by email (never a public issue): the mailto: "
+                                         "link, the report copied (text from --file or stdin)")
+    sec.add_argument("--title", required=True)
+    sec.add_argument("--file")
     pr = ss.add_parser("pr", help="the pre-filled pull request link for the fix branch (copied)")
     pr.add_argument("--title", required=True, help="a Conventional Commit, like 'fix(sidebar): …'")
     pr.add_argument("--body-file", help="more text for the pull request description")
