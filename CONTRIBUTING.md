@@ -15,7 +15,11 @@ pull request against `main` ([below](#how-a-change-gets-in)).
 4. **Try it**: the tests, the sandbox (`./dev.sh`), and for installer changes `scripts/try-release.sh` (below).
 5. **Open a pull request** against `main`, its title a Conventional Commit too: it becomes the one commit on `main`.
    CI must pass: the tests on Python 3.11 to 3.13, the Rust crates, the website build and the title check.
-6. **Squash merge**: a maintainer reviews it, then merges it as one commit, or asks for changes.
+6. **The maintainer tries it.** Features are used before they are merged: the maintainer installs the branch build
+   on a real machine (`scripts/install-build.sh HOST`, below) and gives feedback. Changes go onto the same branch,
+   as more commits, until the feature is right.
+7. **Squash merge, on the maintainer's word only.** A pull request is merged when the maintainer says so, and
+   merged as one commit. Nobody else merges, whatever the checks say; an agent working on Force never does.
 
 | Type | For |
 |---|---|
@@ -116,6 +120,9 @@ After a change to a `Cargo.lock`, regenerate `THIRD-PARTY-NOTICES.md` with `scri
 
 ## Releases
 
+A merge is not a release. `main` collects features, and the maintainer decides when they ship, often after several
+of them. Only the maintainer starts a release; an agent working on Force never does. Then:
+
 1. Try it: `scripts/try-release.sh`.
 2. Set the version in `pyproject.toml` (plain `X.Y.Z`) in a pull request (`chore: release X.Y.Z`) and merge it.
 3. Tag it and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
@@ -127,3 +134,13 @@ the tarball, its `.sha256` and `install.sh`, and redeploys the website so that
 `force update` and in their daily check.
 
 To build a release locally: `scripts/build-release.sh [X.Y.Z]` (needs Docker; output in `build/out/dist`).
+
+### Trying a branch on a real machine
+
+```sh
+scripts/install-build.sh HOST          # build this checkout and install it on HOST (ssh), like force update
+scripts/install-build.sh HOST --back   # back to the newest published release installed there
+```
+
+The build goes beside HOST's releases as `<version>-<branch>-<commit>` and becomes the live one there; sessions keep
+running. Its version stays the last published one, so the next `force update` replaces it.
