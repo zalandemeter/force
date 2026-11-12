@@ -99,8 +99,11 @@ class Claude(Kind):
         status = claude_mod.read_status(d.paths.claude_dir, pane.pid)
         src = None
         if status is not None:
-            age = max(0, d._now_ms() - status.status_updated_ms) // 1000
-            src = f"claude status file, updated {age} s ago"
+            if status.status_updated_ms is None:
+                src = "claude status file, no status yet"
+            else:
+                age = max(0, d._now_ms() - status.status_updated_ms) // 1000
+                src = f"claude status file, updated {age} s ago"
         return Reading(status=status, version=claude_mod.process_version(pane.pid), source=src)
 
     def latest_version(self, paths):

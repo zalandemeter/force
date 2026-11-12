@@ -119,7 +119,8 @@ def _compute_live_snapshot(cockpit: Cockpit, now_ms: int | None = None) -> state
             name=entry.name,
             index=idx[entry.name],
             state=st,
-            since_ms=status.status_updated_ms if status else (pane.started_ms if pane else None),
+            since_ms=(status.status_updated_ms if status and status.status_updated_ms
+                      else (pane.started_ms if pane else None)),
             version=version,
             outdated=(version is not None and latest is not None and version != latest),
             archived=False,

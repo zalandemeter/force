@@ -348,6 +348,24 @@ def test_snapshot_and_headers_written(env):
     assert not (env.paths.header_dir / "portal.txt").exists()
 
 
+def test_status_file_without_a_status_yet_shows_starting_with_the_pane_age(env):
+    # issue #23: right after start Claude Code's file has no status / statusUpdatedAt yet. The card is STARTING
+    # and its age counts from the pane's start, not from 1970 (UNKNOWN, ~20769 d).
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    assert wait_for(lambda: current_status(cockpit, "portal") is not None)
+    pid = current_pid(cockpit, "portal")
+    path = cockpit.paths.claude_dir / "sessions" / f"{pid}.json"
+    path.write_text(json.dumps({"pid": pid, "sessionId": entry(env.paths, "portal").session_id, "cwd": "/tmp"}))
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    view = next(s for s in read_snapshot(env.paths.snapshot).sessions if s.name == "portal")
+    assert view.state is State.STARTING
+    started = cockpit.agent_pane("portal").started_ms
+    assert started and view.since_ms == started
+    assert time.time() * 1000 - view.since_ms < 60_000
+
+
 def test_switch_targets(env):
     cockpit = env.make_cockpit()
     add_live(cockpit, "a")
