@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import activity, kinds, report as report_mod, claude as claude_mod, opencode as opencode_mod, remote as remote_mod, share as share_mod, updates, usage as usage_mod
+from . import activity, kinds, report as report_mod, claude as claude_mod, opencode as opencode_mod, procinfo, remote as remote_mod, share as share_mod, updates, usage as usage_mod
 from . import config
 from .config import Config, Paths, ensure_dirs
 from .lifecycle import Cockpit
@@ -72,14 +72,12 @@ def _stop(pid: int) -> None:
 
 
 def _pid_is_live_proxy(pid: int) -> bool:
-    """A Force share proxy is live when its pid is alive AND its cmdline mentions `share-proxy` (so an
-    unrelated process that re-used the pid is never mistaken for ours)."""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            cmdline = f.read().decode("utf-8", "replace")
-    except OSError:
+    """A Force share proxy is live when its cmdline mentions `share-proxy` (so an unrelated process that
+    re-used the pid is never mistaken for ours)."""
+    cmdline = procinfo.cmdline(pid)
+    if cmdline is None:
         return False
-    return "share-proxy" in cmdline
+    return "share-proxy" in " ".join(cmdline)
 
 
 def _share_key(stem: str) -> tuple[str, str] | None:
@@ -1345,15 +1343,14 @@ class Daemon:
         """Start fix-up: respawn sidebar/header panes whose program belongs to another release. An upgrade that
         restarts the daemon (install.sh: `force install-to`, `force remote upgrade`) is never seen by the live
         reload (the new daemon starts from the new fingerprint), so open windows kept the old sidebar and header.
-        Only the Rust programs are judged (/proc/<pid>/exe); a pane still starting (the launcher) is left alone."""
+        Only the Rust programs are judged (its executable); a pane still starting (the launcher) is left alone."""
         current = os.path.realpath(Path(self.paths.tmux_conf).parent.parent)
         for t in self._servers():
             for p in t.panes():
                 if p.role not in ("sidebar", "header") or p.dead or not p.pid:
                     continue
-                try:
-                    exe = os.readlink(f"/proc/{p.pid}/exe").removesuffix(" (deleted)")
-                except OSError:
+                exe = procinfo.exe(p.pid)
+                if exe is None:
                     continue
                 if os.path.basename(exe) not in ("force-sidebar", "force-header"):
                     continue

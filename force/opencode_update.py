@@ -25,6 +25,8 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+from . import procinfo
+
 REPO = "anomalyco/opencode"        # (github.com/sst/opencode redirects here)
 API = f"https://api.github.com/repos/{REPO}/releases"
 MAX_BYTES = 400 * 1024 * 1024      # a release tarball is ~60 MB
@@ -122,13 +124,10 @@ def _reported_version(binary: Path) -> str | None:
 def _in_use(directory: Path) -> bool:
     """Is any process running a binary from `directory`?"""
     d = str(directory.resolve())
-    for pid in os.listdir("/proc"):
-        if pid.isdigit():
-            try:
-                if os.readlink(f"/proc/{pid}/exe").startswith(d + os.sep):
-                    return True
-            except OSError:
-                continue
+    for pid in procinfo.pids():
+        exe = procinfo.exe(pid)
+        if exe is not None and exe.startswith(d + os.sep):
+            return True
     return False
 
 

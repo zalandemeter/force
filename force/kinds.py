@@ -11,7 +11,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import claude as claude_mod, opencode as opencode_mod, usage as usage_mod
+from . import claude as claude_mod, opencode as opencode_mod, procinfo, usage as usage_mod
 from .claude import AgentStatus
 from .registry import Entry, valid_name
 
@@ -237,11 +237,7 @@ class ShellProgram:
 
 
 def _comm(pid: int) -> str | None:
-    try:
-        with open(f"/proc/{pid}/comm") as f:
-            return f.read().strip() or None
-    except OSError:
-        return None
+    return procinfo.comm(pid)
 
 
 def _base_program(cmd: str | None) -> str | None:

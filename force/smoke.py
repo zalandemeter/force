@@ -32,6 +32,8 @@ import time
 import uuid
 from pathlib import Path
 
+from . import procinfo
+
 DUE_AFTER_S = 24 * 3600
 RETRY_FAILED_S = 6 * 3600
 POLL_S = 0.5
@@ -460,8 +462,8 @@ class Run:
             self.cockpit.move(name, str(self.b))
             self.started(name, "move")
             p = self.cockpit.agent_pane(name)
-            argv = Path(f"/proc/{p.pid}/cmdline").read_bytes().split(b"\0")
-            settings = json.loads(argv[argv.index(b"--settings") + 1])
+            argv = procinfo.cmdline(p.pid)
+            settings = json.loads(argv[argv.index("--settings") + 1])
             if "autoMemoryDirectory" not in settings:
                 raise SmokeFail(f"no autoMemoryDirectory in --settings: {settings}")
             if not (self.live.claude_dir / "projects" / project_slug(str(self.b)) / f"{sid}.jsonl").is_file():

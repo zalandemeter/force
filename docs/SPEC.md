@@ -1194,3 +1194,19 @@ CI runs the Python tests and both crates on `macos-26` for every pull request, a
 built darwin tarball as a user would, starts the services, opens a shell and an agent session (a stand-in `claude`),
 runs `force smoke`, updates from the previous release and uninstalls, keeping sidebar screenshots as artifacts. A
 manual workflow opens an SSH session into a macOS runner for the maintainer's key only, for live debugging.
+
+### 51.1 launchd services
+`force/services.py` is the one place that talks to the service manager: systemd (`systemctl --user`, linger,
+`journalctl`) on Linux, launchd on macOS, neither (Force starts its tmux server and daemon itself, §1) when the
+manager does not answer. Three LaunchAgents in `~/Library/LaunchAgents`, written by setup with `plistlib`:
+
+| Label | Runs | Keys |
+|---|---|---|
+| `cc.useforce.force-tmux` | `tmux -L force -f <app>/share/tmux.conf -D` | RunAtLoad, KeepAlive, ThrottleInterval 3 |
+| `cc.useforce.force` | `~/.local/bin/force daemon`, `FORCE_SERVICE=launchd` | RunAtLoad, KeepAlive, AbandonProcessGroup (like KillMode=process), stdout/stderr to `<state>/daemon.log` |
+| `cc.useforce.force-smoke` | `force smoke --if-due` hourly (self-test only) | StartInterval 3600, Nice 10, ProcessType Background |
+
+They live in the `gui/<uid>` domain (`launchctl bootstrap` / `bootout` / `kickstart [-k]` / `print`), so they run
+while the user is logged in; there is no linger. Setup never reloads a loaded, unchanged tmux agent (it holds
+the sessions). A daemon started by launchd starts the tmux agent (`kickstart`), never a bare server, as under
+systemd.

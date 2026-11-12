@@ -1,4 +1,6 @@
 import shlex
+import subprocess
+import sys
 import json
 import os
 import signal
@@ -128,8 +130,7 @@ def test_restart_shell_does_not_wait_out_sigterm(env):
     cockpit.create(e)
     assert wait_for(lambda: cockpit.agent_pane("sh") is not None and cockpit.agent_pane("sh").pid)
     pid0 = cockpit.agent_pane("sh").pid
-    assert wait_for(lambda: int(open(f"/proc/{cockpit.agent_pane('sh').pid}/status").read()
-                                .split("SigIgn:")[1].split()[0], 16) & (1 << 14))   # TERM ignored
+    assert wait_for(lambda: _sig_ignored(cockpit.agent_pane('sh').pid) & (1 << 14))   # TERM ignored
     t0 = time.monotonic()
     cockpit.restart("sh")
     assert time.monotonic() - t0 < 5.0
@@ -431,7 +432,7 @@ def test_delete_live_session_stops_it_and_removes_everything_of_cockpit(env):
     cockpit.delete("portal")
     assert not cockpit.tmux.has_session("portal")
     assert entry(env.paths, "portal") is None and entry(env.paths, "other") is not None
-    assert wait_for(lambda: not os.path.exists(f"/proc/{pid}"))
+    assert wait_for(lambda: not _alive(pid))
     # Claude Code's own transcript stays
     assert (env.paths.claude_dir / "projects" / "-tmp" / f"{sid}.jsonl").exists()
 
@@ -486,9 +487,26 @@ def test_archive_flags_archiving_until_archived(env, monkeypatch):
 
 
 def _cmdline(cockpit, name):
-    pane = cockpit.agent_pane(name)
-    with open(f"/proc/{pane.pid}/cmdline", "rb") as f:
-        return [a.decode() for a in f.read().split(b"\0") if a]
+    from force import procinfo
+    return procinfo.cmdline(cockpit.agent_pane(name).pid) or []
+
+
+def _sig_ignored(pid):
+    """The process's ignored-signal mask (bit n-1 = signal n): /proc on Linux, ps on macOS."""
+    if sys.platform.startswith("linux"):
+        return int(open(f"/proc/{pid}/status").read().split("SigIgn:")[1].split()[0], 16)
+    out = subprocess.run(["ps", "-o", "sigignore=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return int(out.strip() or "0", 16)
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _settings(cockpit, name):

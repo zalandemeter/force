@@ -18,6 +18,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from force import setup as S  # noqa: E402
+# the system PATH the tests give setup, plus the folder of the tmux the tests run (Homebrew's on macOS)
+SYS_PATH = "/usr/bin:/bin:/usr/local/bin"
+if shutil.which("tmux") and os.path.dirname(shutil.which("tmux")) not in SYS_PATH.split(":"):
+    SYS_PATH += ":" + os.path.dirname(shutil.which("tmux"))
 
 
 class R:
@@ -89,7 +93,7 @@ def base_env(tmp, home, data):
         "FORCE_CLAUDE_BIN": str(tmp / "no" / "claude"),
         "USER": "testuser",
         "SHELL": "/bin/bash",
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "PATH": SYS_PATH,
         "DISPLAY": "",
     })
     env.pop("WAYLAND_DISPLAY", None)
@@ -293,6 +297,7 @@ def test_fonts_skipped_without_display(tmp_path):
     assert not any("fonts.sh" in c[0][-1] for c in fr.calls)
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="fontconfig desktops (Linux); macOS: SPEC §51")
 def test_fonts_run_when_display_and_missing_family(tmp_path):
     rel = make_release(tmp_path)
     fr = FakeRun()
@@ -409,7 +414,7 @@ def _bootstrap_env(tmp_path, home, data, extra=None):
     env.update({"HOME": str(home), "FORCE_HOME": str(data),
                 "FORCE_STATE": str(tmp_path / "state"),
                 "FORCE_CLAUDE_BIN": str(tmp_path / "no" / "claude"),
-                "PATH": "/usr/bin:/bin:/usr/local/bin"})
+                "PATH": SYS_PATH})
     env.pop("WAYLAND_DISPLAY", None)
     env.pop("FORCE_RELEASES_URL", None)
     env.pop("FORCE_DOWNLOAD_BASE", None)
@@ -457,7 +462,7 @@ def test_bootstrap_end_to_end(tmp_path, capsys):
         env.update({"HOME": str(home), "FORCE_HOME": str(data),
                    "FORCE_STATE": str(tmp_path / "state"),
                    "FORCE_CLAUDE_BIN": str(tmp_path / "no" / "claude"),
-                   "PATH": "/usr/bin:/bin:/usr/local/bin"})
+                   "PATH": SYS_PATH})
         env.pop("WAYLAND_DISPLAY", None)
         env.pop("FORCE_RELEASES_URL", None)
         env.pop("FORCE_DOWNLOAD_BASE", None)
@@ -497,7 +502,7 @@ def test_bootstrap_wrong_sha_installs_nothing(tmp_path):
         env = dict(os.environ)
         env.update({"HOME": str(home), "FORCE_HOME": str(data),
                    "FORCE_STATE": str(tmp_path / "state2"),
-                   "PATH": "/usr/bin:/bin:/usr/local/bin"})
+                   "PATH": SYS_PATH})
         env.pop("FORCE_RELEASES_URL", None)
         env.pop("FORCE_DOWNLOAD_BASE", None)
         res = subprocess.run(["sh", str(filled), "--no-services", "--no-fonts"],

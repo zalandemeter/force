@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import procinfo
+
 
 def _no_sessions(err: str) -> bool:
     """tmux's answer to `list-panes -a` on a running server that has no sessions (tmux 3.4)."""
@@ -32,7 +34,7 @@ class Pane:
     dead: bool
     dead_status: int | None
     dead_signal: int | None
-    started_ms: int | None  # from #{pane_start_time}? not available in 3.4 -> derive from /proc/<pid> start time; None if unknown
+    started_ms: int | None  # from #{pane_start_time}? not available in 3.4 -> derive from the process start time (procinfo); None if unknown
     title: str | None = None  # #{pane_title}
     command: str | None = None  # #{pane_current_command}: the pane's foreground program (SPEC §49.3)
 
@@ -171,7 +173,7 @@ class Tmux:
                     dead=(dead_s == "1"),
                     dead_status=_int(dstat_s),
                     dead_signal=_int(dsig_s),
-                    started_ms=_started_ms(pid),
+                    started_ms=procinfo.started_ms(pid),
                     title=title,
                     command=command or None,
                 ))
@@ -287,43 +289,3 @@ def _int(s: str) -> int | None:
         return None
 
 
-def _started_ms(pid: int | None) -> int | None:
-    if pid is None:
-        return None
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            line = f.read()
-        rp = line.rfind(")")
-        post = line[rp + 1:].split()
-        # field 22 = starttime; post[0] is field 3
-        start_ticks = int(post[22 - 3])
-        clk = os.sysconf("SC_CLK_TCK") or 100
-        btime = _boot_time()
-        if btime is None:
-            return None
-        return int((btime + start_ticks / clk) * 1000)
-    except (OSError, ValueError, IndexError):
-        return None
-
-
-_BOOT_TIME: int | None = None
-
-
-def _boot_time() -> int | None:
-    """Boot time (epoch s) from /proc/stat, read once: the file is large on this many-core host and
-    this used to be re-read for every pane on every daemon tick."""
-    global _BOOT_TIME
-    if _BOOT_TIME is None:
-        _BOOT_TIME = _read_boot_time()
-    return _BOOT_TIME
-
-
-def _read_boot_time() -> int | None:
-    try:
-        with open("/proc/stat") as f:
-            for l in f:
-                if l.startswith("btime "):
-                    return int(l.split()[1])
-    except (OSError, ValueError):
-        pass
-    return None

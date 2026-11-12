@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .claude import find_transcript, first_prompt as claude_first_prompt, process_version, read_status
+from . import procinfo
 from .lifecycle import Cockpit
 from .registry import load as _load_registry, locked as _locked, slugify, valid_name
 
@@ -48,35 +49,9 @@ def parse_screen_ls(text: str) -> list[tuple[int, str]]:
     return result
 
 
-def children_map(proc: Path = Path("/proc")) -> dict[int, list[int]]:
-    """ppid -> list of child pids from /proc/<pid>/stat (field 4). The comm field in
-    parentheses may contain spaces and ')' so it is parsed from the LAST ')'."""
-    cmap: dict[int, list[int]] = {}
-    try:
-        entries = list(proc.iterdir())
-    except OSError:
-        return cmap
-    for p in entries:
-        if not p.name.isdigit():
-            continue
-        try:
-            text = (p / "stat").read_text()
-        except OSError:
-            continue
-        rparen = text.rfind(")")
-        if rparen < 0:
-            continue
-        parts = text[rparen + 1:].split()
-        if len(parts) < 2:
-            continue
-        try:
-            ppid = int(parts[1])
-        except ValueError:
-            continue
-        cmap.setdefault(ppid, []).append(int(p.name))
-    for kids in cmap.values():
-        kids.sort()          # pid order, not the directory's (only /proc happens to list in order)
-    return cmap
+def children_map(proc: Path | None = None) -> dict[int, list[int]]:
+    """ppid -> list of child pids (SPEC §51), via the one process-facts module."""
+    return procinfo.children_map(proc)
 
 
 def descendants(pid: int, cmap: dict[int, list[int]]) -> list[int]:
@@ -90,26 +65,13 @@ def descendants(pid: int, cmap: dict[int, list[int]]) -> list[int]:
     return result
 
 
-def _ppid(pid: int, proc: Path) -> int | None:
-    """Parent pid of `pid` from /proc/<pid>/stat (parse from the LAST ')'), else None."""
-    try:
-        text = (proc / str(pid) / "stat").read_text()
-    except OSError:
-        return None
-    rparen = text.rfind(")")
-    if rparen < 0:
-        return None
-    parts = text[rparen + 1:].split()
-    if len(parts) < 2:
-        return None
-    try:
-        return int(parts[1])
-    except ValueError:
-        return None
+def _ppid(pid: int, proc: Path | None) -> int | None:
+    """Parent pid of `pid` (SPEC §51), else None."""
+    return procinfo.ppid(pid, proc)
 
 
-def is_claude_pid(pid: int, proc: Path = Path("/proc")) -> bool:
-    """True if /proc/<pid>/exe basename looks like a Claude version string."""
+def is_claude_pid(pid: int, proc: Path | None = None) -> bool:
+    """True if the process executable basename looks like a Claude version string."""
     return process_version(pid, proc) is not None
 
 
@@ -220,7 +182,7 @@ def _build_candidate(cockpit, pid, screen_pid, screen_name, proc, reg, explicit_
 
 def find_candidates(cockpit: Cockpit, pid: int | None = None, name: str | None = None) -> list[Candidate]:
     """SPEC §11 discovery (screen sessions of the current user, or the explicit pid)."""
-    proc = Path("/proc")
+    proc = None
     used: set[str] = set()
     targets: list[tuple[int, int | None, str | None]] = []
 
@@ -379,7 +341,7 @@ class Stopped:
     has_user: bool
 
 
-def _screen_for_pid(pid: int, proc: Path = Path("/proc")) -> tuple[int | None, str | None]:
+def _screen_for_pid(pid: int, proc: Path | None = None) -> tuple[int | None, str | None]:
     """The screen session (spid, sname) whose process tree contains `pid`, else (None, None)."""
     try:
         res = subprocess.run(["screen", "-ls"], capture_output=True, text=True, check=False)
@@ -394,7 +356,7 @@ def _screen_for_pid(pid: int, proc: Path = Path("/proc")) -> tuple[int | None, s
     return None, None
 
 
-def scan_running(cockpit, reg, proc: Path = Path("/proc")) -> list[Running]:
+def scan_running(cockpit, reg, proc: Path | None = None) -> list[Running]:
     """Every live Claude status file of this user that is not a Force agent pane."""
     panes = cockpit.tmux.panes()
     out: list[Running] = []
@@ -705,7 +667,7 @@ def _import_stopped(cockpit, s, explicit_name, dry_run, out, sleep, clock) -> in
 
 def import_session(cockpit, sel: str, explicit_name: str | None = None, dry_run: bool = False,
                   out=print, sleep=time.sleep, clock=time.monotonic,
-                  proc: Path = Path("/proc")) -> int:
+                  proc: Path | None = None) -> int:
     """`force import SESSION [--name NAME] [--dry-run]`: import one running or stopped session."""
     reg = _load_registry(cockpit.paths.registry)
     running = scan_running(cockpit, reg, proc=proc)

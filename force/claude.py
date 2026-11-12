@@ -8,6 +8,8 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import procinfo
+
 DISABLE_AGENT_VIEW = '{"disableAgentView":true}'
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+")
@@ -72,13 +74,12 @@ def read_status(claude_dir: Path, pid: int) -> AgentStatus | None:
     )
 
 
-def process_version(pid: int, proc: Path = Path("/proc")) -> str | None:
-    """Basename of readlink(proc/<pid>/exe) if it looks like a version (^\\d+\\.\\d+\\.\\d+), else None."""
-    try:
-        link = os.readlink(str(proc / str(pid) / "exe"))
-    except OSError:
+def process_version(pid: int, proc: Path | None = None) -> str | None:
+    """Basename of the executable if it looks like a version (^\\d+\\.\\d+\\.\\d+), else None."""
+    exe = procinfo.exe(pid, proc)
+    if exe is None:
         return None
-    base = os.path.basename(link)
+    base = os.path.basename(exe)
     if VERSION_RE.match(base):
         return base
     return None

@@ -18,7 +18,7 @@ import types
 import uuid
 from pathlib import Path
 
-from . import automation, claude, config, opencode, registry, share, state
+from . import automation, claude, config, opencode, procinfo, registry, share, state
 from .config import Config, Paths
 from . import remote as remote_mod
 from . import menus as menus_mod
@@ -1755,21 +1755,11 @@ def _stop_daemon(cockpit: Cockpit) -> None:
         pass
     if not pids:
         launcher = _launcher()
-        try:
-            for entry in os.scandir("/proc"):
-                if not entry.name.isdigit():
-                    continue
-                try:
-                    with open(entry.path + "/cmdline", "rb") as f:
-                        cmd = [c.decode("utf-8", "replace") for c in f.read().split(b"\0") if c]
-                    if os.stat(entry.path).st_uid != os.getuid():
-                        continue
-                except OSError:
-                    continue
-                if cmd == [launcher, "daemon"]:
-                    pids.append(int(entry.name))
-        except OSError:
-            pass
+        for pid in procinfo.pids():
+            if procinfo.uid(pid) != os.getuid():
+                continue
+            if procinfo.cmdline(pid) == [launcher, "daemon"]:
+                pids.append(pid)
     for pid in set(pids):
         try:
             os.kill(pid, signal.SIGTERM)

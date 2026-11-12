@@ -88,7 +88,8 @@ def test_shell_reading():
     assert r.meta.program is None
 
     # a command equal to the pane's own comm is treated as the prompt
-    comm = open("/proc/self/comm").read().strip()
+    from force import procinfo
+    comm = procinfo.comm(os.getpid())
     r = sh.read(_shell_daemon(clock), e, _pane(comm))
     assert r.status.status == "idle"
     assert r.meta.program is None
