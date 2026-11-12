@@ -62,7 +62,8 @@ if [[ ! -x "$TMUX_PREFIX/bin/tmux" ]]; then
       --with-pkg-config-libdir="$DEPS/lib/pkgconfig" \
       --with-terminfo-dirs=/usr/share/terminfo:/opt/homebrew/share/terminfo:/usr/local/share/terminfo \
       --with-default-terminfo-dir=/usr/share/terminfo >/dev/null \
-    && make -j"$JOBS" >/dev/null && make install >/dev/null)
+    && make -j"$JOBS" >/dev/null \
+    && make install.libs install.includes install.progs >/dev/null)   # not install.data: /usr/share is read-only
   echo "build-darwin: libevent" >&2
   (cd "$B/libevent-2.1.12-stable" && ./configure --prefix="$DEPS" --disable-shared --enable-static \
       --disable-openssl --disable-samples --disable-libevent-regress >/dev/null \
