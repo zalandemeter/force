@@ -55,8 +55,9 @@ wait_for 30 "both sessions in the list" sh -c "\"$F\" list | grep -q e2e-shell &
 
 step "the cockpit on screen (a 140x40 terminal: Force's own tmux on a separate socket)"
 T="$HOME/.local/share/force/app/share/tmux-bin/tmux"
-"$T" -L e2e-outer -f /dev/null new-session -d -x 140 -y 40 -e TERM=xterm-256color -e COLORTERM=truecolor \
-  "$F --no-intro e2e-agent"
+printf 'set -g remain-on-exit on\nset -g exit-empty off\n' > "$OUT/outer.conf"   # an exiting client stays visible
+"$T" -L e2e-outer -f "$OUT/outer.conf" new-session -d -x 140 -y 40 -e TERM=xterm-256color -e COLORTERM=truecolor \
+  "$F attach --no-intro e2e-agent"
 sleep 8
 "$T" -L e2e-outer capture-pane -e -p -t 0 > "$OUT/cockpit.ansi"
 python3 "$REPO/website/tools/ansi2html.py" "$OUT/cockpit.ansi" "$OUT/cockpit.html"

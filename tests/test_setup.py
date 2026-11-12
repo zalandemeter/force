@@ -24,6 +24,12 @@ if shutil.which("tmux") and os.path.dirname(shutil.which("tmux")) not in SYS_PAT
     SYS_PATH += ":" + os.path.dirname(shutil.which("tmux"))
 
 
+@pytest.fixture
+def linux_services(monkeypatch):
+    """The systemd path of setup (SPEC §51.1): on a Mac, setup would take the launchd one."""
+    monkeypatch.setattr(S.services.sys, "platform", "linux")
+
+
 class R:
     """The result object a fake `run` returns (mirrors subprocess.CompletedProcess fields setup.py reads)."""
     def __init__(self, rc=0, stdout="", stderr=""):
@@ -153,7 +159,7 @@ def _systemd_present_handlers(fr, active="active", linger="Linger=yes", enable_l
     fr.handle(lambda a, k: R(enable_linger_rc) if a[0] == "loginctl" and a[1] == "enable-linger" else None)
 
 
-def test_full_setup_systemd_present(tmp_path, capsys):
+def test_full_setup_systemd_present(tmp_path, capsys, linux_services):
     rel = make_release(tmp_path)
     home, data = make_home(tmp_path)
     env = base_env(tmp_path, home, data)
@@ -198,7 +204,7 @@ def test_full_setup_systemd_present(tmp_path, capsys):
     assert "open a new terminal first" in out
 
 
-def test_no_duplicate_path_block_and_idempotent_units(tmp_path, capsys):
+def test_no_duplicate_path_block_and_idempotent_units(tmp_path, capsys, linux_services):
     rel = make_release(tmp_path)
     home, data = make_home(tmp_path)
     env = base_env(tmp_path, home, data)
@@ -266,7 +272,7 @@ def test_path_note_only_when_missing(tmp_path, capsys):
     assert "open a new terminal first" not in capsys.readouterr().out
 
 
-def test_systemd_missing_prints_note_no_units(tmp_path, capsys):
+def test_systemd_missing_prints_note_no_units(tmp_path, capsys, linux_services):
     rel = make_release(tmp_path)
     home, data = make_home(tmp_path)
     env = base_env(tmp_path, home, data)
@@ -278,7 +284,7 @@ def test_systemd_missing_prints_note_no_units(tmp_path, capsys):
     assert not (home / ".config" / "systemd" / "user").exists()
 
 
-def test_linger_refused_note(tmp_path, capsys):
+def test_linger_refused_note(tmp_path, capsys, linux_services):
     rel = make_release(tmp_path)
     home, data = make_home(tmp_path)
     env = base_env(tmp_path, home, data)
@@ -361,7 +367,7 @@ def test_prune_keeps_five_plus_live(tmp_path):
     assert len(remaining) == 6                   # 5 newest others + live
 
 
-def test_systemd_call_records_exactly(tmp_path):
+def test_systemd_call_records_exactly(tmp_path, linux_services):
     """The enable --now is one call with exactly the two units and there is a restart only for force.service."""
     rel = make_release(tmp_path)
     home, data = make_home(tmp_path)
