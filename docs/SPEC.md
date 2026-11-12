@@ -911,7 +911,7 @@ Force is distributed as public GitHub releases with a one-line installer and a G
 | Website | `website/` in this repo, built by `website/tools/build.py` and deployed to GitHub Pages by `.github/workflows/pages.yml` on every push to `main` and after each release; https://useforce.cc (apex A/AAAA records to GitHub Pages, `www` CNAME to `<account>.github.io`, DNS on Cloudflare) |
 | Self-update | Force switches to the latest release (atomic, sessions untouched); remotes follow this machine |
 | Licence | MIT (`LICENSE`, Cargo.toml / pyproject `license`). `THIRD-PARTY-NOTICES.md` (`scripts/notices.sh`: cargo-about with `about.toml`, whose accepted list refuses a crate under any other licence; Linux x86_64 + aarch64 only) ships in every release next to LICENSE; `tests/test_notices.py` fails when a crate compiled in is missing from it. CI regenerates and checks it |
-| Platforms | Linux x86_64 + aarch64 |
+| Platforms | Linux x86_64 + aarch64; macOS on Apple Silicon (arm64), beta (§51) |
 | Name | Force, **the code cockpit**; the codebase names Claude Code only where it means that program (its kind, binary, files, the self-test and importer) |
 ## 43. Automation, reports, explain, titles, registry history
 Commands that scripts and agents use instead of raw `tmux send-keys`, plus state that
@@ -1171,3 +1171,26 @@ installed of Claude Code, OpenCode) and plan; nothing reaches GitHub without the
 | `force mcp` | stdio MCP server (JSON-RPC, one message per line; protocol 2024-11-05 … 2025-11-25), tools run `$FORCE_BIN …` as subprocesses. Read: status, settings_get, hosts_list, doctor, version, logs_tail, issues_search, issue_link. Change (approved per call): settings_set/unset, host_add (ssh BatchMode check first)/remove/upgrade, session_new/rename/move, doctor_fix. Never: delete, archive, uninstall, update, keys or prompts into sessions. Changes logged to `<state>/support/actions.jsonl`. |
 | GitHub | search: the public search API, no login (`repo:… is:issue`). Issues: `issues/new?template=…&title=…&<field id>=…` (fields shortened, logs first, to stay ≤ 8000 characters). Comments: the text copied, the issue link printed. Pull requests: `compare/main...USER:force:BRANCH?quick_pull=1&title&body` with a Conventional title and "Fixes #N". Copies go to tmux's buffer with `-w` (OSC 52) and `clip-set.sh`. `FORCE_SUPPORT_REPO=owner/name` (testing only) points search and links at another public repository. A vulnerability never goes to GitHub (SECURITY.md): `force support security --title T --file F` copies the report and prints a `mailto:hello@useforce.cc` link (subject "Security: T", the body when the link stays ≤ 1800 characters). |
 | Fix mode | `force support fix N [--user NAME]`: the user's fork cloned once to `<support>/src` and reused for every fix (the name kept in its git config `force.githubUser`), remote `upstream`, branch `fix/N-slug` from `upstream/main`, refused while the branch checked out has uncommitted work; tests in the dev image, tries in the `./dev.sh` sandbox; push only after a yes; `force support pr --title …`. |
+
+## 51. macOS (beta)
+Force runs on macOS on Apple Silicon (arm64) like on Linux: the one-line install, local agent and shell sessions,
+remotes, `force update` and uninstall. Intel Macs are not built. It is labelled **beta** until a person has used it
+on a real Mac: CI proves the install and the cockpit on GitHub's macOS runners, not how Terminal.app or iTerm2 draw it.
+
+| Part | Linux | macOS |
+|---|---|---|
+| Process facts | `/proc` | `force/procinfo.py`, the one place that reads them: on Linux `/proc`; on macOS libproc through ctypes (`proc_listallpids`, `proc_pidpath`, `proc_pidinfo` PROC_PIDTBSDINFO for the parent, name and start time) and `sysctl` KERN_PROCARGS2 for the argument vector. Functions given an explicit root read that directory in the `/proc` format (tests) |
+| Snapshot watch (sidebar) | inotify on the snapshot's folder | kqueue EVFILT_VNODE (NOTE_WRITE) on the folder: an entry added or renamed in it, then the same read |
+| Host name (sidebar, header) | `gethostname()` | `gethostname()` |
+| Shell scripts | POSIX sh plus `flock(1)`, `timeout(1)`, `sha256sum` | no GNU tools assumed: the toggle lock is a mkdir lock, `timeout` is used only when present, `shasum -a 256` stands in for `sha256sum` |
+| Services | systemd user units, linger | launchd agents in `~/Library/LaunchAgents` (§51.1) |
+| Binaries | static musl, built in the Alpine container | built on a macOS runner: the Rust programs for `aarch64-apple-darwin`; tmux 3.4 with libevent and ncurses linked in (only the system library is dynamic); ad-hoc signed by the linker |
+| Python | the system's 3.11+, else python-build-standalone | macOS has 3.9 at most, so python-build-standalone `aarch64-apple-darwin` (same pin) |
+| Download | `force-X.Y.Z-linux-ARCH.tar.gz` | `force-X.Y.Z-darwin-arm64.tar.gz`; files fetched by curl carry no quarantine flag, so no notarisation |
+| Icon font | `~/.local/share/fonts`, fc-list | `~/Library/Fonts`; the rich tier as on Linux (kitty, Ghostty, WezTerm; a stated `--glyphs rich` for iTerm2 with the symbols font) |
+| Clipboard | OSC 52; wl-copy / xclip / clip-hold | OSC 52; `pbcopy` |
+
+CI runs the Python tests and both crates on `macos-26` for every pull request, and an end-to-end job installs the
+built darwin tarball as a user would, starts the services, opens a shell and an agent session (a stand-in `claude`),
+runs `force smoke`, updates from the previous release and uninstalls, keeping sidebar screenshots as artifacts. A
+manual workflow opens an SSH session into a macOS runner for the maintainer's key only, for live debugging.

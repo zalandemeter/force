@@ -136,6 +136,7 @@ pub fn spawn_loop(snapshot: PathBuf) -> mpsc::Receiver<Event> {
 
 /// Watch `snapshot`'s directory with inotify for IN_MOVED_TO | IN_CLOSE_WRITE | IN_CREATE of that
 /// file name and forward `Event::SnapshotChanged`. Uses the `libc` inotify API directly (no new deps).
+#[cfg(target_os = "linux")]
 fn spawn_watch(snapshot: PathBuf, tx: Sender<Event>) {
     let dir = snapshot.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
     let name = snapshot.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -184,6 +185,83 @@ fn spawn_watch(snapshot: PathBuf, tx: Sender<Event>) {
             }
         }
     });
+}
+
+/// macOS (SPEC §51): kqueue EVFILT_VNODE / NOTE_WRITE on the snapshot's directory fires when an entry is
+/// added or renamed in it (the daemon replaces the file atomically). The event does not name the entry, so
+/// `SnapshotChanged` is sent only when the snapshot's identity (inode, size, mtime) changed since the last one.
+#[cfg(target_os = "macos")]
+fn spawn_watch(snapshot: PathBuf, tx: Sender<Event>) {
+    use std::os::unix::fs::MetadataExt;
+    let dir = snapshot.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+    std::thread::spawn(move || {
+        let cdir = match std::ffi::CString::new(dir.to_string_lossy().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let dfd = unsafe { libc::open(cdir.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
+        if dfd < 0 {
+            return;
+        }
+        let kq = unsafe { libc::kqueue() };
+        if kq < 0 {
+            unsafe { libc::close(dfd) };
+            return;
+        }
+        let change = libc::kevent {
+            ident: dfd as libc::uintptr_t,
+            filter: libc::EVFILT_VNODE,
+            flags: libc::EV_ADD | libc::EV_CLEAR,
+            fflags: libc::NOTE_WRITE,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        if unsafe { libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
+            unsafe { libc::close(kq); libc::close(dfd) };
+            return;
+        }
+        let ident = |p: &PathBuf| std::fs::metadata(p).ok().map(|m| (m.ino(), m.size(), m.mtime(), m.mtime_nsec()));
+        let mut last = ident(&snapshot);
+        loop {
+            let mut ev = libc::kevent { ident: 0, filter: 0, flags: 0, fflags: 0, data: 0, udata: std::ptr::null_mut() };
+            // blocks in the kernel until the directory changes: no periodic wake-ups while idle
+            let n = unsafe { libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, std::ptr::null()) };
+            if n < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                break;
+            }
+            if n == 0 {
+                continue;
+            }
+            let now = ident(&snapshot);
+            if now.is_some() && now != last {
+                last = now;
+                if tx.send(Event::SnapshotChanged).is_err() {
+                    break;
+                }
+            }
+        }
+        unsafe { libc::close(kq); libc::close(dfd) };
+    });
+}
+
+/// Elsewhere: no watcher; the main loop's periodic re-read still picks the snapshot up.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn spawn_watch(_snapshot: PathBuf, _tx: Sender<Event>) {}
+
+/// This machine's short host name (`gethostname` up to the first dot, as the daemon's FORCE_HOST: macOS
+/// answers "name.local"), "" when unknown.
+pub fn host_name() -> String {
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let full = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+    full.split('.').next().unwrap_or("").to_string()
 }
 
 /// Replace the default panic hook so the terminal is restored before the process dies.
@@ -302,7 +380,7 @@ mod tests {
     /// An atomic rename of the snapshot (the daemon's write pattern) must surface as `SnapshotChanged`
     /// within 200 ms.
     #[test]
-    fn inotify_atomic_rename_delivers_snapshot_changed() {
+    fn atomic_rename_delivers_snapshot_changed() {
         let dir = std::env::temp_dir().join(format!("cockpit-watch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

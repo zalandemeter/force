@@ -147,7 +147,10 @@ cleanup() {  # remove the old terminal kit and profiles; silent no-op for anythi
 fetch() {  # fetch <url> <sha256> <dest>
   local tmp; tmp=$(mktemp)
   curl -fsSL --retry 2 -o "$tmp" "$1" || { rm -f "$tmp"; die "download failed: $1"; }
-  echo "$2  $tmp" | sha256sum -c --quiet - || { rm -f "$tmp"; die "checksum mismatch: $1"; }
+  local got
+  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp" | cut -d' ' -f1)
+  else got=$(shasum -a 256 "$tmp" | cut -d' ' -f1); fi        # macOS (SPEC §51)
+  [ "$got" = "$2" ] || { rm -f "$tmp"; die "checksum mismatch: $1"; }
   mv "$tmp" "$3"
 }
 # (no grep -q: it quits early, fc-list gets SIGPIPE, and pipefail turns the match into a failure)

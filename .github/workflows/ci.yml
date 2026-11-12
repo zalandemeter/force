@@ -1,5 +1,5 @@
 # Tests on every push to main and every pull request: the Python package (with tmux, as Force runs it), the two
-# Rust crates, and the website build.
+# Rust crates, and the website build; the package and the crates on macOS too (SPEC §51).
 name: CI
 
 on:
@@ -49,6 +49,41 @@ jobs:
             crates/sidebar/target
             crates/intro/target
           key: rust-${{ runner.os }}-${{ hashFiles('crates/*/Cargo.lock') }}
+      - name: Sidebar, header and dialog
+        run: cargo test --locked --release --manifest-path crates/sidebar/Cargo.toml
+      - name: Intro
+        run: cargo test --locked --release --manifest-path crates/intro/Cargo.toml
+
+  python-macos:
+    name: Python 3.12 (macOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: tmux
+        run: brew install tmux
+      - name: Rust crate sources (the notices test reads the dependency tree offline)
+        run: |
+          cargo fetch --locked --manifest-path crates/sidebar/Cargo.toml
+          cargo fetch --locked --manifest-path crates/intro/Cargo.toml
+      - run: python -m pip install -q pytest
+      - run: python -m pytest -q -p no:cacheprovider
+
+  rust-macos:
+    name: Rust (macOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/sidebar/target
+            crates/intro/target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/*/Cargo.lock') }}
       - name: Sidebar, header and dialog
         run: cargo test --locked --release --manifest-path crates/sidebar/Cargo.toml
       - name: Intro

@@ -351,9 +351,7 @@ impl Header {
             (String::new(), String::new(), None)
         } else {
             let shown_host = std::env::var("FORCE_HOST").unwrap_or_default();
-            let local_label = std::fs::read_to_string("/proc/sys/kernel/hostname")
-                .map(|h| h.trim().to_string())
-                .unwrap_or_default();
+            let local_label = crate::term::host_name();
             let state_dir = tmux_pane
                 .as_ref()
                 .and_then(|p| tmux::pane_option(tmux.as_ref(), p, "#{@force_state}"))

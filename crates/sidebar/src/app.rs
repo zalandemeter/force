@@ -288,7 +288,7 @@ impl App {
             } else {
                 // the host this ui shows (a remote's name, SPEC §40), else this machine
                 std::env::var("FORCE_HOST").ok().filter(|h| !h.is_empty()).unwrap_or_else(|| {
-                    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|h| h.trim().to_string()).unwrap_or_default()
+                    crate::term::host_name()
                 })
             },
             remote_host,

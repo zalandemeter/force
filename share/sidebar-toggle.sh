@@ -12,8 +12,20 @@ CUR="$2"
 DIR="$(dirname "$0")"
 t() { tmux -S "$S" "$@"; }
 
-exec 9>"${XDG_RUNTIME_DIR:-/tmp}/force-sidebar-toggle.lock"
-flock 9
+LOCK="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/force-sidebar-toggle.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  flock 9
+else
+  # macOS has no flock(1) (SPEC §51): a lock directory, taken over after 10 s (a run that died holding it)
+  i=0
+  until mkdir "$LOCK.d" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -ge 100 ] && { rm -rf "$LOCK.d"; i=0; }
+    sleep 0.1
+  done
+  trap 'rm -rf "$LOCK.d"' EXIT INT TERM
+fi
 
 if [ "$(t show -gqv @force_sidebar_hidden)" = 1 ]; then
   t set -gu @force_sidebar_hidden

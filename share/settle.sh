@@ -27,5 +27,14 @@ nested=$(t display -p -t "$W" '#{@force_nested}' 2>/dev/null)
 htmux=$(t display -p -t "$W" '#{@force_host_tmux}' 2>/dev/null)
 [ -n "$nested" ] || exit 0
 [ -n "$htmux" ] || htmux="tmux -L force"
-timeout 8 $htmux refresh-client -t "$nested" >/dev/null 2>&1 </dev/null
+if command -v timeout >/dev/null 2>&1; then
+  timeout 8 $htmux refresh-client -t "$nested" >/dev/null 2>&1 </dev/null
+else  # macOS has no timeout(1) (SPEC §51)
+  $htmux refresh-client -t "$nested" >/dev/null 2>&1 </dev/null &
+  rp=$!
+  ( sleep 8; kill "$rp" 2>/dev/null ) >/dev/null 2>&1 &
+  wp=$!
+  wait "$rp" 2>/dev/null
+  kill "$wp" 2>/dev/null
+fi
 exit 0
