@@ -42,7 +42,8 @@ if [[ "$(uname -s)" == Darwin ]]; then
   launchctl print "gui/$(id -u)/cc.useforce.force" > "$OUT/launchd-daemon.txt" 2>&1 || true
   launchctl print "gui/$(id -u)/cc.useforce.force-tmux" > "$OUT/launchd-tmux.txt" 2>&1 || true
 fi
-wait_for 30 "the host tmux server" "$HOME/.local/share/force/app/share/tmux-bin/tmux" -L force has-session
+# the server answers (a fresh install has no session yet, so not has-session)
+wait_for 30 "the host tmux server" "$HOME/.local/share/force/app/share/tmux-bin/tmux" -L force show -gv exit-empty
 wait_for 30 "the daemon's snapshot" test -s "$HOME/.local/state/force/snapshot.json"
 
 step "sessions: a shell and an agent"
