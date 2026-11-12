@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import activity, kinds, report as report_mod, claude as claude_mod, opencode as opencode_mod, procinfo, remote as remote_mod, share as share_mod, updates, usage as usage_mod
+from . import activity, kinds, report as report_mod, claude as claude_mod, opencode as opencode_mod, procinfo, remote as remote_mod, services, share as share_mod, updates, usage as usage_mod
 from . import config
 from .config import Config, Paths, ensure_dirs
 from .lifecycle import Cockpit
@@ -430,11 +430,10 @@ class Daemon:
             # --- step 1: tmux server -------------------------------------
             try:
                 if not self.cockpit.tmux.server_running():
-                    # Under systemd the server must belong to force-tmux.service, never to this
-                    # unit's cgroup, or restarting force.service would kill every agent session.
-                    if os.environ.get("INVOCATION_ID"):
-                        subprocess.run(["systemctl", "--user", "start", "force-tmux.service"],
-                                       capture_output=True, timeout=15)
+                    # Under the service manager the server must belong to its own unit/agent, never to this
+                    # unit's cgroup, or restarting force would kill every agent session.
+                    if services.under_service_manager():
+                        services.start("tmux")
                     if not self.cockpit.tmux.server_running():
                         self.cockpit.tmux.start_server()
                     self._state_published = False

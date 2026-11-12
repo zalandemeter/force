@@ -80,8 +80,8 @@ def test_instance_never_uses_systemd(monkeypatch):
     monkeypatch.setenv("FORCE_INSTANCE", "dev")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/systemctl")
     monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: 0)
-    assert cli._systemd_usable() is False
-    assert cli._systemd_usable(any_units=True) is False
+    assert cli._services_installed() is False
+    assert cli._services_installed(any_units=True) is False
 
 
 def test_cockpit_bin_and_launcher_follow_force_bin(monkeypatch, env, tmp_path):
@@ -102,10 +102,10 @@ def test_doctor_checks_units_only_where_systemd_is_used(monkeypatch, cockpit):
         return 0
 
     monkeypatch.setattr(doctor, "run_doctor", fake_run)
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: False)
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: False)
     cli.doctor_command(cockpit, False)
     assert seen["systemd"] is False
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: True)
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: True)
     cli.doctor_command(cockpit, False)
     assert seen["systemd"] is True
 

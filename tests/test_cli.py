@@ -1319,7 +1319,7 @@ def test_attach_ui_puts_the_terminal_back_when_the_ui_does_not_start(fakes, monk
 # --- _start_host: no-systemd fallback (SPEC §1) -----------------------------
 def test_start_host_no_systemd_starts_server_and_spawns_daemon(fakes, monkeypatch):
     cockpit, fake, tmp = fakes
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: False)
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: False)
     calls = []
     monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: calls.append(a[0] if a else []) or 0)
     monkeypatch.setattr(cli, "_daemon_lock_held", lambda c: False)
@@ -1343,7 +1343,7 @@ def test_start_host_no_systemd_starts_server_and_spawns_daemon(fakes, monkeypatc
 
 def test_start_host_no_systemd_lock_held_skips_daemon(fakes, monkeypatch):
     cockpit, fake, tmp = fakes
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: False)
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: False)
     monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: 0)
     monkeypatch.setattr(cli, "_daemon_lock_held", lambda c: True)
     spawned = []
@@ -1361,19 +1361,19 @@ def test_start_host_no_systemd_lock_held_skips_daemon(fakes, monkeypatch):
 
 def test_start_host_systemd_starts_units(fakes, monkeypatch):
     cockpit, fake, tmp = fakes
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: True)
-    calls = []
-    # is-active returns 1 (not active) so the units are started
-    monkeypatch.setattr(cli.subprocess, "call",
-                      lambda *a, **k: calls.append(a[0] if a else []) or (1 if "is-active" in (a[0] or []) else 0))
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: True)
+    started = []
+    # the daemon service is not active, so the services are started
+    monkeypatch.setattr(cli.services, "is_active", lambda name, run=None: False)
+    monkeypatch.setattr(cli.services, "start", lambda *names, run=None: started.append(names))
     assert cli._start_host(cockpit) is True
-    assert any(c and c[0] == "systemctl" and c[1] == "--user" and c[2] == "start" for c in calls)
+    assert started == [("tmux", "daemon")]
 
 
 # --- first run: a shell session instead of the prompt (SPEC §2) ---------------
 def test_attach_first_run_creates_shell_session(fakes, monkeypatch):
     cockpit, fake, tmp = fakes
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: False)
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: False)
     monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: 0)
     monkeypatch.setattr(cli, "_daemon_lock_held", lambda c: True)
     monkeypatch.setattr(cli, "play_intro", lambda *a: None)
@@ -1393,7 +1393,7 @@ def test_attach_first_run_creates_shell_session(fakes, monkeypatch):
 
 def test_attach_welcome_spawned_once(fakes, monkeypatch):
     cockpit, fake, tmp = fakes
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: False)
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: False)
     monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: 0)
     monkeypatch.setattr(cli, "_daemon_lock_held", lambda c: True)
     monkeypatch.setattr(cli.os, "ttyname", lambda fd: "/dev/pts/99")
@@ -1470,7 +1470,7 @@ def test_uninstall_no_systemd_removes_path_blocks_and_keeps_data(fakes, monkeypa
     for name in ("app", "releases", "python", "opencode"):
         (data / name).mkdir(parents=True, exist_ok=True)
     (data / "registry.json").write_text("{}")
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: False)
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: False)
     killed = []
     monkeypatch.setattr(cli.subprocess, "call", lambda argv, **k: killed.append(list(argv)) or 0)
     monkeypatch.setattr(cli, "_stop_daemon", lambda c: None)
@@ -1502,14 +1502,18 @@ def test_uninstall_systemd_disables_and_removes_units(fakes, monkeypatch):
     svc.write_text("x")
     timer = user / "force-smoke.timer"
     timer.write_text("x")
-    calls = []
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: True)
+    calls, managed = [], []
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: True)
     monkeypatch.setattr(cli.subprocess, "call", lambda argv, **k: calls.append(list(argv)) or 0)
+    # force/services runs systemctl through its own runner: fake systemd there, never the developer's own
+    monkeypatch.setattr(cli.services, "backend", lambda env=None, run=None: "systemd")
+    monkeypatch.setattr(cli.services, "_real_run",
+                      lambda argv, **k: managed.append(list(argv)) or subprocess.CompletedProcess(argv, 0, "", ""))
     assert cli.uninstall_command(cockpit, False, True) == 0
     assert not svc.exists()
     assert not timer.exists()
-    assert any(c and c[0] == "systemctl" and "disable" in c and "--now" in c for c in calls)
-    assert any(c and c[0] == "systemctl" and "daemon-reload" in c for c in calls)
+    assert any(c[0] == "systemctl" and "disable" in c and "--now" in c for c in managed)
+    assert any(c[0] == "systemctl" and "daemon-reload" in c for c in managed)
     assert any(c and c[:2] == ["tmux", "-L"] and c[-1] == "kill-server" for c in calls), "ui server killed too"
 
 
@@ -1526,7 +1530,7 @@ def test_uninstall_purge_removes_everything(fakes, monkeypatch):
     launcher = tmp / ".local" / "bin"
     launcher.mkdir(parents=True)
     (launcher / "force").write_text("from force.cli import main")
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: False)
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: False)
     monkeypatch.setattr(cli.subprocess, "call", lambda argv, **k: 0)
     monkeypatch.setattr(cli, "_stop_daemon", lambda c: None)
     assert cli.uninstall_command(cockpit, True, True) == 0
@@ -1542,7 +1546,7 @@ def test_uninstall_keeps_foreign_launcher(fakes, monkeypatch):
     bin_dir.mkdir(parents=True)
     launcher = bin_dir / "force"
     launcher.write_text("#!/bin/sh\n# some other tool, not force\n")
-    monkeypatch.setattr(cli, "_systemd_usable", lambda any_units=False: False)
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: False)
     monkeypatch.setattr(cli.subprocess, "call", lambda argv, **k: 0)
     monkeypatch.setattr(cli, "_stop_daemon", lambda c: None)
     assert cli.uninstall_command(cockpit, False, True) == 0

@@ -178,7 +178,9 @@ def test_ppid_os_getpid():
 def test_cmdline_os_getpid():
     argv = procinfo.cmdline(os.getpid())
     assert argv
-    assert argv[0].endswith("python") or "python" in argv[0] or "pytest" in argv[0]
+    # the interpreter's own record of its command line (argv[0] differs: macOS reports the framework's binary)
+    assert argv[1:] == sys.orig_argv[1:]
+    assert "python" in argv[0].lower()
 
 
 def test_exe_os_getpid_is_existing_file():

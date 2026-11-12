@@ -1,5 +1,4 @@
 import shlex
-import subprocess
 import sys
 import json
 import os
@@ -130,7 +129,8 @@ def test_restart_shell_does_not_wait_out_sigterm(env):
     cockpit.create(e)
     assert wait_for(lambda: cockpit.agent_pane("sh") is not None and cockpit.agent_pane("sh").pid)
     pid0 = cockpit.agent_pane("sh").pid
-    assert wait_for(lambda: _sig_ignored(cockpit.agent_pane('sh').pid) & (1 << 14))   # TERM ignored
+    if sys.platform.startswith("linux"):     # the mask is in /proc; macOS's ps does not show it
+        assert wait_for(lambda: _sig_ignored(cockpit.agent_pane('sh').pid) & (1 << 14))   # TERM ignored
     t0 = time.monotonic()
     cockpit.restart("sh")
     assert time.monotonic() - t0 < 5.0
@@ -492,11 +492,8 @@ def _cmdline(cockpit, name):
 
 
 def _sig_ignored(pid):
-    """The process's ignored-signal mask (bit n-1 = signal n): /proc on Linux, ps on macOS."""
-    if sys.platform.startswith("linux"):
-        return int(open(f"/proc/{pid}/status").read().split("SigIgn:")[1].split()[0], 16)
-    out = subprocess.run(["ps", "-o", "sigignore=", "-p", str(pid)], capture_output=True, text=True).stdout
-    return int(out.strip() or "0", 16)
+    """The process's ignored-signal mask (bit n-1 = signal n), from /proc (Linux)."""
+    return int(open(f"/proc/{pid}/status").read().split("SigIgn:")[1].split()[0], 16)
 
 
 def _alive(pid):

@@ -18,6 +18,33 @@ sys.path.insert(0, str(Path(__file__).parent))
 os.environ.pop("FORCE_INSTANCE", None)
 os.environ.pop("FORCE_BIN", None)
 
+# The service managers that start and stop the developer's own Force. A test that reached one for real once ran
+# `systemctl --user disable --now force.service force-tmux.service` and stopped every live session.
+_SERVICE_MANAGERS = frozenset({"systemctl", "launchctl", "loginctl"})
+
+
+class _NoServiceManagerPopen(subprocess.Popen):
+    """subprocess.Popen (under run, call, check_output) that refuses the service managers, as on a machine without
+    one: FileNotFoundError, so force/services.backend() is None. Tests that need a manager inject a fake `run`."""
+
+    def __init__(self, args, *a, **kw):
+        if isinstance(args, (str, bytes)):
+            words = os.fsdecode(args).split()
+            program = words[0] if words else ""
+        elif isinstance(args, os.PathLike):
+            program = os.fsdecode(args)
+        else:
+            args = list(args)
+            program = os.fsdecode(args[0]) if args else ""
+        if os.path.basename(program) in _SERVICE_MANAGERS:
+            raise FileNotFoundError(2, "the live service manager is off limits in tests", program)
+        super().__init__(args, *a, **kw)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_service_manager(monkeypatch):
+    monkeypatch.setattr(subprocess, "Popen", _NoServiceManagerPopen)
+
 
 def make_fakecockpit(tmp: Path, paths) -> str:
     """A tmp script that stands in for the force CLI (which is written elsewhere). Implements `run NAME`

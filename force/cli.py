@@ -18,7 +18,7 @@ import types
 import uuid
 from pathlib import Path
 
-from . import automation, claude, config, opencode, procinfo, registry, share, state
+from . import automation, claude, config, opencode, procinfo, registry, services, share, state
 from .config import Config, Paths
 from . import remote as remote_mod
 from . import menus as menus_mod
@@ -298,25 +298,10 @@ def attach_command(cockpit: Cockpit, name: str | None, no_intro: bool = False, g
     return 0
 
 
-def _systemd_usable(any_units: bool = False) -> bool:
-    """systemd user services usable: `systemctl` on PATH, its user instance answers, and (for the host
-    start) the force-tmux.service unit is installed. `any_units` (uninstall): any force*.service/timer
-    in ~/.config/systemd/user counts instead of the specific force-tmux.service. Never for a development
-    instance (SPEC §2.1): the units belong to the live install."""
-    if config.instance() is not None:
-        return False
-    if shutil.which("systemctl") is None:
-        return False
-    try:
-        if subprocess.call(["systemctl", "--user", "show-environment"],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
-            return False
-    except OSError:
-        return False
-    user_dir = Path.home() / ".config" / "systemd" / "user"
-    if any_units:
-        return any(user_dir.glob("force*.service")) or any(user_dir.glob("force*.timer"))
-    return (user_dir / "force-tmux.service").exists()
+def _services_installed(any_units: bool = False) -> bool:
+    """The host services are installed and their manager answers (systemd units, or launchd agents on macOS;
+    never for a development instance): force/services.installed (SPEC §51)."""
+    return services.installed(any_units=any_units)
 
 
 def _launcher() -> str:
@@ -371,16 +356,9 @@ def _start_host(cockpit: Cockpit) -> bool:
     """This machine's host part (force-tmux + daemon) running; False when its tmux server does not come up.
     With systemd usable it starts the units as today; otherwise it starts the tmux server and the daemon itself
     (SPEC §1)."""
-    if _systemd_usable():
-        try:
-            active = subprocess.call(["systemctl", "--user", "is-active", "--quiet", "force.service"])
-        except OSError:
-            active = 0
-        if active != 0:
-            try:
-                subprocess.call(["systemctl", "--user", "start", "force-tmux.service", "force.service"])
-            except OSError:
-                pass
+    if _services_installed():
+        if not services.is_active("daemon"):
+            services.start("tmux", "daemon")
     else:
         if not cockpit.tmux.server_running():
             # @force_app / @force_state at once (tmux.conf's defaults are the live install's paths; the
@@ -1486,12 +1464,12 @@ def doctor_command(cockpit: Cockpit, fix: bool, card: bool = False) -> int:
         # they come
         from . import cards
         print(cards.doctor_head(), flush=True)
-        rc = run_doctor(cockpit, fix=fix, systemd=_systemd_usable(),
+        rc = run_doctor(cockpit, fix=fix, systemd=_services_installed(),
                         out=lambda line: print("\n".join(cards.doctor_line(line)), flush=True))
         print(cards.doctor_foot(), flush=True)
         return rc
     # the systemd units are only checked where Force uses them (not without systemd, not for an instance)
-    return run_doctor(cockpit, fix=fix, systemd=_systemd_usable())
+    return run_doctor(cockpit, fix=fix, systemd=_services_installed())
 
 
 def import_command(cockpit: Cockpit, dry_run: bool, pid: int | None, name: str | None,
@@ -1811,22 +1789,13 @@ def uninstall_command(cockpit: Cockpit, purge: bool, yes: bool) -> int:
             subprocess.call(["bash", str(fonts), "--uninstall"],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    if _systemd_usable(any_units=True):
-        subprocess.call(["systemctl", "--user", "disable", "--now",
-                       "force.service", "force-smoke.timer", "force-smoke.service", "force-tmux.service"],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for unit in list(Path.home().glob(".config/systemd/user/force*.service")) \
-                + list(Path.home().glob(".config/systemd/user/force*.timer")):
-            try:
-                unit.unlink()
-            except OSError:
-                pass
-        subprocess.call(["systemctl", "--user", "daemon-reload"],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if _services_installed(any_units=True):
+        services.uninstall()
     else:
         subprocess.call(["tmux", "-L", cockpit.paths.tmux_socket, "kill-server"],
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _stop_daemon(cockpit)
+        services.remove_launch_agents()     # macOS: agents written, but launchd does not answer here (ssh)
     subprocess.call(["tmux", "-L", cockpit.paths.ui_socket, "kill-server"],
                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

@@ -8,7 +8,6 @@ Public API:
 """
 from __future__ import annotations
 
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -259,14 +258,11 @@ def _check_ui(cockpit) -> list[Problem]:
 
 
 def _unit_active(unit: str) -> bool:
-    try:
-        rc = subprocess.run(
-            ["systemctl", "--user", "is-active", "--quiet", unit],
-            capture_output=True, timeout=10,
-        ).returncode
-        return rc == 0
-    except (subprocess.TimeoutExpired, OSError):
-        return False
+    """Thin wrapper: the active check lives in force/services (SPEC §51)."""
+    from . import services
+    name = {"force.service": "daemon", "force-tmux.service": "tmux",
+            "force-smoke.service": "smoke", "force-smoke.timer": "smoke"}.get(unit)
+    return services.is_active(name) if name else False
 
 
 # --- repair -------------------------------------------------------------

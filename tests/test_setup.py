@@ -261,7 +261,7 @@ def test_path_note_only_when_missing(tmp_path, capsys):
     rel = make_release(tmp_path)
     home, data = make_home(tmp_path)
     env = base_env(tmp_path, home, data)
-    env["PATH"] = f"/usr/bin:/bin:{home}/.local/bin"
+    env["PATH"] = f"/usr/bin:/bin:{home}/.local/bin" + SYS_PATH.removeprefix("/usr/bin:/bin:/usr/local/bin")
     S.run_setup(str(rel), sys.executable, env=env, run=FakeRun())
     assert "open a new terminal first" not in capsys.readouterr().out
 
@@ -398,10 +398,28 @@ def _arch():
     return "x86_64" if a in ("x86_64", "amd64") else "aarch64"
 
 
+def _platform(arch):
+    """The tarball's platform part, as install.sh names it on this machine (SPEC §46, §51)."""
+    return "darwin-arm64" if sys.platform == "darwin" else f"linux-{arch}"
+
+
+def _sha_args(sha):
+    """fill-installer.py's three SHA arguments (linux x86_64, linux aarch64, darwin arm64), `sha` in this
+    machine's slot."""
+    if sys.platform == "darwin":
+        return ["", "", sha]
+    return [sha, "", ""] if _arch() == "x86_64" else ["", sha, ""]
+
+
+def _sha256(path):
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def _make_tarball(rel, root, version, arch):
     releases = root / "releases"          # the web root's releases/ dir, like build-release.sh lays out
     releases.mkdir(parents=True, exist_ok=True)
-    name = f"force-{version}-linux-{arch}.tar.gz"
+    name = f"force-{version}-{_platform(arch)}.tar.gz"
     tar = releases / name
     with tarfile.open(tar, "w:gz") as t:
         t.add(rel, arcname=f"force-{version}")
@@ -443,11 +461,11 @@ def test_bootstrap_end_to_end(tmp_path, capsys):
         d.mkdir(parents=True, exist_ok=True)
 
     # fill install.sh the same way build-release.sh does
-    sha = subprocess.run(["sha256sum", str(tar)], capture_output=True, text=True).stdout.split()[0]
+    sha = _sha256(tar)
     filled = tmp_path / "install.sh"
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "fill-installer.py"),
                       str(REPO / "share" / "get-force.sh"), str(filled),
-                      version, "http://127.0.0.1:0", "http://127.0.0.1:0/releases", sha, ""])
+                      version, "http://127.0.0.1:0", "http://127.0.0.1:0/releases", *_sha_args(sha)])
     assert r.returncode == 0
 
     httpd, port = _serve(root)
@@ -456,7 +474,7 @@ def test_bootstrap_end_to_end(tmp_path, capsys):
         filled.unlink()
         r = subprocess.run([sys.executable, str(REPO / "scripts" / "fill-installer.py"),
                           str(REPO / "share" / "get-force.sh"), str(filled),
-                          version, f"http://127.0.0.1:{port}", f"http://127.0.0.1:{port}/releases", sha, ""])
+                          version, f"http://127.0.0.1:{port}", f"http://127.0.0.1:{port}/releases", *_sha_args(sha)])
         assert r.returncode == 0
         env = dict(os.environ)
         env.update({"HOME": str(home), "FORCE_HOME": str(data),
@@ -491,14 +509,14 @@ def test_bootstrap_wrong_sha_installs_nothing(tmp_path):
     filled = tmp_path / "install-wrong.sh"
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "fill-installer.py"),
                       str(REPO / "share" / "get-force.sh"), str(filled),
-                      version, "http://127.0.0.1:0", "http://127.0.0.1:0/releases", "0" * 64, ""])
+                      version, "http://127.0.0.1:0", "http://127.0.0.1:0/releases", *_sha_args("0" * 64)])
     assert r.returncode == 0
     httpd, port = _serve(root)
     try:
         filled.unlink()
         subprocess.run([sys.executable, str(REPO / "scripts" / "fill-installer.py"),
                       str(REPO / "share" / "get-force.sh"), str(filled),
-                      version, f"http://127.0.0.1:{port}", f"http://127.0.0.1:{port}/releases", "0" * 64, ""])
+                      version, f"http://127.0.0.1:{port}", f"http://127.0.0.1:{port}/releases", *_sha_args("0" * 64)])
         env = dict(os.environ)
         env.update({"HOME": str(home), "FORCE_HOME": str(data),
                    "FORCE_STATE": str(tmp_path / "state2"),
@@ -520,11 +538,11 @@ def test_fill_writes_releases_url_leaves_no_placeholders(tmp_path):
     filled = tmp_path / "install.sh"
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "fill-installer.py"),
                       str(REPO / "share" / "get-force.sh"), str(filled),
-                      version, "http://127.0.0.1:0", "http://releases.example/x", "0" * 64, ""])
+                      version, "http://127.0.0.1:0", "http://releases.example/x", *_sha_args("0" * 64)])
     assert r.returncode == 0
     text = filled.read_text()
     assert "http://releases.example/x" in text
-    for ph in ("@VERSION@", "@BASE_URL@", "@RELEASES_URL@", "@SHA_x86_64@", "@SHA_aarch64@"):
+    for ph in ("@VERSION@", "@BASE_URL@", "@RELEASES_URL@", "@SHA_x86_64@", "@SHA_aarch64@", "@SHA_darwin_arm64@"):
         assert ph not in text
 
 
@@ -549,12 +567,12 @@ def test_bootstrap_falls_back_to_download_base_releases(tmp_path):
     root = tmp_path / "web"
     root.mkdir(exist_ok=True)
     tar = _make_tarball(rel, root, version, arch)
-    sha = subprocess.run(["sha256sum", str(tar)], capture_output=True, text=True).stdout.split()[0]
+    sha = _sha256(tar)
 
     filled = tmp_path / "install.sh"
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "fill-installer.py"),
                       str(REPO / "share" / "get-force.sh"), str(filled),
-                      version, "http://127.0.0.1:0", "http://127.0.0.1:1/x", sha, ""])
+                      version, "http://127.0.0.1:0", "http://127.0.0.1:1/x", *_sha_args(sha)])
     assert r.returncode == 0
 
     httpd, port = _serve(root)
@@ -581,12 +599,12 @@ def test_bootstrap_fetches_from_env_releases_url(tmp_path):
     root = tmp_path / "webrel"
     root.mkdir(exist_ok=True)
     tar = _make_tarball(rel, root, version, arch)
-    sha = subprocess.run(["sha256sum", str(tar)], capture_output=True, text=True).stdout.split()[0]
+    sha = _sha256(tar)
 
     filled = tmp_path / "install.sh"
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "fill-installer.py"),
                       str(REPO / "share" / "get-force.sh"), str(filled),
-                      version, "http://127.0.0.1:0", "http://127.0.0.1:1/x", sha, ""])
+                      version, "http://127.0.0.1:0", "http://127.0.0.1:1/x", *_sha_args(sha)])
     assert r.returncode == 0
 
     httpd, port = _serve(root)

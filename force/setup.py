@@ -19,6 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from force import services
 from force.config import WSL_ICONS_HINT, get_paths, is_wsl
 
 # The one-line prefix used by every message ("force", orange like share/fonts.sh's `say`).
@@ -38,7 +39,7 @@ def say(msg: str) -> None:
 
 def _make_run():
     def run(argv, **kw):
-        """A command's result; a program that is not installed (no systemctl, loginctl, fc-list, bash in a
+        """A command's result; a program that is not installed (no system service tools, fc-list, no bash in a
         container) is exit status 127, like a shell would report it, never an exception."""
         try:
             return subprocess.run(argv, capture_output=True, text=True, **kw)
@@ -216,47 +217,16 @@ def update_paths(home, env, run) -> bool:
     return on_path
 
 
-# --- step 6: the user's systemd services ----------------------------------------------------
+# --- step 6: the user's services (systemd on Linux, launchd on macOS, SPEC §51) --------------
 def _linger(run, user) -> None:
-    r = run(["loginctl", "show-user", user, "-p", "Linger"])
-    if r.returncode == 0 and r.stdout.strip() == "Linger=yes":
-        return
-    rr = run(["loginctl", "enable-linger", user])
-    if rr.returncode != 0:
-        say(f"note: sessions stop when you log out (ask an admin for: loginctl enable-linger {user})")
+    """Thin wrapper: linger lives in force/services (SPEC §51)."""
+    services._linger(run, user)
 
 
 def setup_services(rel, home, run, no_services, self_test, user) -> None:
-    rel = Path(rel)
     if no_services:
         return
-    if run(["systemctl", "--user", "show-environment"]).returncode != 0:
-        say("no systemd here: force starts its services itself")
-        return
-    user_sys = home / ".config" / "systemd" / "user"
-    user_sys.mkdir(parents=True, exist_ok=True)
-    units = sorted((rel / "systemd").glob("*.service")) + sorted((rel / "systemd").glob("*.timer"))
-    changed = False
-    for unit in units:
-        dest = user_sys / unit.name
-        text = unit.read_text()
-        if dest.exists() and dest.read_text() == text:
-            continue
-        _atomic_write(dest, text)
-        changed = True
-    if changed:
-        run(["systemctl", "--user", "daemon-reload"])
-    active = False
-    r = run(["systemctl", "--user", "show", "force.service", "-p", "ActiveState", "--value"])
-    if r.returncode == 0 and r.stdout.strip() == "active":
-        active = True
-    # never restart/stop force-tmux.service: it holds the sessions
-    run(["systemctl", "--user", "enable", "--now", "force-tmux.service", "force.service"])
-    if active and changed:
-        run(["systemctl", "--user", "restart", "force.service"])
-    if self_test:
-        run(["systemctl", "--user", "enable", "--now", "force-smoke.timer"])
-    _linger(run, user)
+    services.install(rel, home, run, self_test, user)
 
 
 # --- step 7: the icon font on a desktop ------------------------------------------------------

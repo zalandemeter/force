@@ -11,10 +11,10 @@ CARGO = shutil.which("cargo") or os.path.expanduser("~/.cargo/bin/cargo")
 
 
 def _shipped_crates(crate_dir: Path) -> set[str]:
-    """`name version` of every crate built into the binary for Linux (normal and build deps with the features
+    """`name version` of every crate built into the binary for Linux and macOS (normal and build deps with the features
     actually enabled: cargo tree, as cargo-about resolves them; not cargo metadata, which lists more)."""
     out = set()
-    for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"):
+    for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin"):
         lines = subprocess.run(
             [CARGO, "tree", "-e", "normal,build", "--target", target, "--prefix", "none", "--format", "{p}",
              "--locked", "--offline"],

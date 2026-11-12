@@ -250,18 +250,9 @@ def _ssh_check(target: str) -> tuple[bool, str]:
 
 
 def _logs(paths, n: int) -> str:
-    log = paths.state / "daemon.log"
-    if log.exists():
-        try:
-            return "\n".join(log.read_text(errors="replace").splitlines()[-n:]) or "(empty)"
-        except OSError as e:
-            return f"cannot read {log}: {e}"
-    try:
-        r = subprocess.run(["journalctl", "--user", "-u", "force.service", "-n", str(n), "--no-pager", "-o",
-                            "short-iso"], capture_output=True, text=True, timeout=20)
-        return r.stdout.strip() or (r.stderr.strip() or "(no log lines)")
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return f"no log available: {e}"
+    """Thin wrapper: the log tail lives in force/services (SPEC §51)."""
+    from . import services
+    return services.logs(paths.state, n)
 
 
 # --------------------------------------------------------------------------- the protocol ----------------

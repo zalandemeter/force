@@ -1,0 +1,78 @@
+# macOS (SPEC §51): build the darwin-arm64 tarball on a GitHub Mac, install it as a user would (curl | sh from a
+# local web root), open a shell and an agent session, capture the cockpit's screen, uninstall. The tarball, the
+# screen captures and the logs are kept as the run's artifacts.
+# By hand (Actions → macOS → Run workflow) with `debug` on, the job ends in an SSH session into the runner
+# (tmate) that only the person who started the run can open, for live debugging; it closes when they exit or
+# after the job's time limit.
+name: macOS
+
+on:
+  pull_request:
+    paths:
+      - force/**
+      - share/**
+      - crates/**
+      - scripts/build-darwin.sh
+      - scripts/e2e-install.sh
+      - scripts/fill-installer.py
+      - .github/workflows/macos.yml
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "End with an SSH session into the runner (only you can connect)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    name: Build, install, use, uninstall
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            build/out-darwin/cache
+            build/src
+          key: darwin-${{ hashFiles('crates/*/Cargo.lock', 'scripts/build-darwin.sh') }}
+      - name: Build tools
+        run: command -v pkg-config >/dev/null || brew install pkgconf
+      - name: Build the darwin-arm64 tarball
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          scripts/build-darwin.sh "$v"
+      - name: install.sh for the local web root
+        run: |
+          D=build/out-darwin/dist
+          sha=$(cut -d' ' -f1 "$D/releases/force-$VERSION-darwin-arm64.tar.gz.sha256")
+          python3 scripts/fill-installer.py share/get-force.sh "$D/install.sh" "$VERSION" \
+            http://127.0.0.1:8765 http://127.0.0.1:8765/releases "" "" "$sha"
+      - name: Install, use, uninstall
+        run: scripts/e2e-install.sh build/out-darwin/dist e2e-out
+      - name: Keep the tarball, captures and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-e2e
+          path: |
+            e2e-out
+            build/out-darwin/dist/releases
+            ~/.local/state/force/daemon.log
+          retention-days: 14
+          if-no-files-found: warn
+      - name: SSH into the runner (debug runs only)
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.debug }}
+        uses: mxschmitt/action-tmate@35b54afac29c97fb54faba5b513f8fbd1882f113   # v3.24
+        with:
+          limit-access-to-actor: true

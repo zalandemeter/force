@@ -235,7 +235,8 @@ class Run:
         # the ui server (split mode: SPEC §39) sources its own conf next to the host's
         (conf.parent / "tmux-ui.conf").write_text(
             "set -g exit-empty off\nset -g remain-on-exit on\nset -g @force_sidebar on\n")
-        os.environ.pop("INVOCATION_ID", None)           # not systemd's: never start the live tmux unit
+        os.environ.pop("INVOCATION_ID", None)           # not the service manager's: never start the live tmux unit
+        os.environ.pop("FORCE_SERVICE", None)           # or the launchd agent
         os.environ.update({
             "FORCE_HOME": str(home), "FORCE_STATE": str(state), "FORCE_CONFIG": str(cfg),
             "FORCE_TMUX_SOCKET": f"forcetest-smoke-{os.getpid()}", "FORCE_TMUX_CONF": str(conf),
@@ -749,7 +750,7 @@ def run(live_paths, live_cfg, log=sys.stdout) -> dict:
     saved = {k: os.environ.get(k) for k in ("FORCE_HOME", "FORCE_STATE", "FORCE_CONFIG", "FORCE_TMUX_SOCKET",
                                              "FORCE_UI_SOCKET", "FORCE_TMUX_CONF", "FORCE_CLAUDE_DIR",
                                              "FORCE_CLAUDE_BIN", "FORCE_NO_REMOTE_CONTROL", "ANTHROPIC_MODEL",
-                                             "INVOCATION_ID")}
+                                             "INVOCATION_ID", "FORCE_SERVICE")}
     try:
         r.setup()
         r.claude_flow()
