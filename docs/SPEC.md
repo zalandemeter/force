@@ -967,8 +967,8 @@ an error. Stored by `force/report.py` in `$FORCE_STATE/reports/NAME.json`; `idle
 ### 43.4 Pane titles on cards
 - The daemon reads `#{pane_title}` of the agent pane. Cleaned: leading non-alphanumeric glyphs (spinners,
   `✳`) and spaces stripped, an `OC | ` prefix dropped, at most 60 characters. Dropped (None) when empty or equal
-  (case-insensitive) to the session name, the host name, or a bare program name (claude, opencode, bash, zsh,
-  sh, fish). Snapshot field `title`. Claude Code titles itself with the session name, so in practice titles
+  (case-insensitive) to the session name, the host name (also with a domain, `name.local`: tmux's default title
+  on macOS), or a bare program name (claude, opencode, bash, zsh, sh, fish). Snapshot field `title`. Claude Code titles itself with the session name, so in practice titles
   show for OpenCode and for programs in shell sessions.
 - Sidebar line 2: the title replaces the plain label `idle` / `stale` and the `shell <path>` of a shell card.
   your-turn, needs-you, working, notes (restarting…) and outdated tails are unchanged.

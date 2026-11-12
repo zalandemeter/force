@@ -136,6 +136,9 @@ def clean_title(raw: str | None, name: str, host: str) -> str | None:
     low = t.lower()
     if low in (name.lower(), host.lower()) or low in _BARE_TITLES:
         return None
+    # tmux's default title is the full host name: "name.local" on macOS (SPEC §51), "name.lan", …
+    if host and " " not in t and low.split(".")[0] == host.lower():
+        return None
     return t
 
 
