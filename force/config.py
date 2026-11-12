@@ -14,6 +14,10 @@ import sys
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+# The cockpit's colours, painted by tmux (the Force theme block in share/tmux.conf, SPEC §45): text and background.
+THEME_FG = "d0d0d0"
+THEME_BG = "262626"
+
 
 @dataclass(frozen=True)
 class Paths:

@@ -213,3 +213,52 @@ def test_build_ui_session_sets_the_glyph_tier_before_the_panes(env):
     assert cockpit.ui_tmux.run("show", "-qv", "-t", "=" + rich + ":", "@force_glyphs") == "rich"
     auto = cli.build_ui_session(cockpit, "s1", "ui-auto", 150, 40, glyphs="auto")
     assert cockpit.ui_tmux.run("show", "-qv", "-t", "=" + auto + ":", "@force_glyphs") == ""
+
+
+# --- the text colour (SPEC §45) -------------------------------------------------------------------
+def _style(tmux, target):
+    """A window's own window-style ("" when it has none and the server's global one applies)."""
+    return tmux.run("show", "-wqv", "-t", target, "window-style")
+
+
+def test_build_ui_session_leaves_the_text_colour_to_a_terminal_that_took_the_theme_s(env):
+    """Dim text (Claude Code's prompt suggestion) is drawn at full strength in VTE when tmux gives it an RGB colour:
+    the window of a terminal whose own text colour is the theme's forces none."""
+    cockpit = split_cockpit(env)
+    add(cockpit, "s1")
+    own = cli.build_ui_session(cockpit, "s1", "ui-own", 150, 40, own_fg=True)
+    ui = cockpit.ui_tmux
+    assert _style(ui, "=" + own + ":") == "bg=#262626"
+    assert ui.run("show", "-wqv", "-t", "=" + own + ":", "window-active-style") == "bg=#262626"
+    assert ui.run("show", "-qv", "-t", "=" + own + ":", "@force_term_fg") == "on"
+    other = cli.build_ui_session(cockpit, "s1", "ui-other", 150, 40)
+    assert _style(ui, "=" + other + ":") == ""                       # the ui server's fg=#d0d0d0, as before
+    assert ui.run("show", "-qv", "-t", "=" + other + ":", "@force_term_fg") == ""
+
+
+def test_ui_host_keeps_the_terminal_s_text_colour(env, monkeypatch):
+    """A host switch builds a new ui session for the same terminal: it keeps that terminal's text colour choice."""
+    cockpit = split_cockpit(env)
+    add(cockpit, "s1")
+    built = []
+    real = cli.build_ui_session
+    monkeypatch.setattr(cli, "build_ui_session", lambda *a, **k: built.append(a[-1]) or real(*a, **k))
+    for own in (True, False):
+        name = real(cockpit, "s1", f"ui-keep-{own}", 150, 40, own_fg=own)
+        win = cockpit.ui_tmux.run("display", "-p", "-t", "=" + name + ":", "#{window_id}")
+        assert cli.ui_host_command(cockpit, "local", win) == 0
+    assert built == [True, False]
+
+
+def test_daemon_host_forces_no_text_colour_in_split_mode(env):
+    """Split mode: the host server leaves default-coloured text default, so it reaches the ui windows (which
+    decide per terminal); classic keeps tmux.conf's text colour, its clients being the terminals themselves."""
+    cockpit = split_cockpit(env)
+    add(cockpit, "s1")
+    d = Daemon(cockpit)
+    d.tick()
+    gv = lambda k: cockpit.tmux.run("show", "-gv", k)
+    assert gv("window-style") == "bg=#262626" and gv("window-active-style") == "bg=#262626"
+    cockpit.cfg = dataclasses.replace(cockpit.cfg, ui="classic")
+    d.tick()
+    assert gv("window-style") == "fg=#d0d0d0,bg=#262626" and gv("window-active-style") == "fg=#d0d0d0,bg=#262626"

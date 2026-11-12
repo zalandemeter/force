@@ -1160,7 +1160,22 @@ def test_parse_bg_reads_osc11_replies_with_st_or_bel():
 def test_query_terminal_asks_nothing_without_a_terminal(monkeypatch):
     monkeypatch.setattr(cli.os, "isatty", lambda fd: False)
     monkeypatch.setattr(cli.os, "open", lambda *a: (_ for _ in ()).throw(AssertionError("opened the tty")))
-    assert cli._query_terminal(True) == (None, None)
+    assert cli._query_terminal(True) == (None, None, None)
+
+
+def test_parse_fg_reads_osc10_replies_beside_osc11():
+    reply = b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b]11;rgb:1818/1818/1818\x1b\\\x1b[?62;c"
+    assert cli._parse_fg(reply) == "#ffffff"
+    assert cli._parse_bg(reply) == "#181818"
+    assert cli._parse_fg(b"\x1b]11;rgb:1818/1818/1818\x07") is None
+
+
+def test_query_terminal_asks_text_colour_and_background_in_one_round_trip(monkeypatch):
+    asked = []
+    reply = b"\x1b]10;rgb:ffff/ffff/ffff\x07\x1b]11;rgb:1818/1818/1818\x07\x1b[?62;c"
+    monkeypatch.setattr(cli, "_ask_terminal", lambda req: asked.append(req) or (reply, 45, 160))
+    assert cli._query_terminal(False) == (None, "#181818", "#ffffff")
+    assert asked == [b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\"]
 
 
 def _run_client_sh(tmp_path, argv, rc):
@@ -1180,7 +1195,7 @@ def test_exec_tmux_clean_exit_leaves_the_terminal_alone(monkeypatch, tmp_path):
     cli._exec_tmux(["tmux", "-L", "s", "attach", "-t", "=x"], None)
     (f, argv), = calls
     assert f == "sh" and argv[:2] == ["sh", "-c"] and argv[3:] == ["force", "-L", "s", "attach", "-t", "=x"]
-    assert os.environ["FORCE_TERM_BG"] == ""
+    assert os.environ["FORCE_TERM_BG"] == "" and os.environ["FORCE_TERM_FG"] == ""
     r = _run_client_sh(tmp_path, argv, 0)
     assert r.returncode == 0 and r.stdout == b"client -L s attach -t =x\n"
 
@@ -1209,13 +1224,96 @@ def test_exec_tmux_restores_the_terminal_background_after_the_client(monkeypatch
     assert r.stdout == b"client -L s attach -t =x\n" + RESET + b"\x1b]11;rgb:3030/0a0a/2424\x07"
 
 
-def test_paint_terminal_bg_only_when_the_terminal_told_its_own(monkeypatch):
+def test_exec_tmux_restores_the_terminal_text_colour_too(monkeypatch, tmp_path):
+    """SPEC §45 text colour: the terminal's own text colour comes back after the client, before its background."""
+    calls = []
+    monkeypatch.setattr(cli.os, "execvp", lambda f, a: calls.append((f, a)))
+    cli._exec_tmux(["tmux", "-L", "s", "attach", "-t", "=x"], "#181818", "#ffffff")
+    (_, argv), = calls
+    assert os.environ["FORCE_TERM_FG"] == "#ffffff"
+    r = _run_client_sh(tmp_path, argv, 0)
+    assert r.returncode == 0
+    assert r.stdout == b"client -L s attach -t =x\n\x1b]10;#ffffff\x07\x1b]11;#181818\x07"
+
+
+def test_paint_terminal_only_what_the_terminal_told_its_own(monkeypatch):
     written = []
     monkeypatch.setattr(cli.os, "write", lambda fd, b: written.append((fd, b)))
-    cli._paint_terminal_bg(None)
+    monkeypatch.setattr(cli, "_ask_terminal", lambda req: pytest.fail("asked without painting a text colour"))
+    assert cli._paint_terminal(None, None) is False
     assert written == []
-    cli._paint_terminal_bg("rgb:3030/0a0a/2424")
+    assert cli._paint_terminal("rgb:3030/0a0a/2424", None) is False
     assert written == [(1, b"\x1b]11;#262626\x1b\\")]
+
+
+@pytest.mark.parametrize("answer, own", [
+    (b"\x1b]10;rgb:d0d0/d0d0/d0d0\x1b\\\x1b[?62;c", True),       # took it
+    (b"\x1b]10;rgb:cfcf/cfcf/cfcf\x1b\\\x1b[?62;c", True),       # took it, reported rounded (urxvt)
+    (b"\x1b]10;rgb:caca/caca/caca\x1b\\\x1b[?62;c", False),      # something else
+    (b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b[?62;c", False),      # answers, but kept its own (as Tilix does its bg)
+    (b"\x1b[?62;c", False),                                          # no answer the second time
+])
+def test_paint_terminal_text_colour_counts_only_once_the_terminal_reports_it(monkeypatch, answer, own):
+    """SPEC §45: a ui window may leave the text colour to the terminal only when the terminal, asked again after
+    being set, reports the theme's."""
+    written, asked = [], []
+    monkeypatch.setattr(cli.os, "write", lambda fd, b: written.append((fd, b)))
+    monkeypatch.setattr(cli, "_ask_terminal", lambda req: asked.append(req) or (answer, 45, 160))
+    assert cli._paint_terminal("#181818", "#ffffff") is own
+    assert written == [(1, b"\x1b]11;#262626\x1b\\\x1b]10;#d0d0d0\x1b\\")]
+    assert asked == [b"\x1b]10;?\x1b\\"]
+
+
+def _attach_ui_fakes(monkeypatch, paint=False, build_fails=False):
+    """_attach_ui with the terminal, the ui session and the client faked: what it decided and did."""
+    got = {"paint": [], "restore": [], "build": [], "exec": []}
+    monkeypatch.setattr(cli.os, "get_terminal_size", lambda fd: (160, 45))
+    monkeypatch.setattr(cli, "_paint_terminal", lambda bg, fg: got["paint"].append((bg, fg)) or paint)
+    monkeypatch.setattr(cli, "_restore_terminal", lambda bg, fg: got["restore"].append((bg, fg)))
+
+    def build(c, target, name, cols, rows, remote, glyphs, own_fg=False):
+        if build_fails:
+            raise cli.TmuxError("no ui server")
+        got["build"].append(own_fg)
+        return name
+    monkeypatch.setattr(cli, "build_ui_session", build)
+    for f in ("_register_client_glyphs", "play_intro", "_spawn_welcome"):
+        monkeypatch.setattr(cli, f, lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_exec_tmux", lambda argv, bg, fg=None: got["exec"].append((bg, fg)))
+    return got
+
+
+def test_attach_ui_leaves_the_text_colour_to_a_terminal_that_took_the_theme_s(fakes, monkeypatch):
+    cockpit, _fake, _tmp = fakes
+    got = _attach_ui_fakes(monkeypatch, paint=True)
+    assert cli._attach_ui(cockpit, "s1", "plain", True, None, term_bg="#181818", term_fg="#ffffff") == 0
+    assert got["paint"] == [("#181818", "#ffffff")] and got["build"] == [True]
+    assert got["exec"] == [("#181818", "#ffffff")]             # both put back after the client
+
+
+def test_attach_ui_keeps_the_ui_text_colour_where_the_terminal_did_not_take_it(fakes, monkeypatch):
+    cockpit, _fake, _tmp = fakes
+    got = _attach_ui_fakes(monkeypatch, paint=False)
+    assert cli._attach_ui(cockpit, "s1", "plain", True, None, term_bg="#181818", term_fg="#ffffff") == 0
+    assert got["build"] == [False]
+    got = _attach_ui_fakes(monkeypatch, paint=False)
+    assert cli._attach_ui(cockpit, "s1", "plain", True, None, term_bg=None, term_fg=None) == 0   # mosh, PuTTY
+    assert got["paint"] == [(None, None)] and got["build"] == [False]
+
+
+def test_attach_ui_a_terminal_already_in_the_theme_s_text_colour(fakes, monkeypatch):
+    cockpit, _fake, _tmp = fakes
+    got = _attach_ui_fakes(monkeypatch, paint=False)
+    assert cli._attach_ui(cockpit, "s1", "plain", True, None, term_bg="#181818", term_fg="#d0d0d0") == 0
+    assert got["paint"] == [] and got["build"] == [True]
+    assert got["exec"] == [("#181818", None)]                  # nothing of its text colour to put back
+
+
+def test_attach_ui_puts_the_terminal_back_when_the_ui_does_not_start(fakes, monkeypatch):
+    cockpit, _fake, _tmp = fakes
+    got = _attach_ui_fakes(monkeypatch, paint=True, build_fails=True)
+    assert cli._attach_ui(cockpit, "s1", "plain", True, None, term_bg="#181818", term_fg="#ffffff") == 2
+    assert got["restore"] == [("#181818", "#ffffff")] and got["exec"] == []
 
 
 # --- _start_host: no-systemd fallback (SPEC §1) -----------------------------
@@ -1280,7 +1378,7 @@ def test_attach_first_run_creates_shell_session(fakes, monkeypatch):
     monkeypatch.setattr(cli, "_daemon_lock_held", lambda c: True)
     monkeypatch.setattr(cli, "play_intro", lambda *a: None)
     monkeypatch.setattr(cli, "_register_client_glyphs", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "_paint_terminal_bg", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_paint_terminal", lambda *a, **k: False)
     from force.registry import load as _load
 
     def raise_exit(*a, **k):
@@ -1309,7 +1407,7 @@ def test_attach_welcome_spawned_once(fakes, monkeypatch):
     monkeypatch.setattr(cli, "_client_glyphs", lambda g: g)   # no fc-list through the fake Popen
     monkeypatch.setattr(cli, "_exec_tmux", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_register_client_glyphs", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "_paint_terminal_bg", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_paint_terminal", lambda *a, **k: False)
     cli.attach_command(cockpit, None)
     assert len(spawned) == 1
     assert "display-message" in spawned[0][0][2]

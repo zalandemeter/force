@@ -221,6 +221,8 @@ class Daemon:
         self._acted = set()         # distinct fingerprints already handled (success or failure)
         # sidebar robustness
         self._sidebar_respawn: dict[str, float] = {}
+        # the host server's window-style last set (SPEC §45 text colour); None: set it on the next tick
+        self._host_style: str | None = None
         # turn_done detection
         self._prev_status: dict[str, str | None] = {}
         self._seen_pid: dict[str, int] = {}
@@ -438,6 +440,7 @@ class Daemon:
                     if not self.cockpit.tmux.server_running():
                         self.cockpit.tmux.start_server()
                     self._state_published = False
+                    self._host_style = None
                 # tmux.conf reads header files from @force_state; publish ours once per server.
                 if not getattr(self, "_state_published", False):
                     self.cockpit.tmux.set_option("@force_state", str(self.paths.state))
@@ -455,6 +458,7 @@ class Daemon:
                     self._retag_legacy()
                     self._respawn_outdated_ui()
                     self._state_published = True
+                self._publish_host_style()
             except Exception as e:
                 _log("server", e)
 
@@ -794,6 +798,16 @@ class Daemon:
             print(f"force: deleting {entry.name} (folder not trusted) failed: {ex}", file=sys.stderr)
         self._registry = self._load()
         self._pinfo_dirty = True
+
+    def _publish_host_style(self) -> None:
+        """SPEC §45 text colour: in split mode the host server forces no text colour, so default-coloured text (and
+        dim on it) reaches each terminal's ui window, which decides; classic keeps tmux.conf's theme."""
+        style = f"bg=#{config.THEME_BG}" if self.cockpit.split else f"fg=#{config.THEME_FG},bg=#{config.THEME_BG}"
+        if style == self._host_style:
+            return
+        for opt in ("window-style", "window-active-style"):
+            self.cockpit.tmux.set_option(opt, style)
+        self._host_style = style
 
     def _step_pending_move(self) -> None:
         """`force move NAME DIR` on a busy session marks it; move it once it is no longer busy (§7.7)."""
@@ -1483,6 +1497,7 @@ class Daemon:
                 rc, _out, err = t._run_rc(["source-file", str(conf)])
                 if rc != 0:
                     _log("reload", f"{conf.name}: {err.strip()[:200]}")
+            self._host_style = None             # tmux.conf set its own window-style again
         self._retag_legacy()
         if changed_py or changed_cfg:
             # Order matters: respawn the sidebars and announce first, re-exec LAST so the new process

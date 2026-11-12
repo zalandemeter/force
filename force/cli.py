@@ -28,7 +28,8 @@ from .state import State
 from .tmux import Tmux, TmuxError
 
 SHARE = Path(__file__).resolve().parent.parent / "share"
-THEME_BG = "262626"   # the cockpit's dark background, painted by tmux's theme (see the Force theme block in share/tmux.conf)
+THEME_BG = config.THEME_BG   # the cockpit's dark background, painted by tmux's theme (SPEC §45)
+THEME_FG = config.THEME_FG   # its text colour; in split mode the terminal's own where it takes it (§45)
 
 
 def make_cockpit(env: dict[str, str] | None = None) -> Cockpit:
@@ -243,12 +244,12 @@ def attach_command(cockpit: Cockpit, name: str | None, no_intro: bool = False, g
         return 1
     glyphs = _client_glyphs(glyphs)
     # One question to the terminal (SPEC §45): its background, so the edge it paints itself (the pixels left
-    # over below the last row / right of the last column) can match the theme while Force runs; and, for
-    # terminals that report no pixel size (VTE/Tilix) when the intro will play, its cell shape (the client's
-    # `--cell-aspect` first, the config's intro_cell_aspect last).
+    # over below the last row / right of the last column) can match the theme while Force runs; its text colour,
+    # so in split mode dim text can stay dim; and, for terminals that report no pixel size (VTE/Tilix) when the
+    # intro will play, its cell shape (the client's `--cell-aspect` first, the config's intro_cell_aspect last).
     want_aspect = cell_aspect is None and not (no_intro or not cockpit.cfg.intro or _animations(cockpit) == "off") \
         and not _tty_reports_pixels()
-    measured, term_bg = _query_terminal(want_aspect)
+    measured, term_bg, term_fg = _query_terminal(want_aspect)
     if term_bg == f"#{THEME_BG}":
         term_bg = None                           # already the theme's: nothing to paint or put back
     if want_aspect:
@@ -272,7 +273,7 @@ def attach_command(cockpit: Cockpit, name: str | None, no_intro: bool = False, g
                 print(f"force: {r.name} has no sessions and cannot start a shell session", file=sys.stderr)
                 return 1
         _remember_host(cockpit, r.name)
-        return _attach_ui(cockpit, target, glyphs, no_intro, cell_aspect, r, term_bg)
+        return _attach_ui(cockpit, target, glyphs, no_intro, cell_aspect, r, term_bg, term_fg)
 
     if not _start_host(cockpit):
         print("force: tmux server did not start", file=sys.stderr)
@@ -288,9 +289,9 @@ def attach_command(cockpit: Cockpit, name: str | None, no_intro: bool = False, g
 
     _remember_host(cockpit, "")
     if cockpit.split:
-        return _attach_ui(cockpit, target, glyphs, no_intro, cell_aspect, term_bg=term_bg)
+        return _attach_ui(cockpit, target, glyphs, no_intro, cell_aspect, term_bg=term_bg, term_fg=term_fg)
     _register_client_glyphs(cockpit, glyphs)
-    _paint_terminal_bg(term_bg)
+    _paint_terminal(term_bg, None)              # classic: the host's theme keeps its text colour (SPEC §45)
     play_intro(cockpit, no_intro, cell_aspect)
     _spawn_welcome(cockpit)
     _exec_tmux(["tmux", "-L", cockpit.paths.tmux_socket, "attach", "-t", "=" + target], term_bg)
@@ -399,35 +400,41 @@ def _start_host(cockpit: Cockpit) -> bool:
 
 
 def _attach_ui(cockpit: Cockpit, target: str, glyphs: str, no_intro: bool, cell_aspect: float | None,
-               remote=None, term_bg: str | None = None) -> int:
+               remote=None, term_bg: str | None = None, term_fg: str | None = None) -> int:
     """Split mode (SPEC §39): a ui session for this terminal on the ui server: the main pane shows `target`
-    through a nested client of the host server, the sidebar and header are drawn here."""
+    through a nested client of the host server, the sidebar and header are drawn here. The terminal is painted
+    first: whether its own text colour is now the theme's decides the ui window's style (SPEC §45)."""
     try:
         cols, rows = os.get_terminal_size(0)
     except OSError:
         cols, rows = 160, 45
+    if _is_theme_fg(term_fg):
+        own_fg, term_fg = True, None             # already the theme's: nothing to paint or put back
+    else:
+        own_fg = _paint_terminal(term_bg, term_fg)
     try:
-        name = build_ui_session(cockpit, target, f"ui-{os.getpid()}", cols, rows, remote, glyphs)
+        name = build_ui_session(cockpit, target, f"ui-{os.getpid()}", cols, rows, remote, glyphs, own_fg)
     except TmuxError as e:
+        _restore_terminal(term_bg, term_fg)
         print(f"force: cannot start the ui: {e}", file=sys.stderr)
         return 2
     _register_client_glyphs(cockpit, glyphs, cockpit.ui_tmux)
-    _paint_terminal_bg(term_bg)
     play_intro(cockpit, no_intro, cell_aspect)
     _spawn_welcome(cockpit)
-    _exec_tmux(["tmux", "-L", cockpit.paths.ui_socket, "attach", "-t", "=" + name], term_bg)
+    _exec_tmux(["tmux", "-L", cockpit.paths.ui_socket, "attach", "-t", "=" + name], term_bg, term_fg)
     return 0
 
 
 def build_ui_session(cockpit: Cockpit, target: str, name: str, cols: int, rows: int, remote=None,
-                     glyphs: str | None = None) -> str:
+                     glyphs: str | None = None, own_fg: bool = False) -> str:
     """Create the ui session `name` (detached): main pane (role agent) running `force nested TARGET`, the
     sidebar (left, full height, unless switched off) and the header (2 rows above the main pane). The
     window options say which host client and session it shows (@force_nested, @force_session) and how to
     reach that host (@force_host: a remote's name or empty, @force_host_tmux). A remote's nested client
     is named by the remote side once it runs (force nested --report). `glyphs` (rich/plain): the session's
     glyph tier, set before the sidebar and header start, so they draw it at once instead of the plain look
-    until their next tier read (a host switch knows its terminal's tier already)."""
+    until their next tier read (a host switch knows its terminal's tier already). `own_fg`: the terminal's own
+    text colour is the theme's (SPEC §45), so the window forces none and dim text stays dim there."""
     ui = cockpit.ui_tmux
     home = str(Path.home())
     host = remote.name if remote else ""
@@ -437,6 +444,10 @@ def build_ui_session(cockpit: Cockpit, target: str, name: str, cols: int, rows: 
     ui.run("set-environment", "-t", "=" + name, "FORCE_HOST", host)
     if glyphs in ("rich", "plain"):
         ui.run("set-option", "-t", "=" + name + ":", "@force_glyphs", glyphs)
+    if own_fg:
+        ui.run("set-option", "-t", "=" + name + ":", "@force_term_fg", "on")
+        for opt in ("window-style", "window-active-style"):
+            ui.run("set-option", "-w", "-t", main, opt, f"bg=#{THEME_BG}")
     ui.run("set-option", "-p", "-t", main, "@force_role", "agent")
     # the nested client's name on the host: here the main pane's tty, known before the sidebar starts
     nested = "" if remote else ui.run("display", "-p", "-t", main, "#{pane_tty}")
@@ -884,8 +895,9 @@ def ui_host_command(cockpit: Cockpit, name: str, window: str, attention: bool = 
         cols = int(ui.run("display", "-p", "-t", window, "#{window_width}"))
         rows = int(ui.run("display", "-p", "-t", window, "#{window_height}"))
         tier = ui.run("show", "-qv", "-t", "=" + sess + ":", "@force_glyphs")
+        own_fg = ui.run("show", "-qv", "-t", "=" + sess + ":", "@force_term_fg") == "on"
         tmp = sess + "-h"
-        build_ui_session(cockpit, target, tmp, cols, rows, remote, tier)
+        build_ui_session(cockpit, target, tmp, cols, rows, remote, tier, own_fg)
     except (TmuxError, RegistryError, ValueError, OSError) as e:
         return note(f"cannot switch host: {e}")
     _remember_host(cockpit, remote.name if remote else "")
@@ -1980,46 +1992,54 @@ def _parse_cell_aspect(reply: bytes, rows: int, cols: int) -> float | None:
     return aspect if 1 <= aspect <= 4 else None
 
 
-_BG_REPLY = re.compile(rb"\x1b\]11;(rgb:[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4})(?:\x1b\\|\x07)")
+_COLOR_REPLY = re.compile(rb"\x1b\](1[01]);(rgb:[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4})(?:\x1b\\|\x07)")
+
+
+def _parse_color(reply: bytes, osc: int) -> str | None:
+    """A terminal's OSC 10 (text) or OSC 11 (background) reply (`ESC ] 1x ; rgb:R/G/B`, 1-4 hex digits per channel,
+    ended by ST or BEL) -> `#rrggbb`, the form every terminal takes back (Konsole ignores the `rgb:` form when
+    setting). None when there is no such reply."""
+    for m in _COLOR_REPLY.finditer(reply):
+        if int(m.group(1)) == osc:
+            chans = m.group(2).decode()[4:].split("/")
+            return "#" + "".join(f"{int(c, 16) * 255 // (16 ** len(c) - 1):02x}" for c in chans)
+    return None
 
 
 def _parse_bg(reply: bytes) -> str | None:
-    """A terminal's OSC 11 reply (`ESC ] 11 ; rgb:R/G/B`, 1-4 hex digits per channel, ended by ST or BEL) ->
-    `#rrggbb`, the form every terminal takes back (Konsole ignores the `rgb:` form when setting). None when
-    there is no such reply."""
-    m = _BG_REPLY.search(reply)
-    if not m:
-        return None
-    chans = m.group(1).decode()[4:].split("/")
-    return "#" + "".join(f"{int(c, 16) * 255 // (16 ** len(c) - 1):02x}" for c in chans)
+    """The background in a terminal's reply (OSC 11), or None."""
+    return _parse_color(reply, 11)
 
 
-def _query_terminal(want_aspect: bool) -> tuple[float | None, str | None]:
-    """Ask the terminal on /dev/tty, in one round trip ended by DA1 (which every terminal answers; 0.5 s at
-    most), for its background (OSC 11) and, with `want_aspect`, its text-area pixel size (CSI 14 t).
-    Returns (cell aspect or None, background spec or None). Nothing is asked unless stdin and stdout are the
-    terminal (not in pipes, scripts or tests). termios is always restored."""
+def _parse_fg(reply: bytes) -> str | None:
+    """The text colour in a terminal's reply (OSC 10), or None."""
+    return _parse_color(reply, 10)
+
+
+def _ask_terminal(request: bytes) -> tuple[bytes, int, int] | None:
+    """Send `request` to the terminal on /dev/tty, then DA1 (which every terminal answers) as the end marker, and
+    read the replies (0.5 s at most). Returns (replies, rows, cols), or None when stdin and stdout are not the
+    terminal (pipes, scripts, tests) or it cannot be asked. termios is always restored."""
     import fcntl
     import select
     import struct
     import termios
     import tty
     if not (os.isatty(0) and os.isatty(1)):
-        return None, None
+        return None
     try:
         fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)    # the terminal itself
     except OSError:
-        return None, None
+        return None
     try:
         try:
             rows, cols, _x, _y = struct.unpack("HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))
             saved = termios.tcgetattr(fd)
         except (OSError, ValueError, termios.error):
-            return None, None
+            return None
         tty.setraw(fd)                         # raw so the replies come straight back to us
         try:
-            # background, text area size (px), then DA1 as the end marker
-            os.write(fd, b"\x1b]11;?\x1b\\" + (b"\x1b[14t" if want_aspect else b"") + b"\x1b[c")
+            os.write(fd, request + b"\x1b[c")
             buf = b""
             end = time.monotonic() + 0.5
             while time.monotonic() < end:
@@ -2034,39 +2054,77 @@ def _query_terminal(want_aspect: bool) -> tuple[float | None, str | None]:
                     break
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-        aspect = _parse_cell_aspect(buf, rows, cols) if want_aspect and rows and cols else None
-        return aspect, _parse_bg(buf)
+        return buf, rows, cols
     except OSError:
-        return None, None
+        return None
     finally:
         os.close(fd)
 
 
-def _paint_terminal_bg(term_bg: str | None) -> None:
-    """Set the terminal's own background to the theme's (OSC 11) while Force runs, so the edge pixels the
-    terminal paints itself match (GNOME Terminal, Konsole, kitty, Terminator; Tilix ignores it). Only for a
-    terminal that told us its background (term_bg), so _exec_tmux can put exactly that one back."""
-    if not term_bg:
-        return
+def _query_terminal(want_aspect: bool) -> tuple[float | None, str | None, str | None]:
+    """Ask the terminal, in one round trip, for its text colour (OSC 10) and background (OSC 11) and, with
+    `want_aspect`, its text-area pixel size (CSI 14 t). Returns (cell aspect, background, text colour), each None
+    when not answered; all None unless stdin and stdout are the terminal."""
+    got = _ask_terminal(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\" + (b"\x1b[14t" if want_aspect else b""))
+    if got is None:
+        return None, None, None
+    buf, rows, cols = got
+    aspect = _parse_cell_aspect(buf, rows, cols) if want_aspect and rows and cols else None
+    return aspect, _parse_bg(buf), _parse_fg(buf)
+
+
+def _paint_terminal(term_bg: str | None, term_fg: str | None) -> bool:
+    """Set the terminal's own background (OSC 11) and text colour (OSC 10) to the theme's while Force runs, each
+    only when the terminal told us its own, so _exec_tmux can put exactly that one back. The background makes the
+    edge pixels the terminal paints itself match (GNOME Terminal, Konsole, kitty, Terminator; Tilix ignores it).
+    True when the terminal, asked again, reports the theme's text colour: only then may a ui window leave the text
+    colour to it, so dim text stays dim (SPEC §45)."""
+    seq = (f"\x1b]11;#{THEME_BG}\x1b\\" if term_bg else "") + (f"\x1b]10;#{THEME_FG}\x1b\\" if term_fg else "")
+    if not seq:
+        return False
     try:
-        os.write(1, f"\x1b]11;#{THEME_BG}\x1b\\".encode())
+        os.write(1, seq.encode())
     except OSError:
-        pass
+        return False
+    if not term_fg:
+        return False
+    got = _ask_terminal(b"\x1b]10;?\x1b\\")
+    return got is not None and _is_theme_fg(_parse_fg(got[0]))
+
+
+def _is_theme_fg(colour: str | None) -> bool:
+    """`#rrggbb` is the theme's text colour, each channel within 2 (urxvt reports #d0d0d0 back as #cfcfcf)."""
+    if not colour:
+        return False
+    return all(abs(int(colour[i:i + 2], 16) - int(THEME_FG[i - 1:i + 1], 16)) <= 2 for i in (1, 3, 5))
+
+
+def _restore_terminal(term_bg: str | None, term_fg: str | None) -> None:
+    """Put back what _paint_terminal changed, when Force does not get as far as the client (_CLIENT_SH does it
+    after the client)."""
+    seq = (f"\x1b]10;{term_fg}\x07" if term_fg else "") + (f"\x1b]11;{term_bg}\x07" if term_bg else "")
+    if seq:
+        try:
+            os.write(1, seq.encode())
+        except OSError:
+            pass
 
 
 # sh runs the tmux client and cleans up after it: when the client did not end cleanly (the server went away while it
 # was attached, e.g. the quit button's detach racing the ui server's exit) tmux leaves the terminal on its alternate
-# screen with mouse reporting on, so leave that screen and reset the modes; then give the terminal its own
-# background back when Force painted it (_paint_terminal_bg). The client's exit status is kept.
+# screen with mouse reporting on, so leave that screen and reset the modes; then give the terminal its own text
+# colour and background back when Force painted them (_paint_terminal). The client's exit status is kept.
 _CLIENT_SH = ('tmux "$@"; s=$?; '
               '[ "$s" -ne 0 ] && printf "\033[?1049l\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[0m"; '
+              '[ -n "$FORCE_TERM_FG" ] && printf "\033]10;%s\007" "$FORCE_TERM_FG"; '
               '[ -n "$FORCE_TERM_BG" ] && printf "\033]11;%s\007" "$FORCE_TERM_BG"; exit $s')   # BEL ends the OSC
 
 
-def _exec_tmux(argv: list[str], term_bg: str | None) -> None:
+def _exec_tmux(argv: list[str], term_bg: str | None, term_fg: str | None = None) -> None:
     """Become the tmux client through a small sh that waits for it, so the terminal is put right however the client
     ends (detach, quit, the server going away): see _CLIENT_SH."""
     os.environ["FORCE_TERM_BG"] = term_bg or ""
+    os.environ["FORCE_TERM_FG"] = term_fg or ""
     os.execvp("sh", ["sh", "-c", _CLIENT_SH, "force", *argv[1:]])
 
 
