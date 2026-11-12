@@ -19,6 +19,13 @@ wait_for() {  # wait_for SECONDS DESCRIPTION COMMAND...
   echo "e2e-install: timed out waiting for $what" >&2; return 1
 }
 
+page() {  # page BASE: BASE.ansi (a tmux capture) -> BASE.html, a page that shows it as the terminal did
+  { printf '<!doctype html><meta charset="utf-8"><title>%s</title><body style="margin:0;background:#262626">' "$(basename "$1")"
+    printf '<pre style="margin:0;padding:12px;font:15px/1.25 ui-monospace,Menlo,monospace;color:#d0d0d0">'
+    python3 "$REPO/website/tools/ansi2html.py" "$1.ansi" /dev/stdout
+    printf '</pre>\n'; } > "$1.html"
+}
+
 step "serve $DIST"
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$DIST" >"$OUT/http.log" 2>&1 &
 HTTP=$!
@@ -27,7 +34,13 @@ wait_for 10 "the web root" curl -fsS "http://127.0.0.1:$PORT/install.sh"
 
 step "a stand-in Claude Code (tests/fake_claude.py) at ~/.local/bin/claude"
 mkdir -p "$HOME/.local/share/claude/versions" "$HOME/.local/bin"
-cp "$REPO/tests/fake_claude.py" "$HOME/.local/share/claude/versions/9.9.9"
+mkdir -p "$HOME/.local/share/claude/fake"
+cp "$REPO/tests/fake_claude.py" "$HOME/.local/share/claude/fake/fake_claude.py"
+# the stand-in finds its folder through FORCE_CLAUDE_DIR (the tests set it): Claude Code's own, ~/.claude
+cat > "$HOME/.local/share/claude/versions/9.9.9" <<EOS
+#!/bin/sh
+FORCE_CLAUDE_DIR="\$HOME/.claude" exec python3 "\$HOME/.local/share/claude/fake/fake_claude.py" "\$@"
+EOS
 chmod +x "$HOME/.local/share/claude/versions/9.9.9"
 ln -sf "$HOME/.local/share/claude/versions/9.9.9" "$HOME/.local/bin/claude"
 
@@ -50,6 +63,7 @@ step "sessions: a shell and an agent"
 "$F" new e2e-shell --shell --no-switch
 "$F" new e2e-agent --kind claude --no-switch
 wait_for 30 "both sessions in the list" sh -c "\"$F\" list | grep -q e2e-shell && \"$F\" list | grep -q e2e-agent"
+wait_for 30 "the agent session idle" sh -c "\"$F\" list | grep e2e-agent | grep -q IDLE"
 "$F" list | tee "$OUT/list.txt"
 "$F" doctor 2>&1 | tee "$OUT/doctor.txt" || true
 
@@ -60,12 +74,12 @@ printf 'set -g remain-on-exit on\nset -g exit-empty off\n' > "$OUT/outer.conf"  
   "$F attach --no-intro e2e-agent"
 sleep 8
 "$T" -L e2e-outer capture-pane -e -p -t 0 > "$OUT/cockpit.ansi"
-python3 "$REPO/website/tools/ansi2html.py" "$OUT/cockpit.ansi" "$OUT/cockpit.html"
+page "$OUT/cockpit"
 "$T" -L e2e-outer send-keys -t 0 'echo hello from the agent pane' Enter
 "$F" switch e2e-shell 2>/dev/null || true
 sleep 3
 "$T" -L e2e-outer capture-pane -e -p -t 0 > "$OUT/cockpit-shell.ansi"
-python3 "$REPO/website/tools/ansi2html.py" "$OUT/cockpit-shell.ansi" "$OUT/cockpit-shell.html"
+page "$OUT/cockpit-shell"
 grep -q "e2e-shell" "$OUT/cockpit.ansi" || { echo "e2e-install: the sidebar does not show e2e-shell" >&2; cat "$OUT/cockpit.ansi"; exit 1; }
 "$T" -L e2e-outer kill-server 2>/dev/null || true
 
