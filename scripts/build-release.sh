@@ -98,6 +98,11 @@ if [[ -f "$OUT/releases/$NAME-linux-$OTHER_ARCH.tar.gz.sha256" ]]; then
 fi
 if [[ "$ARCH" == x86_64 ]]; then SHA_x86_64="$SHA_THIS"; SHA_aarch64="$OTHER_SHA"
 else SHA_aarch64="$SHA_THIS"; SHA_x86_64="$OTHER_SHA"; fi
+# the macOS tarball (scripts/build-darwin.sh, built on a Mac and copied here by the release workflow), if present
+SHA_darwin_arm64=""
+if [[ -f "$OUT/releases/$NAME-darwin-arm64.tar.gz.sha256" ]]; then
+  SHA_darwin_arm64="$(cut -d' ' -f1 "$OUT/releases/$NAME-darwin-arm64.tar.gz.sha256")"
+fi
 python3 "$REPO/scripts/fill-installer.py" "$REPO/share/get-force.sh" "$OUT/install.sh" \
-  "$VERSION" "$BASE_URL" "$RELEASES_URL" "$SHA_x86_64" "$SHA_aarch64"
+  "$VERSION" "$BASE_URL" "$RELEASES_URL" "$SHA_x86_64" "$SHA_aarch64" "$SHA_darwin_arm64"
 echo "build-release: $TAR ($(du -h "$TAR" | cut -f1)) sha256 $(cut -c1-16 "$TAR.sha256")…"

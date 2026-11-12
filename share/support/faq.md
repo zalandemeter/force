@@ -2,8 +2,9 @@
 
 ## Install and update
 
-- **Supported systems.** Linux on x86-64. Windows through WSL (the installer sets up a Windows Terminal profile,
-  "Force (DISTRO)", with the icon font; it needs Windows Terminal 1.21 or newer). macOS is not supported yet.
+- **Supported systems.** Linux on x86-64. macOS on Apple Silicon, in beta: the same one-line install; its
+  background services are launchd agents (SPEC §51); not on Intel Macs. Windows through WSL (the installer sets up
+  a Windows Terminal profile, "Force (DISTRO)", with the icon font; it needs Windows Terminal 1.21 or newer).
 - **Root.** Never needed. Force installs as the user under `~/.local`.
 - **Python.** Force needs Python 3.11+; when the system has none, the installer brings its own.
 - **Update.** `force update`; a daily check shows a newer version in the sidebar footer (setting
@@ -49,7 +50,7 @@
 
 ## Known limits
 
-- Linux x86-64 only for release builds (aarch64 later).
+- Release builds: Linux x86-64 and macOS arm64 (beta); Linux aarch64 later.
 - Tilix and Terminator keep Alt+number for their own panes.
 - Session sharing with other users is parked (setting `sharing`).
 

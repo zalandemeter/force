@@ -10,7 +10,7 @@ curl -fsSL https://useforce.cc/install.sh | sh
 force
 ```
 
-Linux, x86-64. No root, no packages, no config files.
+Linux (x86-64) and macOS on Apple Silicon (beta). No root, no packages, no config files.
 
 ## What it does
 

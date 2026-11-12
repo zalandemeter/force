@@ -1,6 +1,7 @@
-# A tag vX.Y.Z (matching pyproject.toml's version) builds the release tarball in the builder container, attests
-# its provenance, publishes a GitHub Release with the tarball, its .sha256 and install.sh, then redeploys the
-# website (on main) so https://useforce.cc/install.sh installs the new version.
+# A tag vX.Y.Z (matching pyproject.toml's version) builds the release tarballs (Linux in the builder container, macOS
+# on a GitHub Mac, SPEC §51), attests their provenance, publishes a GitHub Release with the tarballs, their .sha256
+# and install.sh (pinning every platform's SHA), then redeploys the website (on main) so
+# https://useforce.cc/install.sh installs the new version.
 name: Release
 
 on:
@@ -11,7 +12,37 @@ permissions:
   contents: read
 
 jobs:
+  darwin:
+    name: macOS tarball
+    runs-on: macos-26
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches pyproject.toml
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          grep -qx "version = \"$v\"" pyproject.toml \
+            || { echo "::error::tag $GITHUB_REF_NAME, but pyproject.toml has $(grep -m1 '^version' pyproject.toml)"; exit 1; }
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          command -v pkg-config >/dev/null || brew install pkgconf
+          scripts/build-darwin.sh "$VERSION"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: build/out-darwin/dist/releases/force-${{ env.VERSION }}-darwin-arm64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin
+          path: build/out-darwin/dist/releases/force-${{ env.VERSION }}-darwin-arm64.tar.gz*
+          if-no-files-found: error
+          retention-days: 3
+
   release:
+    needs: darwin
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -36,6 +67,11 @@ jobs:
           cargo fetch --locked --manifest-path crates/sidebar/Cargo.toml
           cargo fetch --locked --manifest-path crates/intro/Cargo.toml
           python -m pip install -q pytest && python -m pytest -q
+      - name: The macOS tarball (its SHA goes into install.sh)
+        uses: actions/download-artifact@v4
+        with:
+          name: darwin
+          path: ${{ env.FORCE_BUILD_ROOT }}/dist/releases
       - name: Build the tarball and install.sh
         run: scripts/build-release.sh "$VERSION"
       - uses: actions/attest-build-provenance@v2
@@ -47,7 +83,7 @@ jobs:
         run: |
           d="$FORCE_BUILD_ROOT/dist"
           gh release create "$GITHUB_REF_NAME" --title "Force $VERSION" --generate-notes --verify-tag \
-            "$d"/releases/force-"$VERSION"-linux-*.tar.gz "$d"/releases/force-"$VERSION"-linux-*.tar.gz.sha256 \
+            "$d"/releases/force-"$VERSION"-*.tar.gz "$d"/releases/force-"$VERSION"-*.tar.gz.sha256 \
             "$d/install.sh"
       - name: Put the new install.sh on the website
         env:
