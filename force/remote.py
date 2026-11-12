@@ -27,6 +27,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import config, registry
+
 PROTO = 1                     # bumped when `force watch` or the remote command set changes incompatibly
 REMOTE_FORCE = "~/.local/bin/force"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
@@ -148,10 +150,32 @@ def host_tmux_prefix(paths, r: Remote) -> str:
 
 # --------------------------------------------------------------------------- the host side ------------
 def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, heartbeat: float = 2.0,
-          out=sys.stdout) -> int:
+          out=sys.stdout, inp=sys.stdin) -> int:
     """`force watch` (on a host): a hello line, then {"snapshot", "registry"} whenever the snapshot changes
     (and every `heartbeat` seconds: the reader takes a copy older than 5 s for a dead link). Ends when the
-    reader goes away."""
+    reader goes away. A first stdin line {"peer": NAME} (SPEC §52) marks NAME as a peer that is watching this
+    machine; its queued messages are streamed over this connection as {"prompt": {…}} lines."""
+    from . import messages
+    peer: str | None = None
+
+    def _hello_peer():
+        nonlocal peer
+        try:
+            line = inp.readline()
+        except (OSError, ValueError):
+            return
+        if not line:
+            return
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            return
+        if isinstance(msg, dict) and isinstance(msg.get("peer"), str) and messages.HOST_RE.match(msg["peer"]):
+            messages.mark_peer(paths, msg["peer"], os.getpid())
+            peer = msg["peer"]
+
+    if inp is not None:
+        threading.Thread(target=_hello_peer, daemon=True).start()
     try:
         out.write(json.dumps({"hello": {"proto": PROTO, "version": release, "host": socket.gethostname(),
                                         "ui": ui_mode}}) + "\n")
@@ -181,9 +205,16 @@ def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, hear
                 out.write(json.dumps({"snapshot": snap, "registry": reg}, separators=(",", ":")) + "\n")
                 out.flush()
                 last, beat = key, now
+            if peer:
+                for item in messages.drain(paths, peer):
+                    out.write(json.dumps({"prompt": item}) + "\n")
+                    out.flush()
             time.sleep(interval)
     except (BrokenPipeError, KeyboardInterrupt):
         return 0
+    finally:
+        if peer:
+            messages.unmark_peer(paths, peer, os.getpid())
 
 
 # --------------------------------------------------------------------------- the client side ----------
@@ -215,6 +246,7 @@ class Watcher:
         self.proc: subprocess.Popen | None = None
         self.next_try = 0.0
         self.backoff = 2.0
+        self.hello_host: str | None = None      # the remote's own host name, from its hello
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -235,19 +267,51 @@ class Watcher:
     def ensure(self, now: float) -> None:
         if self.alive() or now < self.next_try:
             return
+        from . import messages
         argv = ssh_argv(self.paths, self.r, REMOTE_FORCE, "watch")
         try:
-            self.proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, text=True, bufsize=1)
         except OSError as e:
             write_status(self.paths, self.r.name, "offline", str(e))
             self._later(now)
             return
+        try:
+            self.proc.stdin.write(json.dumps({"peer": messages.short_host()}) + "\n")
+            self.proc.stdin.flush()
+        except OSError:
+            pass                    # the remote never reads it: no peer (SPEC §52)
         threading.Thread(target=self._read, args=(self.proc, now), daemon=True).start()
 
     def _later(self, now: float) -> None:
         self.next_try = now + self.backoff
         self.backoff = min(self.backoff * 2, 60.0)
+
+    def _deliver(self, prompt: object) -> None:
+        """A {"prompt": {…}} line from a peer (SPEC §52): run `force prompt NAME - --from SENDER` here, never
+        blocking the reader. Bad items are ignored; the receiving prompt_command logs the outcome itself."""
+        from . import messages
+        if not isinstance(prompt, dict):
+            return
+        to, frm, text = prompt.get("to"), prompt.get("from"), prompt.get("text")
+        if not (isinstance(to, str) and registry.valid_name(to)
+                and isinstance(frm, str) and isinstance(text, str) and 1 <= len(text) <= 100_000):
+            return
+        try:
+            _session, frm_host = messages.parse_from(frm)
+        except Exception:
+            return
+        # the sender must be the host this connection reaches (its name here or the name its hello gave):
+        # a host cannot speak for another one over its own watch connection
+        if frm_host not in {self.r.name, (self.hello_host or "").split(".")[0]}:
+            return
+        def _run():
+            try:
+                subprocess.run([config.launcher_path(), "prompt", to, "-", "--from", frm],
+                              input=text, text=True, capture_output=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        threading.Thread(target=_run, daemon=True).start()
 
     def _read(self, proc: subprocess.Popen, started: float) -> None:
         d = remote_dir(self.paths, self.r.name)
@@ -269,6 +333,7 @@ class Watcher:
                     break
                 ok = True
                 self.backoff = 2.0
+                self.hello_host = h.get("host") if isinstance(h.get("host"), str) else None
                 write_status(self.paths, self.r.name, "connected", h.get("host") or "", version)
             elif ok and "snapshot" in msg:
                 # stamped with the time it arrived: "stale" then means the link (or the remote's daemon) is
@@ -279,6 +344,8 @@ class Watcher:
                     snap["generated_ms"] = int(time.time() * 1000)
                 _write_json(d / "snapshot.json", snap)
                 _write_json(d / "registry.json", msg.get("registry") or {"sessions": []})
+            elif ok and "prompt" in msg:
+                self._deliver(msg["prompt"])
         proc.wait()
         err = (proc.stderr.read() if proc.stderr else "").strip().splitlines()
         if read_status(self.paths, self.r.name).get("state") != "version":

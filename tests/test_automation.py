@@ -3,13 +3,16 @@
 Drives states by writing snapshot.json ourselves (generated_ms = now); real sessions run on the test
 tmux server from the `env` fixture.
 """
+import dataclasses
 import json
+import os
 import time
 import uuid
 
 import pytest
 
-from force import automation, cli
+from force import automation, cli, messages
+from force import remote as remote_mod
 from force.registry import locked
 from force.tmux import Pane
 
@@ -462,3 +465,171 @@ def test_explain_stale_warning(env, capsys):
     out, err = capsys.readouterr()
     assert "snapshot is 60 s old" in err
     assert "screen:" in out
+
+
+# --------------------------------------------------------------------------- #
+# messages between hosts (SPEC §52): receiving --from
+# --------------------------------------------------------------------------- #
+
+def _log_lines(env):
+    p = env.paths.state / "messages.log"
+    return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+
+
+def test_prompt_from_refused_without_setting(env, capsys):
+    cockpit = env.make_cockpit()
+    pane = make_cat_session(env, "s1")
+    add_entry(env, "s1")
+    write_snap(env, [sess("s1", "IDLE")])
+    args = _args(["prompt", "s1", "secret", "--from", "other@lap"])
+    with pytest.raises(automation.CmdError) as ei:
+        automation.prompt_command(cockpit, args)
+    assert ei.value.code == "not_accepted"
+    assert "secret" not in cockpit.tmux.run("capture-pane", "-p", "-t", pane)     # nothing sent
+    assert _log_lines(env)[-1]["result"] == "not_accepted"
+
+
+def test_prompt_from_accepted_delivers_header(env, capsys):
+    cockpit = env.make_cockpit()
+    cockpit.cfg = dataclasses.replace(cockpit.cfg, accept_prompts_from="lap")
+    pane = make_cat_session(env, "s1")
+    add_entry(env, "s1")
+    write_snap(env, [sess("s1", "IDLE")])
+    rc = automation.prompt_command(cockpit, _args(["prompt", "s1", "hello", "--from", "sess@lap"]))
+    assert rc == 0
+    out = cockpit.tmux.run("capture-pane", "-p", "-t", pane)
+    assert 'hello' in out and '[from sess on lap' in out and 'reply: force prompt lap:sess' in out
+    assert _log_lines(env)[-1]["result"] == "delivered"
+
+
+def test_prompt_from_blocked_still_refused(env):
+    cockpit = env.make_cockpit()
+    cockpit.cfg = dataclasses.replace(cockpit.cfg, accept_prompts_from="*")
+    make_cat_session(env, "s1")
+    add_entry(env, "s1")
+    write_snap(env, [sess("s1", "NEEDS_YOU")])
+    with pytest.raises(automation.CmdError) as ei:
+        automation.prompt_command(cockpit, _args(["prompt", "s1", "zz", "--from", "s@s"]))
+    assert ei.value.code == "blocked"
+    assert _log_lines(env)[-1]["result"] == "blocked"
+
+
+def test_keys_from_refused(env):
+    cockpit = env.make_cockpit()
+    make_cat_session(env, "s1")
+    add_entry(env, "s1")
+    with pytest.raises(automation.CmdError) as ei:
+        automation.keys_command(cockpit, _args(["keys", "s1", "j", "--from", "other@lap"]))
+    assert ei.value.code == "not_accepted"
+    assert _log_lines(env)[-1]["result"] == "not_accepted"
+
+
+def test_keys_from_accepted(env):
+    cockpit = env.make_cockpit()
+    cockpit.cfg = dataclasses.replace(cockpit.cfg, accept_prompts_from="lap")
+    pane = make_cat_session(env, "s1")
+    add_entry(env, "s1")
+    assert automation.keys_command(cockpit, _args(["keys", "s1", "hello", "--literal", "--from", "s@lap"])) == 0
+    assert wait_for(lambda: "hello" in cockpit.tmux.run("capture-pane", "-p", "-t", pane))
+    assert _log_lines(env)[-1]["result"] == "delivered"
+
+
+# --------------------------------------------------------------------------- #
+# messages between hosts (SPEC §52): the sending side
+# --------------------------------------------------------------------------- #
+
+def _recording_ssh(monkeypatch):
+    calls = []
+    monkeypatch.setattr(automation.remote_mod, "ssh_argv",
+                       lambda paths, r, *a, tty=False: calls.append((r, a)) or ["true"])
+    monkeypatch.setattr(automation.subprocess, "call", lambda argv: calls and 7)
+    return calls
+
+
+def test_prompt_sender_remote_records_argv(env, monkeypatch):
+    cockpit = env.make_cockpit()
+    remote_mod.save(env.paths, [remote_mod.Remote("build", "build")])
+    calls = _recording_ssh(monkeypatch)
+    rc = automation.prompt_command(cockpit, _args(["prompt", "build:portal", "hi"]))
+    assert rc == 7                                       # the fake's exit code
+    r, a = calls[0]
+    assert a[0] == "~/.local/bin/force"
+    assert a[1:3] == ("prompt", "portal")
+    i = a.index("--from")
+    assert a[i + 1].endswith("@" + messages.short_host())
+
+
+def test_prompt_sender_remote_keeps_dash_words_as_text(env, monkeypatch):
+    # options first, then --, then the text: "-v" must arrive as text, not as an option of the remote's prompt
+    cockpit = env.make_cockpit()
+    remote_mod.save(env.paths, [remote_mod.Remote("build", "build")])
+    calls = _recording_ssh(monkeypatch)
+    automation.prompt_command(cockpit, _args(["prompt", "build:portal", "--wait", "--", "-v", "run", "it"]))
+    _r, a = calls[0]
+    remote_args = cli.build_parser().parse_args(list(a[1:]))       # what the remote's force parses
+    assert remote_args.name == "portal" and remote_args.text == ["-v", "run", "it"]
+    assert remote_args.wait and remote_args.from_.endswith("@" + messages.short_host())
+
+
+def test_prompt_sender_remote_host_form(env, monkeypatch):
+    cockpit = env.make_cockpit()
+    remote_mod.save(env.paths, [remote_mod.Remote("build", "build")])
+    calls = _recording_ssh(monkeypatch)
+    automation.prompt_command(cockpit, _args(["prompt", "portal", "hi", "--host", "build"]))
+    r, a = calls[0]
+    assert a[0] == "~/.local/bin/force" and a[1:3] == ("prompt", "portal") and "hi" in a
+
+
+def test_prompt_peer_queues(env, monkeypatch, capsys):
+    cockpit = env.make_cockpit()
+    messages.mark_peer(env.paths, "lap", os.getpid())
+    rc = automation.prompt_command(cockpit, _args(["prompt", "lap:portal", "hi"]))
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "queued for lap"
+    files = list((env.paths.state / "outbox" / "lap").iterdir())
+    assert len(files) == 1
+    item = json.loads(files[0].read_text())
+    assert item["to"] == "portal" and item["text"] == "hi" and item["from"].endswith("@" + messages.short_host())
+    assert not files[0].name.startswith(".")
+
+
+def test_prompt_peer_wait_usage(env):
+    cockpit = env.make_cockpit()
+    messages.mark_peer(env.paths, "lap", os.getpid())
+    with pytest.raises(automation.UsageError):
+        automation.prompt_command(cockpit, _args(["prompt", "lap:portal", "hi", "--wait"]))
+    # other commands never reach a peer
+    with pytest.raises(automation.CmdError) as ei:
+        automation.wait_command(cockpit, _args(["wait", "lap:portal"]))
+    assert ei.value.code == "no_route"
+
+
+def test_prompt_no_route(env):
+    cockpit = env.make_cockpit()
+    with pytest.raises(automation.CmdError) as ei:
+        automation.prompt_command(cockpit, _args(["prompt", "ghost:portal", "hi"]))
+    assert ei.value.code == "no_route"
+
+
+def test_prompt_bad_target_usage(env):
+    cockpit = env.make_cockpit()
+    with pytest.raises(automation.UsageError):
+        automation.prompt_command(cockpit, _args(["prompt", "a:b:c", "hi"]))
+
+
+def test_prompt_host_and_target_disagree(env, monkeypatch):
+    cockpit = env.make_cockpit()
+    remote_mod.save(env.paths, [remote_mod.Remote("build", "build")])
+    with pytest.raises(automation.UsageError):
+        automation.prompt_command(cockpit, _args(["prompt", "other:portal", "hi", "--host", "build"]))
+
+
+def test_forward_does_not_forward_host_colon_name(env, monkeypatch):
+    remote_mod.save(env.paths, [remote_mod.Remote("devbox", "devbox")])
+    monkeypatch.setenv("FORCE_HOST", "devbox")
+    called = []
+    monkeypatch.setattr(cli.subprocess, "call", lambda argv, **k: called.append(argv) or 0)
+    assert cli._forward(["prompt", "other:portal", "hi"]) is None      # HOST:NAME stays here
+    assert cli._forward(["prompt", "portal", "hi", "--host", "other"]) is None
+    assert cli._forward(["prompt", "portal", "hi"]) == 0              # still forwards a bare NAME
+    assert called

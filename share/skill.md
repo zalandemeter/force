@@ -22,6 +22,12 @@ yet), `idle`, `stale` (idle for hours), `starting`, `down`, `shell` (a shell at 
     force keys NAME KEY...         # keys: enter esc tab space up down left right backspace shift+tab ctrl+c
     force keys NAME --literal TEXT # type text without pressing Enter
 
+Use `HOST:NAME` (or `--host HOST`) for a session on another host: a name from `force host list`, or a host
+whose Force shows this one. The receiving host must list this one in its `acceptPromptsFrom` setting. A message
+arrives there with a `[from SESSION on HOST · reply: force prompt HOST:SESSION "…"]` line above it; reply with
+exactly that command. To a host that only watches this one, only `force prompt` (without `--wait`) works; the message
+is queued and delivered when that host connects.
+
 `prompt` refuses a session that needs you: read its screen (`force read`), answer with `force keys`.
 A timeout does not prove nothing was sent: `force read` before you retry.
 

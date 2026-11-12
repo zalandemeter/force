@@ -104,6 +104,8 @@ class Config:
     support_agent: str = "auto"
     # Chuck's model: "" = the agent's default; Claude Code an alias or id (opus, sonnet, …), OpenCode provider/model
     support_model: str = ""
+    # hosts whose agents may prompt sessions here (SPEC §52); "" = off
+    accept_prompts_from: str = ""
 
 
 @dataclass(frozen=True)
@@ -155,6 +157,8 @@ SETTINGS = [
                "the agent Chuck, the support assistant, runs on: auto | claude | opencode"),
     SettingSpec("supportModel", "support_model", "string", (), True,
                "Chuck's model: Claude Code an alias or id (opus, sonnet), OpenCode provider/model (any provider it knows)"),
+    SettingSpec("acceptPromptsFrom", "accept_prompts_from", "string", (), True,
+               "hosts whose agents may prompt sessions here (space or comma separated, * = any; empty = off)"),
     SettingSpec("crashRestartMax", "crash_restart_max", "int", (), False,
                "how often a session is restarted after a crash"),
     SettingSpec("crashWindowMinutes", "crash_window_minutes", "number", (), False,

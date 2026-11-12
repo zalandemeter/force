@@ -2457,6 +2457,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("prompt", help="send TEXT into the agent's input (SPEC §43.1)")
     p.add_argument("name")
     p.add_argument("text", nargs="+")
+    p.add_argument("--host", default=None, help="host to drive: HOST:NAME, or this machine")
+    p.add_argument("--from", dest="from_", default=None, help=argparse.SUPPRESS)
     p.add_argument("--wait", action="store_true", help="wait for the turn to end before returning")
     p.add_argument("--until", action="append", default=[],
                   help="states to wait for with --wait (repeatable; default your-turn idle needs-you)")
@@ -2465,6 +2467,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("wait", help="wait until a session is in one of --until's states (SPEC §43.1)")
     p.add_argument("name")
+    p.add_argument("--host", default=None, help="host to drive: HOST:NAME, or this machine")
     p.add_argument("--until", action="append", default=[],
                   help="states to wait for (repeatable; default your-turn idle needs-you)")
     p.add_argument("--timeout", type=float, default=None, help="give up after SEC seconds")
@@ -2472,12 +2475,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("read", help="print the agent pane's last N rows (SPEC §43.1)")
     p.add_argument("name")
+    p.add_argument("--host", default=None, help="host to drive: HOST:NAME, or this machine")
     p.add_argument("--lines", type=int, default=80, help="rows to show (default 80)")
     p.add_argument("--ansi", action="store_true", help="keep ANSI colour escapes")
 
     p = sub.add_parser("keys", help="send-keys to the agent pane (SPEC §43.1)")
     p.add_argument("name")
     p.add_argument("keys", nargs="+")
+    p.add_argument("--host", default=None, help="host to drive: HOST:NAME, or this machine")
+    p.add_argument("--from", dest="from_", default=None, help=argparse.SUPPRESS)
     p.add_argument("--literal", action="store_true", help="send the words as literal text")
 
     p = sub.add_parser("report", help="report what a shell session is doing (SPEC §43.2)")
@@ -2505,6 +2511,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("explain", help="why a card shows its state (SPEC §43.3)")
     p.add_argument("name")
+    p.add_argument("--host", default=None, help="host to drive: HOST:NAME, or this machine")
     p.add_argument("--lines", type=int, default=8, help="screen rows to show (default 8)")
     p.add_argument("--json", action="store_true")
 
@@ -2691,10 +2698,11 @@ _FORWARDED = {"new", "rename", "sync-titles", "delete", "archive", "unarchive", 
 
 
 def _forward(argv: list[str]) -> int | None:
-    """In a ui that shows a remote (FORCE_HOST in its environment), a session command runs there."""
+    """In a ui that shows a remote (FORCE_HOST in its environment), a session command runs there. A target given as
+    HOST:NAME or --host is resolved on this machine (SPEC §52), so it is never forwarded."""
     host = os.environ.get("FORCE_HOST", "")
     words = [a for a in argv if not a.startswith("-")]
-    if not host or not words or words[0] not in _FORWARDED:
+    if "--host" in argv or (len(words) > 1 and ":" in words[1]) or not host or not words or words[0] not in _FORWARDED:
         return None
     paths = config.get_paths()
     r = remote_mod.get(paths, host)

@@ -14,7 +14,8 @@ import subprocess
 import sys
 import time
 
-from . import registry, report
+from . import messages, registry, report
+from . import remote as remote_mod
 from .tmux import TmuxError
 
 # a snapshot older than this (ms) means the daemon is not running (SPEC §43.1)
@@ -223,6 +224,113 @@ def _success_output(cockpit, args, snap, state) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# messages between hosts (SPEC §52)
+# --------------------------------------------------------------------------- #
+
+def _route(cockpit, args, command: str):
+    """Resolve the command's target (SPEC §52). Returns (route, target): 'local' & None, 'remote' & the Remote,
+    or 'peer' & the host name. A target on a peer is an error unless it is a plain `force prompt`."""
+    if getattr(args, "host", None):
+        host = args.host
+        phost, pname = messages.parse_target(args.name)
+        if phost is not None and phost != host:
+            raise UsageError(f"--host {host!r} and target {args.name!r} disagree")
+        args.name = pname
+    else:
+        phost, pname = messages.parse_target(args.name)
+        host = phost
+        args.name = pname
+    if host is None:
+        return "local", None
+    kind, target = messages.resolve(cockpit.paths, host)
+    if kind == "peer":
+        if command != "prompt":
+            raise CmdError("no_route", "no route to host {!r}: only force prompt reaches a host that watches "
+                          "this machine".format(host))
+        if args.wait or args.until:
+            raise UsageError("--wait needs a host this machine connects to")
+        return "peer", host
+    return kind, target
+
+
+def _remote_argv(cockpit, r, command: str, name: str, *opts: str) -> list[str]:
+    """The ssh argv that runs `force CMD NAME …` on `r` (SPEC §40)."""
+    return remote_mod.ssh_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, command, name, *opts)
+
+
+def _prompt_cli_opts(args) -> list[str]:
+    """The prompt options passed on to the remote shell (the text words or '-', --wait, --until, --timeout, --json)."""
+    opts: list[str] = []
+    if args.wait:
+        opts.append("--wait")
+    for u in args.until:
+        opts += ["--until", u]
+    if args.timeout is not None:
+        opts += ["--timeout", str(args.timeout)]
+    if args.json:
+        opts.append("--json")
+    return opts
+
+
+def _prompt_text_words(args) -> list[str]:
+    """The text after `--` on the remote command line, so a word starting with '-' stays text ('-' = stdin)."""
+    return ["--", *(["-"] if list(args.text) == ["-"] else list(args.text))]
+
+
+def _peer_prompt(cockpit, args, host: str) -> int:
+    """`force prompt` to a host that only watches this one: queue it; it is streamed over that watch connection."""
+    text = _prompt_text(args)
+    if not text:
+        raise CmdError("empty_prompt", "empty prompt")
+    item = {"to": args.name, "text": text, "from": messages.sender(cockpit), "at": time.time()}
+    messages.queue(cockpit.paths, host, item)
+    if args.json:
+        print(json.dumps({"queued": host, "name": args.name}))
+    else:
+        print(f"queued for {host}")
+    messages.log(cockpit.paths, dir="out", cmd="prompt", **{"from": item["from"]}, to=item["to"],
+                result="queued", length=len(text))
+    return 0
+
+
+def _receive_prompt(cockpit, args, from_val: str, clock, sleep) -> int:
+    """The receiving side of a delivered prompt: refuse unless acceptPromptsFrom lists the sender's host (§52)."""
+    session, host = messages.parse_from(from_val)
+    if not messages.accepts(cockpit.cfg, host):
+        messages.log(cockpit.paths, dir="in", cmd="prompt", **{"from": from_val}, to=args.name, result="not_accepted")
+        raise CmdError("not_accepted", f"this host does not accept prompts from {host}: "
+                      f"force settings set acceptPromptsFrom {host}")
+    return _prompt_local(cockpit, args, clock, sleep, from_val)
+
+
+def _prompt_local(cockpit, args, clock, sleep, from_val) -> int:
+    if from_val:
+        try:
+            return _prompt_local_inner(cockpit, args, clock, sleep, from_val)
+        except CmdError as e:
+            messages.log(cockpit.paths, dir="in", cmd="prompt", **{"from": from_val}, to=args.name, result=e.code)
+            raise
+    return _prompt_local_inner(cockpit, args, clock, sleep, None)
+
+
+def _receive_keys(cockpit, args, from_val: str) -> int:
+    """The receiving side of delivered keys (no header), refuse unless acceptPromptsFrom lists the sender's host."""
+    session, host = messages.parse_from(from_val)
+    if not messages.accepts(cockpit.cfg, host):
+        messages.log(cockpit.paths, dir="in", cmd="keys", **{"from": from_val}, to=args.name, result="not_accepted")
+        raise CmdError("not_accepted", f"this host does not accept prompts from {host}: "
+                      f"force settings set acceptPromptsFrom {host}")
+    try:
+        _keys_local(cockpit, args)
+    except CmdError as e:
+        messages.log(cockpit.paths, dir="in", cmd="keys", **{"from": from_val}, to=args.name, result=e.code)
+        raise
+    messages.log(cockpit.paths, dir="in", cmd="keys", **{"from": from_val}, to=args.name,
+                result="delivered", length=len(args.keys))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # prompt
 # --------------------------------------------------------------------------- #
 
@@ -245,13 +353,33 @@ def _send_text(cockpit, pane_id: str, text: str) -> None:
 
 
 def prompt_command(cockpit, args, clock=time.monotonic, sleep=time.sleep) -> int:
-    """`force prompt NAME TEXT… [--wait] [--until S]… [--timeout SEC] [--json]`."""
+    """`force prompt NAME TEXT… [--wait] [--until S]… [--timeout SEC] [--json]` (SPEC §43.1, §52)."""
     if args.until and not args.wait:
         raise UsageError("--until needs --wait")
+    from_val = getattr(args, "from_", None)
+    if from_val:
+        return _receive_prompt(cockpit, args, from_val, clock, sleep)
+    route, target = _route(cockpit, args, "prompt")
+    if route == "remote":
+        from_to = messages.sender(cockpit)
+        opts = _prompt_cli_opts(args) + ["--from", from_to] + _prompt_text_words(args)
+        code = subprocess.call(_remote_argv(cockpit, target, "prompt", args.name, *opts))
+        messages.log(cockpit.paths, dir="out", cmd="prompt", **{"from": from_to}, to=args.name,
+                   result="sent" if code == 0 else f"exit {code}")
+        return code
+    if route == "peer":
+        return _peer_prompt(cockpit, args, target)
+    return _prompt_local(cockpit, args, clock, sleep, None)
+
+
+def _prompt_local_inner(cockpit, args, clock, sleep, from_val) -> int:
     _require_agent(cockpit, args.name)
     text = _prompt_text(args)
     if not text:
         raise CmdError("empty_prompt", "empty prompt")
+    if from_val:
+        session, host = messages.parse_from(from_val)
+        text = messages.header(session, host) + "\n" + text
     until = _until_set(args.until) if args.wait else set()
     overall = None if args.timeout is None else clock() + args.timeout   # the timeout includes the send
 
@@ -265,6 +393,9 @@ def prompt_command(cockpit, args, clock=time.monotonic, sleep=time.sleep) -> int
         raise CmdError("blocked", f"session {args.name!r} needs you: answer the dialog with force keys")
     pane = _agent_pane_or_down(cockpit, args.name)
     _send_text(cockpit, pane.pane_id, text)
+    if from_val:
+        messages.log(cockpit.paths, dir="in", cmd="prompt", **{"from": from_val}, to=args.name,
+                   result="delivered", length=len(text))
     if not args.wait:
         return 0
     return _prompt_wait(cockpit, args, until, overall, clock, sleep)
@@ -295,7 +426,17 @@ def _prompt_wait(cockpit, args, until, overall, clock, sleep) -> int:
 # --------------------------------------------------------------------------- #
 
 def wait_command(cockpit, args, clock=time.monotonic, sleep=time.sleep) -> int:
-    """`force wait NAME [--until S]… [--timeout SEC] [--json]`."""
+    """`force wait NAME [--until S]… [--timeout SEC] [--json]` (SPEC §43.1, §52)."""
+    route, target = _route(cockpit, args, "wait")
+    if route == "remote":
+        opts: list[str] = []
+        for u in args.until:
+            opts += ["--until", u]
+        if args.timeout is not None:
+            opts += ["--timeout", str(args.timeout)]
+        if args.json:
+            opts.append("--json")
+        return subprocess.call(_remote_argv(cockpit, target, "wait", args.name, *opts))
     _require_live(cockpit, args.name)
     until = _until_set(args.until)
     snap = _fresh_snapshot(cockpit, clock)
@@ -314,7 +455,24 @@ def wait_command(cockpit, args, clock=time.monotonic, sleep=time.sleep) -> int:
 # --------------------------------------------------------------------------- #
 
 def keys_command(cockpit, args) -> int:
-    """`force keys NAME KEY… [--literal]`."""
+    """`force keys NAME KEY… [--literal]` (SPEC §43.1, §52)."""
+    from_val = getattr(args, "from_", None)
+    if from_val:
+        return _receive_keys(cockpit, args, from_val)
+    route, target = _route(cockpit, args, "keys")
+    if route == "remote":
+        from_to = messages.sender(cockpit)
+        opts: list[str] = ["--literal"] if args.literal else []
+        opts += ["--from", from_to, "--", *args.keys]
+        code = subprocess.call(_remote_argv(cockpit, target, "keys", args.name, *opts))
+        messages.log(cockpit.paths, dir="out", cmd="keys", **{"from": from_to}, to=args.name,
+                   result="sent" if code == 0 else f"exit {code}")
+        return code
+    return _keys_local(cockpit, args)
+
+
+def _keys_local(cockpit, args) -> int:
+    """Send keys into the agent pane (no header)."""
     _require_live(cockpit, args.name)
     pane = _agent_pane_or_down(cockpit, args.name)
     if args.literal:
@@ -329,9 +487,15 @@ def keys_command(cockpit, args) -> int:
 # --------------------------------------------------------------------------- #
 
 def read_command(cockpit, args) -> int:
-    """`force read NAME [--lines N] [--ansi]`."""
+    """`force read NAME [--lines N] [--ansi]` (SPEC §43.1, §52)."""
     if args.lines < 1:
         raise UsageError("--lines must be >= 1")
+    route, target = _route(cockpit, args, "read")
+    if route == "remote":
+        opts: list[str] = ["--lines", str(args.lines)]
+        if args.ansi:
+            opts.append("--ansi")
+        return subprocess.call(_remote_argv(cockpit, target, "read", args.name, *opts))
     _require_live(cockpit, args.name)
     pane = _agent_pane_or_down(cockpit, args.name)
     cmd = ["capture-pane", "-p", "-J", "-t", pane.pane_id, "-S", f"-{args.lines}"]
@@ -406,7 +570,13 @@ def _fmt_report(info) -> str:
 
 
 def explain_command(cockpit, args, now_ms=None) -> int:
-    """`force explain NAME [--lines N] [--json]`."""
+    """`force explain NAME [--lines N] [--json]` (SPEC §43.3, §52)."""
+    route, target = _route(cockpit, args, "explain")
+    if route == "remote":
+        opts: list[str] = ["--lines", str(args.lines)]
+        if args.json:
+            opts.append("--json")
+        return subprocess.call(_remote_argv(cockpit, target, "explain", args.name, *opts))
     entry = registry.load(cockpit.paths.registry).get(args.name)
     if entry is None:
         raise CmdError("no_session", f"no session named {args.name!r}")
