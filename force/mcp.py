@@ -82,7 +82,9 @@ TOOLS: dict[str, tuple[str, dict, bool]] = {
     "session_new": ("Start a new session (force new), without switching to it.",
                     _s("", name=_str("its name (omit: named after the first prompt)", optional=True),
                        cwd=_str("its folder (default: home)", optional=True),
-                       kind=_str("claude, opencode or shell", optional=True, enum=["claude", "opencode", "shell"])),
+                       kind=_str("claude, opencode or shell", optional=True, enum=["claude", "opencode", "shell"]),
+                       remote_control={"type": "boolean", "description": "Claude Code only: false starts it "
+                                       "without Remote Control (default true)", "optional": True}),
                     False),
     "session_rename": ("Rename a session (force rename OLD NEW).",
                        _s("", old=_str("its name now"), new=_str("the new name")), False),
@@ -219,6 +221,8 @@ def call(name: str, args: dict, paths=None, ssh_check=None) -> tuple[bool, str]:
                 argv.append("--shell")
             elif args.get("kind") in ("claude", "opencode"):
                 argv += ["--kind", args["kind"]]
+            if args.get("remote_control") is False:
+                argv.append("--no-remote-control")
             argv.append("--no-switch")
             rc, out = _force(*argv)
         elif name == "session_rename":

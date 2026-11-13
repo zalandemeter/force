@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import claude as claude_mod, opencode as opencode_mod, procinfo, usage as usage_mod
 from .claude import AgentStatus
-from .registry import Entry, valid_name
+from .registry import Entry, remote_control as remote_control_on, valid_name
 
 
 @dataclass
@@ -89,7 +89,8 @@ class Claude(Kind):
             extra_settings, extra_args = support.claude_launch(cockpit.paths, model)
         argv = claude_mod.build_argv(cockpit.paths.claude_bin, cockpit.paths.claude_dir, entry.name, entry.session_id,
                                      statusline, memory_dir=entry.extra.get("memory_dir"),
-                                     remote_control=not os.environ.get("FORCE_NO_REMOTE_CONTROL"),
+                                     remote_control=remote_control_on(entry)
+                                     and not os.environ.get("FORCE_NO_REMOTE_CONTROL"),
                                      extra_settings=extra_settings, extra_args=extra_args)
         return argv, {}
 

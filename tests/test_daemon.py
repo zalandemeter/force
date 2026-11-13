@@ -1315,6 +1315,32 @@ def test_title_sync_types_rename_once_when_ready(env, monkeypatch):
     assert len([a for a in sent if "-l" in a]) == 1, "only once"
 
 
+def test_title_sync_without_remote_control_does_not_wait_for_it(env, monkeypatch):
+    """SPEC §53: a session started without Remote Control never connects; its /rename goes in once idle."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "quiet")
+    d = Daemon(cockpit, FakeClock())
+    ctl(cockpit, "quiet", status="idle")
+    assert wait_for(lambda: (current_status(cockpit, "quiet") or {}).get("status") == "idle")
+    from force.lifecycle import queue_title_sync
+    with locked(env.paths.home) as reg:
+        e = reg.get("quiet")
+        e.extra["remote_control"] = False
+        queue_title_sync(e, "quiet")
+    monkeypatch.setattr(cockpit.tmux, "capture_tail", lambda pane_id, lines=6: "────\n❯ \n────")
+    sent = []
+    real_run = cockpit.tmux.run
+    def run(*a, **k):
+        if a and a[0] == "send-keys":
+            sent.append(a)
+            return ""
+        return real_run(*a, **k)
+    monkeypatch.setattr(cockpit.tmux, "run", run)
+    d.tick()
+    assert [a[-1] for a in sent if "-l" in a] == ["/rename quiet"]
+    assert "title_sync" not in entry(env.paths, "quiet").extra
+
+
 def test_title_sync_ready_when_the_status_file_says_connected():
     from force.daemon import title_sync_ready
     assert title_sync_ready("long conversation…\n────\n❯ \n────", connected=True)

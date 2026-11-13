@@ -134,6 +134,11 @@ def is_claude(entry: Entry) -> bool:
     return entry.extra.get("kind") in (None, "claude")
 
 
+def remote_control(entry: Entry) -> bool:
+    """False for a Claude session created without Remote Control (`force new --no-remote-control`, SPEC §53)."""
+    return entry.extra.get("remote_control") is not False
+
+
 def kind(entry: Entry) -> str:
     """"claude" | "opencode" | "shell" (an unknown kind counts as claude, as before)."""
     k = entry.extra.get("kind")

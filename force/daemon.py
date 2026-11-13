@@ -19,7 +19,7 @@ from .config import Config, Paths, ensure_dirs
 from .lifecycle import Cockpit
 from .tmux import LEGACY_AGENT_ROLE, TmuxError
 from .registry import (RegistryError, is_support, is_claude, is_opencode, is_shell, kind as kind_of, locked, slugify, valid_name,
-                     slugify, valid_name)
+                     slugify, valid_name, remote_control)
 from .state import (PaneInfo, Seen, SessionView, Snapshot, State, compute_state, compute_state_why, clean_title,
                    glyph, load_seen, save_seen, unread, write_snapshot)
 
@@ -769,7 +769,8 @@ class Daemon:
             pane, status, pane_info, _ver = self._per_tick()[entry.name]
             if pane is None or entry.pending_name:
                 continue
-            connected = self._rc_connected(pane_info)
+            # without Remote Control (SPEC §53) there is nothing to wait for: rename Claude's own name once idle
+            connected = self._rc_connected(pane_info) or not remote_control(entry)
             if not connected and time.time() - float(entry.extra.get("title_sync_at") or 0) > 1800:
                 # Remote Control never connected (switched off, logged out): nothing to rename there. A draft or an
                 # open menu, on the other hand, is waited out however long it stays
