@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from force.activity import _model_short, describe, describe_config, is_finding, scan
+from force.activity import Background, Scan, _model_short, describe, describe_config, is_endless, is_finding, scan, waiting_tasks
 
 
 def write(path, records):
@@ -209,14 +209,16 @@ def test_scan_returns_activity_model_effort_newest(tmp_path):
          "message": {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "reply"}]},
          "effort": "max"},
     ])
-    assert scan(p) == ("writing a reply", "opus 5.5", "max", None, None)
+    assert scan(p) == Scan("writing a reply", "opus 5.5", "max", None, None, (), False)
+    assert scan(p).activity == "writing a reply"
+    assert scan(p).background == ()
     # model/effort come from the newest assistant record even if it has no concrete action
     assert describe_config(p) == ("opus 5.5", "max")
 
 
 def test_scan_missing_file():
     from pathlib import Path
-    assert scan(Path("/no/such/file")) == (None, None, None, None, None)
+    assert scan(Path("/no/such/file")) == Scan(None, None, None, None, None, (), False)
     assert describe_config(Path("/no/such/file")) == (None, None)
 
 
@@ -379,3 +381,112 @@ def test_scan_end_reply_ms_newest_of_the_turn(tmp_path):
     ])
     assert scan(p)[4] == _ms(8), "newest finding in the newest turn"
     assert scan(p)[3] == _ms(5), "reply_ms is the mid-turn finding, unchanged"
+
+
+# --- background tasks (SPEC §5) -------------------------------------------------
+
+def _bg(task_id, tool="Bash", desc="run the checks", command="", started=True):
+    return Background(tool_use_id=task_id, tool=tool, description=desc, command=command,
+                   started_ms=_ms(started) if started else None)
+
+
+def test_scan_collects_launched_background_tasks(tmp_path):
+    """Bash with run_in_background, Agent with run_in_background, and Monitor all count as launched."""
+    p = write(tmp_path / "t.jsonl", [
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:01.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {
+             "command": "pytest -q", "description": "run the tests",
+             "run_in_background": True}}]}},
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:02.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "a1", "name": "Agent", "input": {
+             "description": "plan the refactor", "run_in_background": True}}]}},
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:03.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "m1", "name": "Monitor", "input": {
+             "description": "watch the deploy"}}]}},
+    ])
+    s = scan(p)
+    assert [t.tool for t in s.background] == ["Bash", "Agent", "Monitor"]    # oldest first
+    bash = s.background[0]
+    assert bash.command == "pytest -q" and bash.tool_use_id == "b1"
+    assert s.launched_any is True
+
+
+def test_scan_background_ended_by_notice(tmp_path):
+    """A notice with a final <status> ends the task (Monitors' event notices do not)."""
+    def launch(tool, tid, ts, desc):
+        return {"type": "assistant", "timestamp": f"2026-11-11T10:00:{ts:02d}.000Z",
+               "message": {"content": [{"type": "tool_use", "id": tid, "name": tool, "input": {
+                   "description": desc, "run_in_background": True}}]}}
+    def notice(tid, status, ts):
+        return {"type": "user", "timestamp": f"2026-11-11T10:00:{ts:02d}.000Z",
+               "message": {"content": f"<task-notification><tool-use-id>{tid}</tool-use-id>"
+                                     f"<status>{status}</status></task-notification>"}}
+    p = write(tmp_path / "t.jsonl", [
+        launch("Bash", "b1", 1, "run pytest"),
+        notice("b1", "completed", 2),
+        launch("Bash", "b2", 3, "run more"),
+        notice("b2", "event", 4),       # a Monitor-style event notice: not a final status
+        launch("Monitor", "m1", 5, "monitor prod"),
+        notice("m1", "running", 6),    # an event notice: not ended
+    ])
+    s = scan(p)
+    assert [t.tool_use_id for t in s.background] == ["b2", "m1"]   # b1 completed -> dropped
+
+
+def test_scan_notice_with_two_blocks_ends_both(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:01.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {
+             "description": "a", "run_in_background": True}}]}},
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:02.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "a1", "name": "Agent", "input": {
+             "description": "b", "run_in_background": True}}]}},
+        {"type": "user", "message": {"content": [{"type": "text",
+             "text": ("<task-notification><tool-use-id>b1</tool-use-id><status>stopped</status></task-notification>"
+                      "<task-notification><tool-use-id>a1</tool-use-id><status>failed</status></task-notification>")}]}},
+    ])
+    assert scan(p).background == ()
+
+
+def test_scan_background_sidechain_ignored(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:01.000Z", "isSidechain": True,
+         "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {
+             "description": "bg", "run_in_background": True}}]}},
+    ])
+    s = scan(p)
+    assert s.background == () and s.launched_any is False
+
+
+def test_is_endless_patterns():
+    # SPEC §5 "Endless commands": servers/followers never make a session watching.
+    assert is_endless("gh pr checks 31 --watch") is False
+    assert is_endless("tsc --watch") is True
+    assert is_endless("npm run build") is False
+    assert is_endless("npm run dev") is True
+    assert is_endless("docker compose up -d") is False
+    assert is_endless("docker compose up") is True
+    assert is_endless("docker-compose up --detach") is False
+    assert is_endless("tail -f x.log") is True
+    assert is_endless("pytest -q") is False
+    assert is_endless("while :; do run; sleep 120; done") is False
+    assert is_endless("vite") is True
+    assert is_endless("vite build") is False
+    assert is_endless("cargo watch") is True
+    assert is_endless("jest --watch") is True
+    assert is_endless("python -m http.server 8000") is True
+
+
+def test_waiting_tasks_cutoffs():
+    now = _ms(0)
+    bg = [_bg("b1", started=1), _bg("a1", tool="Agent", started=2), _bg("m1", tool="Monitor", started=3)]
+    # Bash counts only with status shell
+    assert [t.tool_use_id for t in waiting_tasks("idle", bg, None, now)] == ["a1", "m1"]
+    assert [t.tool_use_id for t in waiting_tasks("shell", bg, None, now)] == ["b1", "a1", "m1"]
+    assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=1), _bg("b2", command="npm run dev", started=2)],
+                                                 None, now)] == ["b1"]
+    # older than the process start -> dropped (when both known)
+    assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=1)], _ms(10), now)] == []
+    # older than 24 h -> dropped; a task with no started_ms is kept
+    assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=1)], None, _ms(90000))] == []
+    assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=None)], None, now)] == ["b1"]

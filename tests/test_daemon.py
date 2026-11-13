@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from force.activity import Background, Scan
 from force.daemon import Daemon, _parse_mode
 from force.registry import load, locked
 from force.state import State, load_seen, read_snapshot
@@ -470,8 +471,8 @@ def test_activity_cached_until_transcript_changes(env, monkeypatch):
     calls = []
     monkeypatch.setattr("force.daemon.activity.scan",
                       lambda path, max_len=60:
-                      (calls.append(1) or ("desc", "opus 5.5", "high", None, None)))
-    trip = ("desc", "opus 5.5", "high", None, None)
+                      (calls.append(1) or Scan("desc", "opus 5.5", "high", None, None, (), False)))
+    trip = Scan("desc", "opus 5.5", "high", None, None, (), False)
     assert d._config_for(sid) == trip
     assert len(calls) == 1
     # transcript changed, but within 3 s of the last compute -> throttled: stale value returned, no call
@@ -615,7 +616,7 @@ def test_snapshot_includes_model_effort(env, monkeypatch):
     cockpit = env.make_cockpit()
     add_live(cockpit, "portal")
     monkeypatch.setattr("force.daemon.activity.scan",
-                      lambda path, max_len=60: ("editing a.py", "opus 5.5", "high", None, None))
+                      lambda path, max_len=60: Scan("editing a.py", "opus 5.5", "high", None, None, (), False))
     # the fake agent writes its status file and transcript just after it starts: tick once they exist
     assert wait_for(lambda: current_status(cockpit, "portal") is not None)
     d = Daemon(cockpit, FakeClock(start=1000.0))
@@ -627,7 +628,7 @@ def test_snapshot_includes_model_effort(env, monkeypatch):
     # cached: a second tick does not recompute from the transcript (still one scan call)
     calls = []
     monkeypatch.setattr("force.daemon.activity.scan",
-                      lambda path, max_len=60: (calls.append(1) or ("x", None, None, None, None)))
+                      lambda path, max_len=60: (calls.append(1) or Scan("x", None, None, None, None, (), False)))
     d.clock.advance(1)
     d.tick()
     sv2 = [s for s in read_snapshot(env.paths.snapshot).sessions if s.name == "portal"][0]
@@ -809,7 +810,9 @@ def test_shares_disabled_stops_every_proxy(tmp_path, monkeypatch):
 def test_shell_status_shows_watching_a_command():
     from types import SimpleNamespace
     from force.daemon import shown_activity
-    assert shown_activity(SimpleNamespace(status="shell"), "writing a reply") == "watching a command"
+    assert shown_activity(SimpleNamespace(status="shell"), "writing a reply",
+                        [Background("", "Bash", "", "npm run dev", None)]) == "waiting · a background command"
+    assert shown_activity(SimpleNamespace(status="shell"), "writing a reply") == "waiting · a background command"
     assert shown_activity(SimpleNamespace(status="busy"), "writing a reply") == "writing a reply"
     assert shown_activity(None, "editing files") == "editing files"
     assert shown_activity(SimpleNamespace(status="idle"), None) is None
@@ -1050,7 +1053,7 @@ def test_claude_status_shell_is_working_and_watching(env):
     v = _view(env, "portal")
     assert v.state is State.WORKING
     assert v.watching is True
-    assert v.activity == "watching a command"
+    assert v.activity == "waiting · a background command"
     assert "watching" in v.why
     ctl(cockpit, "portal", status="busy")
     assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
@@ -1071,12 +1074,104 @@ def test_shell_kind_session_never_watching(env):
     assert v.state is State.WORKING and v.watching is False
 
 
+def _bash_task(tid="b1", desc="run the checks", command="pytest -q"):
+    return Background(tid, "Bash", desc, command, None)
+
+
+def test_watching_from_a_background_task(env, monkeypatch):
+    """SPEC §5: status shell with a `gh ... --watch` (not endless) task -> WORKING, watching, waiting activity."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    monkeypatch.setattr("force.daemon.activity.scan",
+                      lambda path, max_len=60: Scan(None, None, None, None, None, (_bash_task("b1", "run gh checks", "gh pr checks 1 --watch"),), True))
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    assert wait_for(lambda: current_status(cockpit, "portal") is not None)
+    ctl(cockpit, "portal", status="shell")
+    assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "shell")
+    d.tick()
+    v = _view(env, "portal")
+    assert v.state is State.WORKING and v.watching is True
+    assert v.activity == "waiting · run gh checks"
+    assert "watching" in v.why
+
+
+def test_endless_task_is_not_watching(env, monkeypatch):
+    """SPEC §5: status shell with only an endless `npm run dev` -> not WORKING (your turn / idle), not watching."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    monkeypatch.setattr("force.daemon.activity.scan",
+                      lambda path, max_len=60: Scan(None, None, None, None, None, (_bash_task("b1", "dev server", "npm run dev"),), True))
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    assert wait_for(lambda: current_status(cockpit, "portal") is not None)
+    ctl(cockpit, "portal", status="shell")
+    assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "shell")
+    d.tick()
+    v = _view(env, "portal")
+    assert v.state is not State.WORKING and v.watching is False
+
+
+def test_idle_with_background_agent_is_watching(env, monkeypatch):
+    """SPEC §5: status idle with a running background Agent -> WORKING, watching, the agent's description."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    agent = Background("a1", "Agent", "write the test suite", "", None)
+    monkeypatch.setattr("force.daemon.activity.scan",
+                      lambda path, max_len=60: Scan(None, None, None, None, None, (agent,), True))
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    assert wait_for(lambda: current_status(cockpit, "portal") is not None)
+    d.tick()
+    v = _view(env, "portal")
+    assert v.state is State.WORKING and v.watching is True
+    assert v.activity == "waiting · write the test suite"
+
+
+def test_idle_with_ended_agent_is_not_watching(env, monkeypatch):
+    """SPEC §5: the notice ended the Agent -> idle rules (not watching)."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    agent = Background("a1", "Agent", "write the test suite", "", None)
+    monkeypatch.setattr("force.daemon.activity.scan",
+                      lambda path, max_len=60: Scan(None, None, None, None, None, (agent,), True))
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    assert wait_for(lambda: current_status(cockpit, "portal") is not None)
+    # the agent's notice reports it completed -> it no longer counts (background empty, launched seen)
+    monkeypatch.setattr("force.daemon.activity.scan",
+                      lambda path, max_len=60: Scan(None, None, None, None, None, (), True))
+    d._activity.clear()
+    d.clock.advance(1)
+    d.tick()
+    v = _view(env, "portal")
+    assert v.state is not State.WORKING and v.watching is False
+
+
+def test_shell_with_two_counting_tasks_shows_plus_one(env, monkeypatch):
+    """SPEC §5: two counting tasks -> `waiting · <newest> +1`."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    tasks = (_bash_task("b1", "run pytest"), _bash_task("b2", "run the build"))
+    monkeypatch.setattr("force.daemon.activity.scan",
+                      lambda path, max_len=60: Scan(None, None, None, None, None, tasks, True))
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    assert wait_for(lambda: current_status(cockpit, "portal") is not None)
+    ctl(cockpit, "portal", status="shell")
+    assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "shell")
+    d.tick()
+    v = _view(env, "portal")
+    assert v.state is State.WORKING and v.watching is True
+    assert v.activity == "waiting · run the build +1"
+
+
 def test_unread_on_shell_status_finding(env, monkeypatch):
     """SPEC §5: the reply that ends a turn into `shell` counts as a finding for unread (viewed clears it)."""
     cockpit = env.make_cockpit()
     add_live(cockpit, "portal")
     monkeypatch.setattr("force.daemon.activity.scan",
-                      lambda path, max_len=60: ("watching a command", None, None, None, 5000))
+                      lambda path, max_len=60: Scan(None, None, None, None, 5000, (), False))
     d = Daemon(cockpit, FakeClock(start=1000.0))
     d.tick()
     assert wait_for(lambda: current_status(cockpit, "portal") is not None)
@@ -1292,7 +1387,7 @@ def test_unread_reply_while_working(env, monkeypatch):
     ctl(cockpit, "portal", status="busy")
     assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
     reply = {"ms": None}
-    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: (None, None, None, reply["ms"], None))
+    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: Scan(None, None, None, reply["ms"], None, (), False))
 
     def view():
         return next(s for s in read_snapshot(env.paths.snapshot).sessions if s.name == "portal")
@@ -1335,7 +1430,7 @@ def test_unread_forgotten_with_the_session(env, monkeypatch):
     d = Daemon(cockpit, clk)
     monkeypatch.setattr(cockpit.tmux, "clients", lambda: [])
     monkeypatch.setattr("force.daemon.activity.scan",
-                        lambda path, max_len=60: (None, None, None, int(clk() * 1000) - 500, None))
+                        lambda path, max_len=60: Scan(None, None, None, int(clk() * 1000) - 500, None, (), False))
     ctl(cockpit, "portal", status="busy")
     assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
     d.tick()
@@ -1344,7 +1439,7 @@ def test_unread_forgotten_with_the_session(env, monkeypatch):
     cockpit.delete("portal")
     d.tick()
     assert old not in d._reply
-    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: (None, None, None, None, None))
+    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: Scan(None, None, None, None, None, (), False))
     add_live(cockpit, "portal")
     ctl(cockpit, "portal", status="busy")
     assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")

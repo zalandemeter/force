@@ -324,11 +324,11 @@ pub fn glyph(tier: Tier, s: State, now_ms: i64) -> char {
     }
 }
 
-/// The card's headline glyph: a watching session (SPEC §5) shows a still eye instead of the spinning
-/// working glyph — nothing turns while it waits on a background command. Unread keeps the same still eye.
+/// The card's headline glyph: a watching session (SPEC §5) shows a still hourglass instead of the spinning
+/// working glyph — nothing turns while it waits on background work. Unread keeps the same still hourglass.
 pub fn card_glyph(tier: Tier, s: &Session, now_ms: i64) -> char {
     if s.state == State::Working && s.watching {
-        glyphs::state(tier, '◎', '\u{F06E}')
+        glyphs::state(tier, '◷', '\u{F252}')
     } else {
         glyph(tier, s.state, now_ms)
     }
@@ -570,7 +570,7 @@ pub fn line2(s: &Session, c: usize, tier: Tier) -> Vec<Glyph> {
                 Some("moving") => ("moving", LABEL_GREY),
                 Some("moved") => ("moved", C_YOUR_TURN),
                 _ if is_unread(s) => (state_label(s.state), C_UNREAD_TEXT),
-                _ if is_watching(s) => ("watching", C_WATCHING),
+                _ if is_watching(s) => ("waiting", C_WATCHING),
                 _ => (state_label(s.state), label_color(s.state)),
             };
             let shown_note = matches!(
@@ -1379,28 +1379,28 @@ mod tests {
     }
 
     #[test]
-    fn watching_is_a_still_eye_in_c_watching() {
-        // SPEC §5: a WORKING claude session whose status is `shell` shows a still eye (RICH U+F06E / PLAIN ◎),
-        // not the spinner, and its icon and edge are #a6894d (C_WATCHING); nothing changes with now_ms.
+    fn watching_is_a_still_hourglass_in_c_watching() {
+        // SPEC §5: a WORKING claude session waiting on background work shows a still hourglass (RICH U+F252 /
+        // PLAIN ◷), not the spinner, and its icon and edge are #a6894d (C_WATCHING); nothing changes with now_ms.
         let mut s = sess(State::Working);
         s.watching = true;
-        assert_eq!(card_glyph(Tier::Plain, &s, 0), '◎');
-        assert_eq!(card_glyph(Tier::Plain, &s, 900), '◎', "still: no spinner frame with now_ms");
-        assert_eq!(card_glyph(Tier::Rich, &s, 0), '\u{F06E}');
-        assert_eq!(card_glyph(Tier::Rich, &s, 7 * 125), '\u{F06E}', "still: no filling pie with now_ms");
+        assert_eq!(card_glyph(Tier::Plain, &s, 0), '◷');
+        assert_eq!(card_glyph(Tier::Plain, &s, 900), '◷', "still: no spinner frame with now_ms");
+        assert_eq!(card_glyph(Tier::Rich, &s, 0), '\u{F252}');
+        assert_eq!(card_glyph(Tier::Rich, &s, 7 * 125), '\u{F252}', "still: no filling pie with now_ms");
         assert_eq!(session_glyph_color(&s), C_WATCHING);
         assert_eq!(card_edge_color(&s), C_WATCHING);
         let l = line1(&s, 0, 29, NAME, Tier::Plain);
-        assert_eq!(l[2].ch, '◎');
+        assert_eq!(l[2].ch, '◷');
         assert_eq!(l[2].color, C_WATCHING);
         // the activity (or the missing-activity label) is C_WATCHING, not bold
-        s.activity = Some("watching a command".into());
+        s.activity = Some("waiting · a background command".into());
         let l2 = line2(&s, 29, Tier::Plain);
         assert!(l2.iter().any(|g| g.ch == 'w' && g.color == C_WATCHING), "the activity is C_WATCHING");
         assert!(!l2.iter().any(|g| g.bold), "watching is not bold");
         s.activity = None;
         let l2 = line2(&s, 29, Tier::Plain);
-        assert!(glyphs_to_string(&l2).contains("watching"), "missing activity shows the watching label");
+        assert!(glyphs_to_string(&l2).contains("waiting"), "missing activity shows the waiting label");
         assert!(l2.iter().any(|g| g.ch == 'w' && g.color == C_WATCHING));
         // not watching (plain working) keeps the spinner
         s.watching = false;
@@ -1410,18 +1410,18 @@ mod tests {
     }
 
     #[test]
-    fn unread_watching_is_blue_with_the_eye() {
-        // SPEC §5: unread wins over watching entirely: the colours are blue, the glyph is still the (eye), since
+    fn unread_watching_is_blue_with_the_hourglass() {
+        // SPEC §5: unread wins over watching entirely: the colours are blue, the glyph is still the hourglass, since
         // it is still not turning.
         let mut s = sess(State::Working);
         s.watching = true;
         s.unread = true;
-        assert_eq!(card_glyph(Tier::Plain, &s, 0), '◎', "still the eye, not the spinner");
-        assert_eq!(card_glyph(Tier::Rich, &s, 5 * 125), '\u{F06E}');
+        assert_eq!(card_glyph(Tier::Plain, &s, 0), '◷', "still the hourglass, not the spinner");
+        assert_eq!(card_glyph(Tier::Rich, &s, 5 * 125), '\u{F252}');
         assert_eq!(session_glyph_color(&s), C_UNREAD);
         assert_eq!(card_edge_color(&s), C_UNREAD);
         assert_eq!(line1(&s, 0, 29, NAME, Tier::Plain)[2].color, C_UNREAD);
-        s.activity = Some("watching a command".into());
+        s.activity = Some("waiting · a background command".into());
         let l2 = line2(&s, 29, Tier::Plain);
         assert!(l2.iter().any(|g| g.ch == 'w' && g.color == C_UNREAD_TEXT), "unread blue wins the activity");
     }
