@@ -110,8 +110,13 @@ class Claude(Kind):
         return claude_mod.latest_version(paths.claude_bin)
 
     def card(self, d, entry, pane, reading):
-        act, model, effort, reply_ms = d._config_for(entry.session_id)
+        act, model, effort, reply_ms, end_reply_ms = d._config_for(entry.session_id)
         from .daemon import shown_activity
+        if reading.status is not None and reading.status.status == "shell":
+            # SPEC §5: the reply that ends a turn into `shell` counts as a finding for `unread`.
+            both = [x for x in (reply_ms, end_reply_ms) if x is not None]
+            if both:
+                reply_ms = max(both)
         return Card(activity=shown_activity(reading.status, act), model=model, effort=effort,
                     mode=d._mode_for(entry.name, pane), reply_ms=reply_ms)
 

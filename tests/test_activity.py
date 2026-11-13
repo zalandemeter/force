@@ -209,14 +209,14 @@ def test_scan_returns_activity_model_effort_newest(tmp_path):
          "message": {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "reply"}]},
          "effort": "max"},
     ])
-    assert scan(p) == ("writing a reply", "opus 5.5", "max", None)
+    assert scan(p) == ("writing a reply", "opus 5.5", "max", None, None)
     # model/effort come from the newest assistant record even if it has no concrete action
     assert describe_config(p) == ("opus 5.5", "max")
 
 
 def test_scan_missing_file():
     from pathlib import Path
-    assert scan(Path("/no/such/file")) == (None, None, None, None)
+    assert scan(Path("/no/such/file")) == (None, None, None, None, None)
     assert describe_config(Path("/no/such/file")) == (None, None)
 
 
@@ -339,3 +339,43 @@ def test_scan_reply_ms_without_a_timestamp(tmp_path):
     p = write(tmp_path / "t.jsonl", [_rec(("prompt", "go"), 0), _rec(("text", FINDINGS[0]), 1), _rec(("tool",), 2),
                                      newest, _rec(("tool",), 6)])
     assert scan(p)[3] is None
+
+
+def test_scan_end_reply_ms_is_the_turn_ending_finding(tmp_path):
+    """SPEC §5: the reply that ends a turn counts for end_reply_ms whether or not a tool call follows it."""
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "go"), 0),
+        _rec(("text", FINDINGS[0]), 5),
+    ])
+    assert scan(p)[4] == _ms(5)
+    assert scan(p)[3] is None, "reply_ms (mid-turn) is unchanged: no tool call follows"
+
+
+def test_scan_end_reply_ms_none_for_short_narration(tmp_path):
+    """The last turn's final text is short narration: nothing to show."""
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "go"), 0),
+        _rec(("text", NARRATION[0]), 5),
+    ])
+    assert scan(p)[4] is None
+
+
+def test_scan_end_reply_ms_ignores_older_turns(tmp_path):
+    """A finding in an older turn (before the last prompt) does not count for end_reply_ms."""
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "go"), 0),
+        _rec(("text", FINDINGS[0]), 5), _rec(("tool",), 6), _rec(("result",), 7),
+        _rec(("prompt", "again"), 10),
+        _rec(("text", NARRATION[0]), 11),
+    ])
+    assert scan(p)[4] is None, "the older-turn finding is before the last prompt"
+
+
+def test_scan_end_reply_ms_newest_of_the_turn(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "go"), 0),
+        _rec(("text", FINDINGS[0]), 5), _rec(("tool",), 6),
+        _rec(("text", FINDINGS[1]), 8),
+    ])
+    assert scan(p)[4] == _ms(8), "newest finding in the newest turn"
+    assert scan(p)[3] == _ms(5), "reply_ms is the mid-turn finding, unchanged"

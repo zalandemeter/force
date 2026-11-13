@@ -128,7 +128,7 @@ def shown_activity(status, act: str | None) -> str | None:
     command it started is still running (it resumes when that ends): the transcript's last record is then
     usually the reply text, so the phrase would wrongly say "writing a reply"."""
     if status is not None and status.status == "shell":
-        return "waiting for a command"
+        return "watching a command"
     return act
 
 
@@ -296,15 +296,15 @@ class Daemon:
     def _now_ms(self) -> int:
         return int(self.clock() * 1000)
 
-    def _config_for(self, session_id: str) -> tuple[str | None, str | None, str | None, int | None]:
-        """(activity, model, effort, reply_ms) for a live session, cached per transcript path keyed by
-        (st_mtime_ns, st_size) and throttled to at most one recompute per 3 s of clock time per session. All
+    def _config_for(self, session_id: str) -> tuple[str | None, str | None, str | None, int | None, int | None]:
+        """(activity, model, effort, reply_ms, end_reply_ms) for a live session, cached per transcript path keyed
+        by (st_mtime_ns, st_size) and throttled to at most one recompute per 3 s of clock time per session. All
         None when no session_id, no transcript, or the transcript is unreadable."""
         if not session_id:
-            return None, None, None, None
+            return None, None, None, None, None
         path = claude_mod.find_transcript(self.paths.claude_dir, session_id)
         if path is None:
-            return None, None, None, None
+            return None, None, None, None, None
         try:
             st = os.stat(path)
             key = (st.st_mtime_ns, st.st_size)
@@ -1037,6 +1037,10 @@ class Daemon:
             if is_unread:
                 clauses.append(f"unread: a finding written {max(0, now_ms - self._reply[sid]) // 1000} s ago, "
                                "not viewed since")
+            is_watching = state is State.WORKING and kind_of(entry) == "claude" and status is not None \
+                and status.status == "shell"
+            if is_watching:
+                clauses.append("watching: status shell, a background command of its own")
             note = None
             mark = None if is_shell(entry) else self.cockpit.restarted(name)
             if mark is not None:
@@ -1061,7 +1065,7 @@ class Daemon:
                 mode=mode, model=model, effort=effort,
                 shared=(entry.extra.get("shares") or None) if self.cfg.sharing else None,
                 note=note, kind=kind_of(entry), why="; ".join(clauses), title=title,
-                support=is_support(entry), unread=is_unread))
+                support=is_support(entry), unread=is_unread, watching=is_watching))
         self._views = views
         # a session that went away takes its reply times along: one created again under its name starts without them
         ids, names = {e.session_id for e in self._registry}, {e.name for e in self._registry}

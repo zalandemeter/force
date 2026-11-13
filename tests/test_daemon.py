@@ -470,8 +470,8 @@ def test_activity_cached_until_transcript_changes(env, monkeypatch):
     calls = []
     monkeypatch.setattr("force.daemon.activity.scan",
                       lambda path, max_len=60:
-                      (calls.append(1) or ("desc", "opus 5.5", "high", None)))
-    trip = ("desc", "opus 5.5", "high", None)
+                      (calls.append(1) or ("desc", "opus 5.5", "high", None, None)))
+    trip = ("desc", "opus 5.5", "high", None, None)
     assert d._config_for(sid) == trip
     assert len(calls) == 1
     # transcript changed, but within 3 s of the last compute -> throttled: stale value returned, no call
@@ -615,7 +615,7 @@ def test_snapshot_includes_model_effort(env, monkeypatch):
     cockpit = env.make_cockpit()
     add_live(cockpit, "portal")
     monkeypatch.setattr("force.daemon.activity.scan",
-                      lambda path, max_len=60: ("editing a.py", "opus 5.5", "high", None))
+                      lambda path, max_len=60: ("editing a.py", "opus 5.5", "high", None, None))
     # the fake agent writes its status file and transcript just after it starts: tick once they exist
     assert wait_for(lambda: current_status(cockpit, "portal") is not None)
     d = Daemon(cockpit, FakeClock(start=1000.0))
@@ -627,7 +627,7 @@ def test_snapshot_includes_model_effort(env, monkeypatch):
     # cached: a second tick does not recompute from the transcript (still one scan call)
     calls = []
     monkeypatch.setattr("force.daemon.activity.scan",
-                      lambda path, max_len=60: (calls.append(1) or ("x", None, None, None)))
+                      lambda path, max_len=60: (calls.append(1) or ("x", None, None, None, None)))
     d.clock.advance(1)
     d.tick()
     sv2 = [s for s in read_snapshot(env.paths.snapshot).sessions if s.name == "portal"][0]
@@ -806,10 +806,10 @@ def test_shares_disabled_stops_every_proxy(tmp_path, monkeypatch):
     assert not (state_dir / "shares" / "portal.carol.json").exists()
 
 
-def test_shell_status_shows_waiting_for_a_command():
+def test_shell_status_shows_watching_a_command():
     from types import SimpleNamespace
     from force.daemon import shown_activity
-    assert shown_activity(SimpleNamespace(status="shell"), "writing a reply") == "waiting for a command"
+    assert shown_activity(SimpleNamespace(status="shell"), "writing a reply") == "watching a command"
     assert shown_activity(SimpleNamespace(status="busy"), "writing a reply") == "writing a reply"
     assert shown_activity(None, "editing files") == "editing files"
     assert shown_activity(SimpleNamespace(status="idle"), None) is None
@@ -1036,6 +1036,62 @@ def test_report_working_on_shell(env):
     assert "reported by pid" in v.why and "working" in v.why
 
 
+def test_claude_status_shell_is_working_and_watching(env):
+    """SPEC §5/§32: a Claude session whose status is `shell` stays WORKING with watching true and the watching
+    activity; `busy` is working but not watching."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    assert wait_for(lambda: current_status(cockpit, "portal") is not None)
+    ctl(cockpit, "portal", status="shell")
+    assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "shell")
+    d.tick()
+    v = _view(env, "portal")
+    assert v.state is State.WORKING
+    assert v.watching is True
+    assert v.activity == "watching a command"
+    assert "watching" in v.why
+    ctl(cockpit, "portal", status="busy")
+    assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
+    d.tick()
+    v = _view(env, "portal")
+    assert v.state is State.WORKING
+    assert v.watching is False
+
+
+def test_shell_kind_session_never_watching(env):
+    """Shell kinds report a state but their status is never `shell`, so they are never watching."""
+    cockpit = env.make_cockpit()
+    _shell(cockpit)
+    d = Daemon(cockpit, FakeClock())
+    report_mod.write(env.paths, "sh", "working", "building", os.getpid(), d._now_ms())
+    d.tick()
+    v = _view(env, "sh")
+    assert v.state is State.WORKING and v.watching is False
+
+
+def test_unread_on_shell_status_finding(env, monkeypatch):
+    """SPEC §5: the reply that ends a turn into `shell` counts as a finding for unread (viewed clears it)."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    monkeypatch.setattr("force.daemon.activity.scan",
+                      lambda path, max_len=60: ("watching a command", None, None, None, 5000))
+    d = Daemon(cockpit, FakeClock(start=1000.0))
+    d.tick()
+    assert wait_for(lambda: current_status(cockpit, "portal") is not None)
+    ctl(cockpit, "portal", status="shell")
+    assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "shell")
+    d.tick()
+    v = _view(env, "portal")
+    assert v.state is State.WORKING and v.watching is True
+    assert v.unread is True
+    save_seen(env.paths.seen, {"portal": dm_Seen(last_seen_ms=d._now_ms() + 10000)})
+    d.tick()
+    v = _view(env, "portal")
+    assert v.unread is False
+
+
 def test_report_dead_pid_ignored_and_deleted(env):
     cockpit = env.make_cockpit()
     _shell(cockpit)
@@ -1236,7 +1292,7 @@ def test_unread_reply_while_working(env, monkeypatch):
     ctl(cockpit, "portal", status="busy")
     assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
     reply = {"ms": None}
-    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: (None, None, None, reply["ms"]))
+    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: (None, None, None, reply["ms"], None))
 
     def view():
         return next(s for s in read_snapshot(env.paths.snapshot).sessions if s.name == "portal")
@@ -1279,7 +1335,7 @@ def test_unread_forgotten_with_the_session(env, monkeypatch):
     d = Daemon(cockpit, clk)
     monkeypatch.setattr(cockpit.tmux, "clients", lambda: [])
     monkeypatch.setattr("force.daemon.activity.scan",
-                        lambda path, max_len=60: (None, None, None, int(clk() * 1000) - 500))
+                        lambda path, max_len=60: (None, None, None, int(clk() * 1000) - 500, None))
     ctl(cockpit, "portal", status="busy")
     assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
     d.tick()
@@ -1288,7 +1344,7 @@ def test_unread_forgotten_with_the_session(env, monkeypatch):
     cockpit.delete("portal")
     d.tick()
     assert old not in d._reply
-    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: (None, None, None, None))
+    monkeypatch.setattr("force.daemon.activity.scan", lambda path, max_len=60: (None, None, None, None, None))
     add_live(cockpit, "portal")
     ctl(cockpit, "portal", status="busy")
     assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")

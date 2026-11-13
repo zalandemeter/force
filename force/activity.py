@@ -191,17 +191,19 @@ def _is_prompt(record: dict) -> bool:
                 and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks))
 
 
-def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, str | None, int | None]:
-    """(activity, model_short, effort, reply_ms) from the tail of `transcript`: `activity` from the newest
-    concrete assistant turn, `model_short`/`effort` from the newest non-sidechain assistant record, and
+def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, str | None, int | None, int | None]:
+    """(activity, model_short, effort, reply_ms, end_reply_ms) from the tail of `transcript`: `activity` from
+    the newest concrete assistant turn, `model_short`/`effort` from the newest non-sidechain assistant record,
     `reply_ms` (SPEC §5, unread) from the newest finding (`is_finding`) written mid-turn: a tool call follows it
-    before the next prompt. All four are read from the file in a single pass. Each is None when the file is
-    missing/unreadable or no suitable record is found."""
+    before the next prompt, and `end_reply_ms` from the newest finding in the newest turn (before walking back
+    past any prompt), whether or not a tool call follows it. All five are read from the file in a single pass.
+    Each is None when the file is missing/unreadable or no suitable record is found."""
     lines = _scan_tail(transcript)
     if lines is None:
-        return None, None, None, None
-    model = effort = reply_ms = None
+        return None, None, None, None, None
+    model = effort = reply_ms = end_reply_ms = None
     newest = replied = tool_after = False
+    end_turn = True     # still in the newest turn until we walk back past its starting prompt
     desc = None
     for line in reversed(lines):
         if not line.strip():
@@ -214,6 +216,7 @@ def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, s
             continue
         if record.get("type") == "user" and _is_prompt(record):
             tool_after = False          # walking back past a prompt: the tool calls seen belong to a later turn
+            end_turn = False            # walking back past a prompt: the records seen belong to an older turn
         if record.get("type") != "assistant":
             continue
         message = record.get("message")
@@ -244,7 +247,10 @@ def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, s
                   and is_finding(str(b.get("text") or ""))):
                 replied = True
                 reply_ms = _timestamp_ms(record.get("timestamp"))
-    return desc, model, effort, reply_ms
+            if end_turn and end_reply_ms is None and b.get("type") == "text" \
+                    and is_finding(str(b.get("text") or "")):
+                end_reply_ms = _timestamp_ms(record.get("timestamp"))
+    return desc, model, effort, reply_ms, end_reply_ms
 
 
 def describe(transcript: Path, max_len: int = 60) -> str | None:
