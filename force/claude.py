@@ -19,8 +19,8 @@ class AgentStatus:
     session_id: str
     name: str | None
     name_source: str | None
-    status: str                 # busy | waiting | idle | <other>
-    status_updated_ms: int
+    status: str                 # busy | waiting | idle | <other> | "" (not written yet)
+    status_updated_ms: int | None   # None: not written yet
     waiting_for: str | None
     cwd: str | None
 
@@ -39,8 +39,9 @@ def _pid_alive(pid: int) -> bool:
 
 def read_status(claude_dir: Path, pid: int) -> AgentStatus | None:
     """Read claude_dir/sessions/<pid>.json. None if missing, unreadable, not JSON, missing sessionId,
-    or the pid is not alive (os.kill(pid, 0) raises ProcessLookupError). Missing statusUpdatedAt -> 0,
-    missing status -> "unknown"."""
+    or the pid is not alive (os.kill(pid, 0) raises ProcessLookupError). Claude Code writes the file before its
+    first status (issue #23): a missing status is "" and a missing statusUpdatedAt None, so the session counts as
+    starting and its age comes from the pane, never from 1970."""
     path = claude_dir / "sessions" / f"{pid}.json"
     try:
         raw = path.read_text()
@@ -54,10 +55,10 @@ def read_status(claude_dir: Path, pid: int) -> AgentStatus | None:
         return None
     if not _pid_alive(pid):
         return None
-    sua = data.get("statusUpdatedAt", 0)
-    if not isinstance(sua, int):
-        sua = 0
-    status = data.get("status", "unknown")
+    sua = data.get("statusUpdatedAt")
+    if not isinstance(sua, int) or isinstance(sua, bool) or sua <= 0:
+        sua = None
+    status = data.get("status", "")
     if not isinstance(status, str):
         status = "unknown"
     return AgentStatus(
