@@ -911,7 +911,7 @@ Force is distributed as public GitHub releases with a one-line installer and a G
 | Website | `website/` in this repo, built by `website/tools/build.py` and deployed to GitHub Pages by `.github/workflows/pages.yml` on every push to `main` and after each release; https://useforce.cc (apex A/AAAA records to GitHub Pages, `www` CNAME to `<account>.github.io`, DNS on Cloudflare) |
 | Self-update | Force switches to the latest release (atomic, sessions untouched); remotes follow this machine |
 | Licence | MIT (`LICENSE`, Cargo.toml / pyproject `license`). `THIRD-PARTY-NOTICES.md` (`scripts/notices.sh`: cargo-about with `about.toml`, whose accepted list refuses a crate under any other licence; Linux x86_64 + aarch64 only) ships in every release next to LICENSE; `tests/test_notices.py` fails when a crate compiled in is missing from it. CI regenerates and checks it |
-| Platforms | Linux x86_64 + aarch64; macOS on Apple Silicon (arm64), beta (§51) |
+| Platforms | Linux x86_64 + aarch64; macOS on Apple Silicon (arm64) (§51) |
 | Name | Force, **the code cockpit**; the codebase names Claude Code only where it means that program (its kind, binary, files, the self-test and importer) |
 ## 43. Automation, reports, explain, titles, registry history
 Commands that scripts and agents use instead of raw `tmux send-keys`, plus state that
@@ -1172,10 +1172,10 @@ installed of Claude Code, OpenCode) and plan; nothing reaches GitHub without the
 | GitHub | search: the public search API, no login (`repo:… is:issue`). Issues: `issues/new?template=…&title=…&<field id>=…` (fields shortened, logs first, to stay ≤ 8000 characters). Comments: the text copied, the issue link printed. Pull requests: `compare/main...USER:force:BRANCH?quick_pull=1&title&body` with a Conventional title and "Fixes #N". Copies go to tmux's buffer with `-w` (OSC 52) and `clip-set.sh`. `FORCE_SUPPORT_REPO=owner/name` (testing only) points search and links at another public repository. A vulnerability never goes to GitHub (SECURITY.md): `force support security --title T --file F` copies the report and prints a `mailto:hello@useforce.cc` link (subject "Security: T", the body when the link stays ≤ 1800 characters). |
 | Fix mode | `force support fix N [--user NAME]`: the user's fork cloned once to `<support>/src` and reused for every fix (the name kept in its git config `force.githubUser`), remote `upstream`, branch `fix/N-slug` from `upstream/main`, refused while the branch checked out has uncommitted work; tests in the dev image, tries in the `./dev.sh` sandbox; push only after a yes; `force support pr --title …`. |
 
-## 51. macOS (beta)
+## 51. macOS
 Force runs on macOS on Apple Silicon (arm64) like on Linux: the one-line install, local agent and shell sessions,
-remotes, `force update` and uninstall. Intel Macs are not built. It is labelled **beta** until a person has used it
-on a real Mac: CI proves the install and the cockpit on GitHub's macOS runners, not how Terminal.app or iTerm2 draw it.
+remotes, `force update` and uninstall. Intel Macs are not built. CI proves the install and the cockpit on GitHub's
+macOS runners for every pull request; it was a beta until 1.2.0 had been used on a real Mac (Ghostty).
 
 | Part | Linux | macOS |
 |---|---|---|
