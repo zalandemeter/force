@@ -569,3 +569,25 @@ time.sleep(0.5)
     time.sleep(0.3)
     assert len(calls) == 1                     # the spoofed sender was not delivered
     ws.stop()
+
+
+def test_status_writes_from_several_threads_never_collide(tmp_path):
+    """The daemon's tick and a watcher's reader thread write the same status file; each write has its own temp
+    file, so none fails (a per-process temp name raised FileNotFoundError here)."""
+    import threading
+    path = tmp_path / "status.json"
+    errors = []
+
+    def writer(i):
+        try:
+            for k in range(200):
+                remote._write_json(path, {"i": i, "k": k})
+        except Exception as e:          # noqa: BLE001 - any failure is the bug
+            errors.append(e)
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert json.loads(path.read_text())["k"] == 199

@@ -348,6 +348,19 @@ def test_list_json(fakes, capsys):
     assert data["latest_version"] == "2.1.292"
 
 
+def test_list_json_includes_watching(fakes, capsys):
+    """SPEC §5: `force list --json` carries the `watching` flag (default false, true when set)."""
+    cockpit, fake, tmp = fakes
+    now = int(time.time() * 1000)
+    sv = SessionView("w", 1, State.WORKING, now, "2.1.292", False, False,
+                    1, str(tmp), "s", 1, None, False)
+    sv.watching = True
+    state.write_snapshot(cockpit.paths.snapshot, Snapshot(now, "2.1.292", [sv]))
+    assert cli.list_command(cockpit, False, True) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["sessions"][0]["watching"] is True
+
+
 
 # --- attach refuses inside cockpit ---
 def _load_reg(cockpit):

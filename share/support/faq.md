@@ -7,7 +7,7 @@
   a Windows Terminal profile, "Force (DISTRO)", with the icon font; it needs Windows Terminal 1.21 or newer).
 - **Root.** Never needed. Force installs as the user under `~/.local`.
 - **Python.** Force needs Python 3.11+; when the system has none, the installer brings its own.
-- **Update.** `force update`; a daily check shows a newer version in the sidebar footer (setting
+- **Update.** `force update`; an hourly check shows a newer version in the sidebar footer (setting
   `checkForUpdates`). Sessions keep running through an update.
 - **Uninstall.** `force uninstall` (conversations stay); `--purge` also removes Force's registry, state and
   settings.

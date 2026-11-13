@@ -51,6 +51,9 @@ pub const C_YOUR_TURN: Color = Color::Rgb(0x87, 0xc0, 0x8f);
 pub const C_DOWN: Color = Color::Rgb(0xd7, 0x5f, 0x5f);
 pub const C_YOUR_TURN_DIM: Color = Color::Rgb(0x79, 0xa5, 0x80); // #79a580
 pub const C_WORKING_DIM: Color = Color::Rgb(0xa6, 0x89, 0x4d); // #d7af5f at ~60% brightness
+/// A working session waiting on background work of its own (SPEC §5, `watching`): nothing for you to do, so its
+/// icon and line-2 text are idle grey and its edge the idle edge; only the line-2 glow (app.rs) still moves.
+pub const C_WATCHING: Color = GREY;
 /// A working session whose agent wrote a finding you have not seen (SPEC §5, `unread`): its icon and edge ...
 pub const C_UNREAD: Color = Color::Rgb(0x5c, 0x9c, 0xf5); // #5c9cf5
 /// ... and its line-2 text: about 4.6:1 on the card, as readable as the working text.
@@ -118,19 +121,34 @@ pub fn is_unread(s: &Session) -> bool {
     shows_unread(s.state, s.unread)
 }
 
-/// A card's icon colour: the state's, blue for an unread finding (SPEC §5).
+/// A WORKING Claude session whose status is `shell`, waiting on a background command of its own (SPEC §5).
+pub fn is_watching(s: &Session) -> bool {
+    s.watching && s.state == State::Working && !is_unread(s)
+}
+
+/// A card's icon colour: the state's, watching the dim working colour, blue for an unread finding (SPEC §5).
 pub fn session_glyph_color(s: &Session) -> Color {
     if is_unread(s) {
         C_UNREAD
+    } else if is_watching(s) {
+        C_WATCHING
     } else {
         glyph_color(s.state)
     }
 }
 
-/// A card's edge colour: the state's, blue for an unread finding (SPEC §5).
-pub fn card_edge_color(state: State, unread: bool) -> Color {
+/// A card's edge colour: the state's, watching the dim working colour, blue for an unread finding (SPEC §5).
+pub fn card_edge_color(s: &Session) -> Color {
+    item_edge_color(s.state, s.unread, s.watching)
+}
+
+/// The edge colour for an app-side rendered item from its carried fields (SPEC §5): unread blue wins over
+/// watching, which is the dim working colour.
+pub fn item_edge_color(state: State, unread: bool, watching: bool) -> Color {
     if shows_unread(state, unread) {
         C_UNREAD
+    } else if state == State::Working && watching {
+        edge_color(State::Idle)
     } else {
         edge_color(state)
     }
@@ -306,6 +324,16 @@ pub fn glyph(tier: Tier, s: State, now_ms: i64) -> char {
     }
 }
 
+/// The card's headline glyph: a watching session (SPEC §5) shows a still hourglass instead of the spinning
+/// working glyph — nothing turns while it waits on background work. Unread keeps the same still hourglass.
+pub fn card_glyph(tier: Tier, s: &Session, now_ms: i64) -> char {
+    if s.state == State::Working && s.watching {
+        glyphs::state(tier, '◷', '\u{F252}')
+    } else {
+        glyph(tier, s.state, now_ms)
+    }
+}
+
 pub fn age(since_ms: Option<i64>, now_ms: i64) -> String {
     let s = match since_ms {
         None => return String::new(),
@@ -379,7 +407,7 @@ fn pad_to(out: &mut Vec<Glyph>, c: usize) {
 pub fn line1(s: &Session, now_ms: i64, c: usize, name_color: Color, tier: Tier) -> Vec<Glyph> {
     // Chuck (SPEC §50) shows his face while there is nothing to tell; working, needs you and your turn as usual
     let face = s.support && matches!(s.state, State::Idle | State::Stale);
-    let g = if face { glyphs::state(tier, '?', crate::app::CHUCK_RICH) } else { glyph(tier, s.state, now_ms) };
+    let g = if face { glyphs::state(tier, '?', crate::app::CHUCK_RICH) } else { card_glyph(tier, s, now_ms) };
     let gap = glyphs::gap(tier);
     let prefix = format!("  {}{}", g, gap); // width 4 (5 in RICH: 2-cell icon slot)
     let age = age(s.since_ms, now_ms);
@@ -523,6 +551,7 @@ pub fn line2(s: &Session, c: usize, tier: Tier) -> Vec<Glyph> {
             let (color, bold) = match s.state {
                 State::NeedsYou => (C_NEEDS_YOU, true),
                 State::Working if is_unread(s) => (C_UNREAD_TEXT, false),
+                State::Working if is_watching(s) => (C_WATCHING, false),
                 State::Working => (C_WORKING_DIM, false),
                 State::YourTurn => (label_color(State::YourTurn), false),
                 _ => (GREY, false),
@@ -541,6 +570,7 @@ pub fn line2(s: &Session, c: usize, tier: Tier) -> Vec<Glyph> {
                 Some("moving") => ("moving", LABEL_GREY),
                 Some("moved") => ("moved", C_YOUR_TURN),
                 _ if is_unread(s) => (state_label(s.state), C_UNREAD_TEXT),
+                _ if is_watching(s) => ("waiting", C_WATCHING),
                 _ => (state_label(s.state), label_color(s.state)),
             };
             let shown_note = matches!(
@@ -913,6 +943,7 @@ mod tests {
             kind: "claude".into(),
             support: false,
             unread: false,
+            watching: false,
         }
     }
 
@@ -1327,14 +1358,14 @@ mod tests {
         let mut s = sess(State::Working);
         s.activity = Some("editing deploy.tf".into());
         assert_eq!(line1(&s, 0, 29, NAME, Tier::Plain)[2].color, C_WORKING);
-        assert_eq!(card_edge_color(s.state, s.unread), C_WORKING);
+        assert_eq!(card_edge_color(&s), C_WORKING);
         s.unread = true;
         let l = line1(&s, 0, 29, NAME, Tier::Plain);
         assert_eq!(l[2].color, C_UNREAD);
         assert_eq!(l[2].ch, glyph(Tier::Plain, State::Working, 0));
         assert!(l.iter().any(|g| g.ch == 'p' && g.color == NAME), "the name stays grey");
         assert!(l.iter().any(|g| g.ch != ' ' && g.color == AGE), "the age stays grey");
-        assert_eq!(card_edge_color(s.state, s.unread), C_UNREAD);
+        assert_eq!(card_edge_color(&s), C_UNREAD);
         let l2 = line2(&s, 29, Tier::Plain);
         assert!(l2.iter().any(|g| g.ch == 'e' && g.color == C_UNREAD_TEXT), "the activity is blue");
         assert!(!l2.iter().any(|g| g.color == C_WORKING_DIM));
@@ -1344,7 +1375,61 @@ mod tests {
         assert!(l2.iter().any(|g| g.ch == 'k' && g.color == C_UNREAD_TEXT), "the label is blue");
         s.state = State::YourTurn;
         assert_eq!(session_glyph_color(&s), C_YOUR_TURN);
-        assert_eq!(card_edge_color(s.state, s.unread), C_YOUR_TURN);
+        assert_eq!(card_edge_color(&s), C_YOUR_TURN);
+    }
+
+    #[test]
+    fn watching_is_a_still_hourglass_in_c_watching() {
+        // SPEC §5: a WORKING claude session waiting on background work shows a still hourglass (RICH U+F252 /
+        // PLAIN ◷), not the spinner, its icon idle grey (C_WATCHING) and its edge the idle edge; nothing changes with now_ms.
+        let mut s = sess(State::Working);
+        s.watching = true;
+        assert_eq!(card_glyph(Tier::Plain, &s, 0), '◷');
+        assert_eq!(card_glyph(Tier::Plain, &s, 900), '◷', "still: no spinner frame with now_ms");
+        assert_eq!(card_glyph(Tier::Rich, &s, 0), '\u{F252}');
+        assert_eq!(card_glyph(Tier::Rich, &s, 7 * 125), '\u{F252}', "still: no filling pie with now_ms");
+        assert_eq!(session_glyph_color(&s), C_WATCHING);
+        assert_eq!(card_edge_color(&s), edge_color(State::Idle));
+        let l = line1(&s, 0, 29, NAME, Tier::Plain);
+        assert_eq!(l[2].ch, '◷');
+        assert_eq!(l[2].color, C_WATCHING);
+        // the activity (or the missing-activity label) is C_WATCHING, not bold
+        s.activity = Some("waiting · a background command".into());
+        let l2 = line2(&s, 29, Tier::Plain);
+        assert!(l2.iter().any(|g| g.ch == 'w' && g.color == C_WATCHING), "the activity is C_WATCHING");
+        assert!(!l2.iter().any(|g| g.bold), "watching is not bold");
+        s.activity = None;
+        let l2 = line2(&s, 29, Tier::Plain);
+        assert!(glyphs_to_string(&l2).contains("waiting"), "missing activity shows the waiting label");
+        assert!(l2.iter().any(|g| g.ch == 'w' && g.color == C_WATCHING));
+        // not watching (plain working) keeps the spinner
+        s.watching = false;
+        assert_eq!(card_glyph(Tier::Plain, &s, 0), SPINNER.chars().next().unwrap());
+        assert_eq!(session_glyph_color(&s), C_WORKING);
+        assert_eq!(card_edge_color(&s), C_WORKING);
+    }
+
+    #[test]
+    fn unread_watching_is_blue_with_the_hourglass() {
+        // SPEC §5: unread wins over watching entirely: the colours are blue, the glyph is still the hourglass, since
+        // it is still not turning.
+        let mut s = sess(State::Working);
+        s.watching = true;
+        s.unread = true;
+        assert_eq!(card_glyph(Tier::Plain, &s, 0), '◷', "still the hourglass, not the spinner");
+        assert_eq!(card_glyph(Tier::Rich, &s, 5 * 125), '\u{F252}');
+        assert_eq!(session_glyph_color(&s), C_UNREAD);
+        assert_eq!(card_edge_color(&s), C_UNREAD);
+        assert_eq!(line1(&s, 0, 29, NAME, Tier::Plain)[2].color, C_UNREAD);
+        s.activity = Some("waiting · a background command".into());
+        let l2 = line2(&s, 29, Tier::Plain);
+        assert!(l2.iter().any(|g| g.ch == 'w' && g.color == C_UNREAD_TEXT), "unread blue wins the activity");
+    }
+
+    #[test]
+    fn watching_is_never_in_other_states() {
+        let s = sess(State::Idle);
+        assert!(!is_watching(&s));
     }
 
     #[test]

@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -23,9 +24,12 @@ _MAX_BYTES = 1_000_000
 _FETCH_TIMEOUT = 20
 # the daemon's silent background check: shorter timeout, small file
 _CHECK_TIMEOUT = 10
-# the daemon's cadence: first check 2 min after start, then every 24 h
+# the daemon's cadence (SPEC §3): first check 2 min after start, then hourly, and when a terminal opens the cockpit
+# (at most one check per 10 min). Each check after the first is conditional (If-None-Match / If-Modified-Since), so
+# an unchanged install.sh costs a 304 with no body.
 _FIRST_DELAY = 120
-_INTERVAL = 24 * 3600
+_INTERVAL = 3600
+_MIN_GAP = 600
 
 _VERSION_RE = re.compile(r'^\s*VERSION\s*=\s*"([^"]+)"\s*$')
 _VER = re.compile(r"\d+\.\d+\.\d+")
@@ -269,23 +273,65 @@ def _write_tmp(content: bytes) -> str:
     return path
 
 
+def _fetch_conditional(base: str, timeout: int, etag: str | None, modified: str | None
+                       ) -> tuple[int, bytes | None, str | None, str | None]:
+    """GET `<base>/install.sh` with If-None-Match / If-Modified-Since -> (status, content, etag, last_modified).
+    status 304 = unchanged (content None), 200 = new content, 0 = any failure."""
+    url = base.rstrip("/") + "/install.sh"
+    headers = {"User-Agent": f"force/{current_version() or 'dev'}"}
+    if etag:
+        headers["If-None-Match"] = etag
+    if modified:
+        headers["If-Modified-Since"] = modified
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
+            data = resp.read(_MAX_BYTES + 1)
+            if len(data) > _MAX_BYTES:
+                return 0, None, None, None
+            return 200, data, resp.headers.get("ETag"), resp.headers.get("Last-Modified")
+    except urllib.error.HTTPError as e:
+        if e.code == 304:
+            return 304, None, etag, modified
+        return 0, None, None, None
+    except Exception:
+        return 0, None, None, None
+
+
 def check_daemon(state: Path) -> str | None:
-    """One silent background check: fetch+parse the latest, write `<state>/update.json`
-    `{"latest": "B", "checked_ms": …}`, return B. Any failure returns None and keeps the old file."""
+    """One silent background check: write `<state>/update.json` `{"latest": "B", "checked_ms": …, "etag": …,
+    "last_modified": …}` and return B. The request is conditional on the validators of the last check: a 304 keeps
+    the known latest and only refreshes checked_ms. Any failure returns None and keeps the old file."""
     base = download_base()
     if base is None or current_version() is None:
         return None
-    content, _err = fetch_install(base, _CHECK_TIMEOUT)
-    if content is None:
+    path = state / "update.json"
+    try:
+        old = json.loads(path.read_text())
+        old = old if isinstance(old, dict) else {}
+    except (OSError, ValueError):
+        old = {}
+    known = old.get("latest") if isinstance(old.get("latest"), str) else None
+    etag = old.get("etag") if known and isinstance(old.get("etag"), str) else None
+    modified = old.get("last_modified") if known and isinstance(old.get("last_modified"), str) else None
+    status, content, etag, modified = _fetch_conditional(base, _CHECK_TIMEOUT, etag, modified)
+    if status == 304:
+        latest = known
+    elif status == 200 and content is not None:
+        latest = parse_install_version(content)
+    else:
         return None
-    latest = parse_install_version(content)
     if latest is None:
         return None
+    record = {"latest": latest, "checked_ms": int(time.time() * 1000)}
+    if etag:
+        record["etag"] = etag
+    if modified:
+        record["last_modified"] = modified
     try:
         state.mkdir(parents=True, exist_ok=True)
         tmp = state / "update.json.tmp"
-        tmp.write_text(json.dumps({"latest": latest, "checked_ms": int(time.time() * 1000)}))
-        os.replace(tmp, state / "update.json")
+        tmp.write_text(json.dumps(record))
+        os.replace(tmp, path)
     except OSError:
         return None
     return latest
