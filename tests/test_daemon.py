@@ -1511,3 +1511,23 @@ def test_a_terminal_opening_the_cockpit_wakes_the_update_check():
     ui.names = []                                       # it detaches: no wake
     Daemon._note_clients(me, host)
     assert not me._update_wake.is_set()
+
+
+def test_restore_does_not_bring_back_a_session_archived_during_the_tick(env, monkeypatch):
+    """The tick's registry can predate an archive that stops the session mid-tick; restore re-reads the entry before it
+    creates anything, so an archived (or archiving, deleted) session is not started again as a dead orphan."""
+    cockpit = env.make_cockpit()
+    d = Daemon(cockpit, FakeClock())
+    with locked(env.paths.home) as reg:
+        for n in ("gone", "going", "deleted", "back"):
+            reg.add(n, _uuid(), "/tmp")
+    d._registry = list(load(env.paths.registry).entries)           # the tick read them all as live
+    with locked(env.paths.home) as reg:
+        reg.get("gone").archived = True                             # archived since
+        reg.get("going").extra["archiving"] = True                  # being archived now
+        reg.remove("deleted")                                       # deleted since
+    created = []
+    monkeypatch.setattr(cockpit, "create", lambda e: created.append(e.name))
+    monkeypatch.setattr(cockpit.tmux, "has_session", lambda name: False)
+    d._step_restore()
+    assert created == ["back"], "only the session that is still live comes back"
