@@ -62,6 +62,7 @@ default; an invalid file is never overwritten by `force settings set`.
 | `layout` | `"split"` | split / classic (§39) |
 | `opencodeManaged` | false | Force's own OpenCode copy (§36) |
 | `checkForUpdates` | true | hourly check for a newer Force (§46) |
+| `remoteControl` | true | new Claude Code sessions start with Remote Control: the New dialog's checkbox default and `force new`'s (§53) |
 
 Advanced, accepted but not listed by `force settings` (only `--all`): `crashRestartMax` 3,
 `crashWindowMinutes` 10, `startGraceSeconds` 30, `richTerminals`, `introCellAspect`, `reloadOnChange`,
@@ -1275,3 +1276,9 @@ A Claude Code session starts with Remote Control (`--remote-control NAME`, §7.2
 | title sync (§47) | a session without Remote Control does not wait for a connection: `/rename NAME` is typed once it is idle with an empty input line, so Claude Code's own name follows renames and automatic names (§49.6) |
 | MCP `session_new` | optional boolean `remote_control` (false = `--no-remote-control`) |
 | `FORCE_NO_REMOTE_CONTROL` | still drops it for every session (`force smoke`, §37) |
+| default | the setting `remoteControl` (bool, default true) is what a new Claude Code session gets: `force new` without a flag, MCP `session_new` without `remote_control`, and the checkbox's start value. The dialog reads the target host's value (`force settings get remoteControl`; any failure or an older host = on); unchecked sends `--no-remote-control`, checked sends `--remote-control` only when that default is off |
+| `force new --remote-control` | the opposite of `--no-remote-control`, for a host whose default is off |
+| `force remote-control NAME on\|off\|toggle\|status` | sets the session's choice. A change restarts it to apply, keeping its conversation: now when it is idle or your turn, after this turn when it works or needs you (`pending_restart`), at its next start when it is down or archived. Prints `NAME: Remote Control on\|off (restarting \| restarts after this turn \| applies when it starts)`, or `… already on\|off`. `status` prints `on`/`off` and `(connected)`/`(not connected)`. Refused (exit 1) for OpenCode and shell sessions. Forwarded to the shown host (`FORCE_HOST`) like the other session commands |
+| menu | `R` "Remote Control on/off": `force remote-control <the shown session> toggle`, its line shown as a tmux message (split: through `ui-key.sh rc`) |
+| follow Claude | `/remote-control` inside a session turns it on, and its panel's Disconnect turns it off; Claude's status file then has, or loses, `bridgeSessionId`. The daemon follows so a restart keeps it: connected while the choice is off -> on at once; not connected for 60 s in the same process after this process was seen connected, while the choice is on -> off (a short drop is not a choice; a session that never connected is left alone). A new process starts the watch afresh. Each change goes into the session's `why`; it never restarts anything |
+| shown | `force list --json`: `"remote_control"` (the choice) and `"rc_connected"` (live) for Claude Code sessions. The sidebar shows nothing for it |
