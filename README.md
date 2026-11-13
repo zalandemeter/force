@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/zalandemeter/force/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zalandemeter/force/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="https://github.com/zalandemeter/force/releases/latest"><img src="https://img.shields.io/github/v/release/zalandemeter/force?style=flat-square&color=d97757&label=release" alt="Latest release"></a>
-  <img src="https://img.shields.io/badge/platform-Linux%20x86--64%20%C2%B7%20macOS%20(beta)-3c3c3c?style=flat-square" alt="Linux x86-64 · macOS (beta)">
+  <img src="https://img.shields.io/badge/platform-Linux%20x86--64%20%C2%B7%20macOS-3c3c3c?style=flat-square" alt="Linux x86-64 · macOS">
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-MIT-3c3c3c?style=flat-square" alt="MIT licence"></a>
   <a href="https://useforce.cc"><img src="https://img.shields.io/badge/useforce.cc-website-d97757?style=flat-square" alt="Website"></a>
 </p>
@@ -34,7 +34,7 @@ curl -fsSL https://useforce.cc/install.sh | sh
 force
 ```
 
-Linux on x86-64, and macOS on Apple Silicon (beta). No root, no packages, no config files: Force installs as your user, brings its own tmux and, if
+Linux on x86-64, and macOS on Apple Silicon. No root, no packages, no config files: Force installs as your user, brings its own tmux and, if
 the system's Python is older than 3.11, its own Python. The installer pins the release's SHA-256 and checks it
 before unpacking. Today Force runs Claude Code, OpenCode and plain shell sessions.
 
