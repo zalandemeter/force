@@ -578,6 +578,34 @@ def test_a_new_support_agent_starts_a_fresh_chuck(cockpit, monkeypatch):
     assert registry.is_support(after) and restarted == ["chuck"]
 
 
+def test_new_starts_chuck_on_a_new_conversation(cockpit, monkeypatch):
+    assert support.ensure_session(cockpit) == "chuck"
+    with registry.locked(cockpit.paths.home) as r:
+        r.get("chuck").extra["oc_session"] = "ses_old"
+    before = registry.load(cockpit.paths.registry).get("chuck")
+    restarted = []
+    monkeypatch.setattr(cli, "restart_command", lambda c, name, all_=False: restarted.append(name) or 0)
+    assert support.ensure_session(cockpit) == "chuck"
+    assert restarted == [] and registry.load(cockpit.paths.registry).get("chuck").session_id == before.session_id
+    assert support.ensure_session(cockpit, new=True) == "chuck", "the same session, not chuck-2"
+    after = registry.load(cockpit.paths.registry).get("chuck")
+    assert after.session_id != before.session_id and "oc_session" not in after.extra
+    assert registry.is_support(after) and registry.kind(after) == registry.kind(before) and restarted == ["chuck"]
+
+
+def test_n_on_the_card_opens_a_new_conversation(cockpit, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "available_kinds", lambda c: ["claude", "shell"])
+    seen = []
+    monkeypatch.setattr(support, "ensure_session", lambda c, new=False: seen.append(new) or "chuck")
+    monkeypatch.setattr(support, "_switch", lambda c, name: 0)
+    for key, want in (("\r", [False]), ("n", [True]), ("\x1b", [])):
+        seen.clear()
+        monkeypatch.setattr(support, "_wait_key", lambda k=key: k)
+        assert support.open_command(cockpit, ui=True) == 0
+        assert seen == want, key
+    assert "n  New conversation" in support.card_text("claude", rich=False, color=False)
+
+
 def test_a_new_support_model_restarts_chuck_with_his_conversation(cockpit, monkeypatch):
     import dataclasses
     assert support.ensure_session(cockpit) == "chuck"

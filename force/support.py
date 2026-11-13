@@ -9,7 +9,8 @@ Nothing goes to GitHub from here: issues, comments and pull requests are pre-fil
 submits (`force support link | comment | pr`). `force support search` reads GitHub's public search API without
 a login.
 
-  force support                    the card, then Chuck's session (the menu key ?, the sidebar button)
+  force support [--new]            the card, then Chuck's session (the menu key ?, the sidebar button);
+                                   --new (n on the card): on a new conversation
   force support search WORDS       issues that match (open and closed)
   force support link bug|feature --title T [--field id=value …]   the pre-filled new-issue link, copied
   force support comment N [--file F]                               the comment text copied, the issue's link
@@ -28,6 +29,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
 from . import config, registry
@@ -184,8 +186,8 @@ def agent_for(cockpit) -> str | None:
     return have[0] if have else None
 
 
-def ensure_session(cockpit) -> str:
-    """Chuck's session, created or brought back from the archive; its name."""
+def ensure_session(cockpit, new: bool = False) -> str:
+    """Chuck's session, created or brought back from the archive; its name. `new`: on a new conversation."""
     from . import cli
     model = cockpit.cfg.support_model or ""
     prepare_dir(cockpit.paths, model)
@@ -195,10 +197,11 @@ def ensure_session(cockpit) -> str:
     if e is not None and e.archived:
         if cli.unarchive_command(cockpit, e.name) != 0:
             raise SupportError(f"could not bring {e.name} back from the archive")
-    if e is not None and kind is not None and registry.kind(e) != kind:
-        # supportAgent changed: a conversation cannot move between agents, so the same session starts fresh on
-        # the new one (a new conversation id, the old agent's ids dropped), then restarts
-        import uuid
+    if e is not None and (new or (kind is not None and registry.kind(e) != kind)):
+        # n on the card, or supportAgent changed (a conversation cannot move between agents): the same session
+        # on a new conversation (a new conversation id, the agent's own ids dropped), then a restart. The old
+        # conversation stays with the agent (its /resume lists it).
+        kind = kind or registry.kind(e)
         with registry.locked(cockpit.paths.home) as r:
             live = r.get(e.name)
             if live is not None:
@@ -236,9 +239,10 @@ def ensure_session(cockpit) -> str:
 from .cards import CARD_W, USES, card_text    # noqa: E402,F401  (Chuck's card lives with the other cards)
 
 
-def open_command(cockpit, ui: bool = False) -> int:
+def open_command(cockpit, ui: bool = False, new: bool = False) -> int:
     """`force support`: in a popup (ui=True, the menu key and the sidebar button) the card first, then Chuck's
-    session; from a shell: the card printed, then the session (switched to when inside Force)."""
+    session (Enter) or his session on a new conversation (n); from a shell: the card printed, then the session
+    (switched to when inside Force), on a new conversation with `new` (--new)."""
     try:
         agent = agent_for(cockpit)
     except SupportError as e:
@@ -257,10 +261,14 @@ def open_command(cockpit, ui: bool = False) -> int:
         if ui:
             _wait_key()
         return 1
-    if ui and _wait_key() not in ("\r", "\n"):
-        return 0
+    if ui:
+        key = _wait_key()
+        if key in ("n", "N"):
+            new = True
+        elif key not in ("\r", "\n"):
+            return 0
     try:
-        name = ensure_session(cockpit)
+        name = ensure_session(cockpit, new=new)
     except SupportError as e:
         print(f"force: {e}", file=sys.stderr)
         if ui:
@@ -534,7 +542,7 @@ def command(cockpit, args) -> int:
     action = getattr(args, "action", None)
     try:
         if action in (None, "open"):
-            return open_command(cockpit, ui=getattr(args, "ui", False))
+            return open_command(cockpit, ui=getattr(args, "ui", False), new=getattr(args, "new", False))
         if action == "search":
             words = " ".join(args.words).strip()
             if not words:
@@ -617,8 +625,10 @@ def add_parser(sub) -> None:
                                        "comment | fix | pr (SPEC §50)")
     ss = p.add_subparsers(dest="action")
     p.add_argument("--ui", action="store_true", help=argparse_suppress())
+    p.add_argument("--new", action="store_true", help="Chuck on a new conversation (n on the card)")
     o = ss.add_parser("open", help="the card, then Chuck's session (the default)")
     o.add_argument("--ui", action="store_true", help=argparse_suppress())
+    o.add_argument("--new", action="store_true", help="Chuck on a new conversation (n on the card)")
     s = ss.add_parser("search", help="find issues on GitHub (open and closed) that match WORDS")
     s.add_argument("words", nargs="+")
     s.add_argument("--json", action="store_true")

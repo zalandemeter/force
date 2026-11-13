@@ -288,7 +288,8 @@
       <p>Chuck is Force's assistant: an agent session that knows Force inside out. Open him with <kbd>?</kbd> in the
         menu, the <strong>ask chuck</strong> button at the bottom of the sidebar, or <code>force support</code>. He
         shows what he can do first, then <kbd>Enter</kbd> opens his session; next time you are back in the same
-        conversation.</p>
+        conversation. <kbd>n</kbd> instead starts him on a new one, so a new question does not carry the old
+        conversation (and its tokens) along.</p>
       <ul>
         <li><strong>How does…?</strong> He answers from the docs and the code of the version you run.</li>
         <li><strong>Set it up for me.</strong> A new remote host, a notification, a setting: he says what he will
@@ -307,6 +308,7 @@
 <pre class="code"><span class="p">$</span> force settings set supportAgent opencode             <span class="c"># a fresh Chuck on OpenCode</span>
 <span class="p">$</span> force settings set supportModel deepseek/deepseek-chat <span class="c"># his model (provider/model)</span></pre>
 <pre class="code"><span class="p">$</span> force support                          <span class="c"># his card, then his session</span>
+<span class="p">$</span> force support --new                    <span class="c"># his card, then a new conversation</span>
 <span class="p">$</span> force support search sidebar flicker   <span class="c"># issues that match, open and closed</span></pre>
     </section>
 
@@ -355,7 +357,7 @@
 <span class="l">force doctor <span class="w">[--fix]</span></span>
 <span class="l">force fonts</span>
 <span class="l">force <span class="w">--version</span>  <span class="c"># the installed version (for bug reports)</span></span>
-<span class="l">force support <span class="w">[search WORDS | link bug|feature</span> <span class="w">--title</span> T <span class="w">[--field</span> ID=VALUE] <span class="w">| comment N | fix N</span> <span class="w">--user</span> NAME <span class="w">| pr</span> <span class="w">--title</span> T]  <span class="c"># Chuck</span></span>
+<span class="l">force support <span class="w">[--new | search WORDS | link bug|feature</span> <span class="w">--title</span> T <span class="w">[--field</span> ID=VALUE] <span class="w">| comment N | fix N</span> <span class="w">--user</span> NAME <span class="w">| pr</span> <span class="w">--title</span> T]  <span class="c"># Chuck</span></span>
 <span class="l">force skill  <span class="c"># the guide for agents that drive Force</span></span></pre>
     </section>
   </main>

@@ -66,7 +66,7 @@ USES = (  # (rich icon, plain icon, what, how)
 
 
 def card_text(agent: str | None, rich: bool, color: bool = True, buttons: bool = True) -> str:
-    """Chuck's card: who he is, what he does, what it costs, and (in the popup) the two keys."""
+    """Chuck's card: who he is, what he does, what it costs, and (in the popup) its keys."""
     label = {"claude": "Claude Code", "opencode": "OpenCode"}.get(agent or "", "agent")
     lines = head("\uf118" if rich else ":)", "Chuck", "Force's assistant", color)
     for icon_r, icon_p, what, how in USES:
@@ -76,7 +76,8 @@ def card_text(agent: str | None, rich: bool, color: bool = True, buttons: bool =
               "  " + c(f"Runs on your {label} and plan, so each answer uses your tokens.", "dim", color=color),
               "  " + c("Nothing goes to GitHub without your click.", "dim", color=color)]
     if buttons:
-        lines += ["", keys_right(("Esc", "Close"), button="Enter  Talk to Chuck", color=color), ""]
+        lines += ["", keys_right(("n", "New conversation"), ("Esc", "Close"),
+                                 button="Enter  Talk to Chuck", color=color), ""]
     return "\n".join(lines)
 
 
