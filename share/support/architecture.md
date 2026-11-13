@@ -50,7 +50,7 @@ sockets `force-dev` / `force-dev-ui` (SPEC §2.1).
 | `remote.py` | remote hosts: hosts.json, ssh options, `force watch`, the watchers |
 | `automation.py`, `report.py` | `force prompt`, `wait`, `read`, `keys`, `status`, `explain`, reported states |
 | `doctor.py` | `force doctor [--fix]` |
-| `updates.py`, `setup.py` | `force update` and the daily check; the install/setup steps (launcher, units, PATH, fonts) |
+| `updates.py`, `setup.py` | `force update` and the hourly check; the install/setup steps (launcher, units, PATH, fonts) |
 | `menus.py` | generates `share/menu-*.tmux` and `share/copy-mode.tmux` |
 | `support.py`, `mcp.py` | Chuck: his session and folder, issue search and links, fix mode; Force's MCP server |
 | `smoke.py` | `force smoke`: a self-test against the real agents |

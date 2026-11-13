@@ -230,7 +230,9 @@ def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, hear
 # --------------------------------------------------------------------------- the client side ----------
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    # one temp file per thread: the daemon's tick and a watcher's reader thread write the same status file, and a
+    # shared name let one's replace take the other's file away (FileNotFoundError)
+    tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(data, separators=(",", ":")))
     os.replace(tmp, path)
 

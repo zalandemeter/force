@@ -1461,3 +1461,27 @@ def test_opencode_reply_only_on_change():
     assert reply("m1:9") == 42                                            # more text
     assert reply(None) is None                                            # not busy: nothing read
     assert reply("m2:1", SimpleNamespace(pid=8, dead=False)) is None      # restarted: first sight again
+
+
+def test_a_terminal_opening_the_cockpit_wakes_the_update_check():
+    """SPEC §3: a client name not attached on the last tick (host or ui server) wakes the update check; the first
+    tick only records; the same clients again do not."""
+    import threading
+    from types import SimpleNamespace
+    from force.daemon import Daemon
+    ui = SimpleNamespace(names=[])
+    me = SimpleNamespace(_client_names=None, _update_wake=threading.Event(),
+                         cockpit=SimpleNamespace(ui_tmux=SimpleNamespace(
+                             clients=lambda: [SimpleNamespace(name=n) for n in ui.names])))
+    host = [SimpleNamespace(name="/dev/pts/1")]
+    Daemon._note_clients(me, host)
+    assert not me._update_wake.is_set()                 # first tick: only recorded
+    Daemon._note_clients(me, host)
+    assert not me._update_wake.is_set()                 # nobody new
+    ui.names = ["/dev/pts/7"]                           # a terminal attaches to the ui server (split layout)
+    Daemon._note_clients(me, host)
+    assert me._update_wake.is_set()
+    me._update_wake.clear()
+    ui.names = []                                       # it detaches: no wake
+    Daemon._note_clients(me, host)
+    assert not me._update_wake.is_set()
