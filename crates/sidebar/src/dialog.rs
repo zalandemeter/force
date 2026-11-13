@@ -843,7 +843,7 @@ impl Dialog {
 
     fn draw_new(&mut self, buf: &mut Buffer) {
         // rows: 1 title, 3 `Kind`, 4 chips, 6 `Name`, 7 name input, 9 `Folder`, 10 folder input,
-        //       12 Remote Control checkbox (Claude Code only), 13 status, last row footer.
+        //       12 Remote Control chip (Claude Code only), 14 status, last row footer.
         self.draw_title(buf, '\u{F067}', "New session");
         put(buf, CONTENT_LEFT, 3, "Kind", FG_DIM);
         // the selected chip is raised; coral while the kind row has focus
@@ -858,13 +858,23 @@ impl Dialog {
         put(buf, CONTENT_LEFT, 9, "Folder", FG_DIM);
         self.draw_input(buf, 10, &self.cwd_input, self.cwd_cursor, "", self.new_focus == NewFocus::Folder);
         if self.remote_offered() {
+            // a chip like the kind chips: raised and lit when on, flat and dim when off; coral while focused
             let focused = self.new_focus == NewFocus::Remote;
-            let mark = if self.new_remote { "[x]" } else { "[ ]" };
-            let x = put(buf, CONTENT_LEFT, NEW_REMOTE_Y, mark, if focused { ACCENT } else { WHITE });
-            let x = put(buf, x + 1, NEW_REMOTE_Y, "Remote Control", if focused { ACCENT } else { WHITE });
-            put(buf, x + 2, NEW_REMOTE_Y, "phone and claude.ai", FG_DIM);
+            let mark = if self.new_remote {
+                crate::glyphs::state(self.tier, '✓', '\u{F14A}')      // check-square
+            } else {
+                crate::glyphs::state(self.tier, ' ', '\u{F096}')      // square
+            };
+            let label = format!("{}{} Remote Control", mark, " ".repeat(crate::glyphs::extra(self.tier)));
+            let (bg, fg) = match (self.new_remote, focused) {
+                (_, true) => (BG_SELECTED, ACCENT),
+                (true, false) => (BG_SELECTED, WHITE),
+                (false, false) => (BG_RAISED, FG_DIM),
+            };
+            let x = toggle(buf, CONTENT_LEFT, NEW_REMOTE_Y, &label, bg, fg, self.new_remote);
+            put(buf, x + 2, NEW_REMOTE_Y, "in the Claude app and on claude.ai", FG_DIM);
         }
-        self.status_text_y(buf, NEW_REMOTE_Y + 1);
+        self.status_text_y(buf, NEW_REMOTE_Y + 2);
     }
 
     fn draw_rename(&mut self, buf: &mut Buffer) {
@@ -1234,12 +1244,17 @@ impl Dialog {
             self.validate_new();
             return;
         }
+        // Shift+Tab: most terminals send it as BackTab, some as Tab with Shift
+        if code == crossterm::event::KeyCode::BackTab || (code == crossterm::event::KeyCode::Tab && shift) {
+            self.cycle_new_focus(-1);
+            return;
+        }
         if code == crossterm::event::KeyCode::Tab {
             if self.new_focus == NewFocus::Folder && self.complete_folder() {
                 // Tab completed a path in the Folder field; focus stays in Folder.
                 return;
             }
-            self.cycle_new_focus(if shift { -1 } else { 1 });
+            self.cycle_new_focus(1);
             return;
         }
         if self.new_focus == NewFocus::Kind {
@@ -1262,8 +1277,10 @@ impl Dialog {
             },
             NewFocus::Name => {
                 if code == crossterm::event::KeyCode::Enter {
+                    // an empty name is fine (the session is named for you): Enter moves on to Folder either way,
+                    // unless the typed name is refused (its message is shown)
                     let name = self.name_input.trim().to_string();
-                    if !name.is_empty() && self.name_message(&name).is_none() {
+                    if name.is_empty() || self.name_message(&name).is_none() {
                         self.new_focus = NewFocus::Folder;
                         self.cwd_cursor = self.cwd_input.chars().count();
                     }
@@ -1752,8 +1769,6 @@ fn toggle(buf: &mut Buffer, x: usize, y: usize, label: &str, bg: Color, fg: Colo
     x + width
 }
 
-/// The kinds `<force-bin> kinds --json` reports, in the dialog's order; claude + shell when it cannot be
-/// asked (an older force) or answers nothing usable.
 /// The `remoteControl` setting from `force settings --json` (SPEC §53): its boolean, else on (no answer, an older
 /// Force without the key, anything unexpected).
 fn rc_default(out: Option<String>) -> bool {
@@ -1762,6 +1777,8 @@ fn rc_default(out: Option<String>) -> bool {
         .unwrap_or(true)
 }
 
+/// The kinds `<force-bin> kinds --json` reports, in the dialog's order; claude + shell when it cannot be
+/// asked (an older force) or answers nothing usable.
 fn parse_kinds(out: Option<String>) -> Vec<String> {
     let known = ["claude", "opencode", "shell"];
     let got: Vec<String> = out
@@ -2232,7 +2249,10 @@ mod tests {
         assert!(d.new_remote, "checked by default");
         let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 64, 17));
         d.draw(&mut buf);
-        assert!(rc_row(&buf).contains("[x] Remote Control"), "{:?}", rc_row(&buf));
+        assert!(rc_row(&buf).contains("✓ Remote Control"), "{:?}", rc_row(&buf));
+        let below = (0..buf.area().width).map(|x| buf.cell((x, NEW_REMOTE_Y as u16 + 1)).map(|c| c.symbol().to_string())
+            .unwrap_or_default()).collect::<String>();
+        assert!(below.trim().is_empty(), "a blank row between the chip and the status line: {below:?}");
         d.name_input = "portal".into();
         d.cwd_input = "/tmp".into();
         d.action_submit_new();
@@ -2257,7 +2277,7 @@ mod tests {
         assert!(!d.new_remote);
         let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 64, 17));
         d.draw(&mut buf);
-        assert!(rc_row(&buf).contains("[ ] Remote Control"));
+        assert!(rc_row(&buf).contains("Remote Control") && !rc_row(&buf).contains('✓'), "{:?}", rc_row(&buf));
         d.handle_key(rc_key(KeyCode::Enter, KeyModifiers::NONE), 0);
         assert!(d.done);
         assert_eq!(runner.logs.cockpit.borrow()[2],
@@ -2314,6 +2334,24 @@ mod tests {
         assert!(rc_default(Some(r#"{"intro": true}"#.into())), "an older Force without the key");
         assert!(rc_default(Some(r#"{"remoteControl": "no"}"#.into())), "not a boolean");
         assert!(!rc_default(Some(r#"{"remoteControl": false}"#.into())));
+    }
+
+    #[test]
+    fn new_shift_tab_goes_back_and_enter_on_an_empty_name_moves_on() {
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let mut d = Dialog::new(Kind::New, None, &reg, &snap, Box::new(FakeRunner::new()), Tier::Plain, 64, 17);
+        assert!(d.new_focus == NewFocus::Name);
+        d.handle_key(rc_key(KeyCode::BackTab, KeyModifiers::SHIFT), 0);     // how most terminals send Shift+Tab
+        assert!(d.new_focus == NewFocus::Kind, "Shift+Tab: back to Kind");
+        d.handle_key(rc_key(KeyCode::BackTab, KeyModifiers::SHIFT), 0);
+        assert!(d.new_focus == NewFocus::Remote, "and round to the last field");
+        d.handle_key(rc_key(KeyCode::Tab, KeyModifiers::NONE), 0);
+        d.handle_key(rc_key(KeyCode::Tab, KeyModifiers::NONE), 0);
+        assert!(d.new_focus == NewFocus::Name);
+        d.handle_key(rc_key(KeyCode::Enter, KeyModifiers::NONE), 0);
+        assert!(d.new_focus == NewFocus::Folder, "Enter on an empty name moves on (it is named for you)");
+        assert!(!d.done, "and creates nothing yet");
     }
 
     #[test]

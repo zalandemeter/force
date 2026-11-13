@@ -1274,7 +1274,7 @@ A Claude Code session starts with Remote Control (`--remote-control NAME`, §7.2
 
 | Part | |
 |---|---|
-| New dialog | a checkbox `[x] Remote Control` under Folder, shown only while the Claude Code chip is selected, checked by default. Focus order Kind → Name → Folder → Remote Control; Space toggles it when focused, Ctrl+R toggles it from any field, a click on its row toggles it; Enter on it creates |
+| New dialog | a `Remote Control` chip under Folder (raised and lit with a check when on, flat and dim when off; a blank row before the status line; the popup is 64×20), shown only while the Claude Code chip is selected, checked by default. Focus order Kind → Name → Folder → Remote Control; Space toggles it when focused, Ctrl+R toggles it from any field, a click on its row toggles it; Enter on it creates |
 | `force new --no-remote-control` | the dialog passes it only when unchecked (a checked box sends nothing, so an older remote Force still works). Refused for OpenCode and shell sessions (they have no Remote Control) |
 | registry | `extra.remote_control: false` on the entry; absent means on. Kept for the session's life: restarts, upgrades, renames, moves and unarchive start it the same way |
 | title sync (§47) | a session without Remote Control does not wait for a connection: `/rename NAME` is typed once it is idle with an empty input line, so Claude Code's own name follows renames and automatic names (§49.6) |
