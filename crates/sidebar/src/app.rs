@@ -232,6 +232,9 @@ const SHIMMER_FG: Color = Color::Rgb(0xf2, 0xd4, 0x9b);
 /// The glow on a waiting session's line 2 (SPEC §5 `watching`): a neutral light grey, so the grey card moves
 /// without asking for attention.
 const WAITING_SHIMMER_FG: Color = Color::Rgb(0xd0, 0xd0, 0xd0);
+/// The glow on an unread card's line 2 (SPEC §5 `unread`): a light blue of the card's own hue, not the warm working
+/// highlight, which read as yellow over the blue text.
+const UNREAD_SHIMMER_FG: Color = Color::Rgb(0xa8, 0xc7, 0xfa);
 const FINISH_CHECK: Color = Color::Rgb(0x87, 0xc0, 0x8f);
 
 struct FinishFlash {
@@ -1784,7 +1787,7 @@ impl App {
                     }
                     // working shimmer across the line-2 activity text
                     if line_idx == 1 && it.state == State::Working && self.anims.shimmer() && viewed {
-                        let glow = if it.watching && !it.unread { WAITING_SHIMMER_FG } else { SHIMMER_FG };
+                        let glow = if it.unread { UNREAD_SHIMMER_FG } else if it.watching { WAITING_SHIMMER_FG } else { SHIMMER_FG };
                         self.shimmer_row(&mut grid, y, now_ms, glow);
                     }
                     // the edge `▍` in column 1: the state's colour, coral for the own card, swept top to bottom when the
@@ -3500,6 +3503,22 @@ mod tests {
     }
 
     // --- shimmer: centre lit, far unchanged; subtle/off never shimmer -------------
+    #[test]
+    fn unread_glows_blue_not_yellow() {
+        // SPEC §5 unread: the blue card's line-2 glow is a light blue, not the warm working highlight
+        let (tmux, _) = FakeTmux::new();
+        let mut a = app_with(tmux);
+        let mut s = sess("s0", 0, State::Working, false, true);
+        s.order = 0;
+        s.unread = true;
+        s.activity = Some("editing the dialog".into());
+        a.set_now(NOW);
+        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
+        a.seen_viewed = true;
+        let g = a.build_grid_at(NOW + 800);
+        assert_eq!(g.row(BRAND_H + 1)[13].fg, lerp_bg(m::C_UNREAD_TEXT, UNREAD_SHIMMER_FG, 0.8), "blue text, lifted toward light blue");
+    }
+
     #[test]
     fn waiting_glows_grey_and_keeps_frames_coming() {
         // SPEC §5 watching: a waiting card is grey, but its line 2 still glows, in the neutral grey

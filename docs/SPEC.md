@@ -181,7 +181,7 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
     the flag is never set; opening the session clears it on the next tick.
   - The sidebar draws the whole card blue: icon and edge `#5c9cf5`, the line-2 activity (or the "working" label)
     `#5b8fd6` (about 4.6:1 on the card, like the working text). The spinner keeps turning; name and age stay
-    grey.
+    grey. Its line-2 glow sweeps in a light blue `#a8c7fa`, not the warm working highlight.
 - `watching` is a separate boolean flag, not a state: a Claude Code session whose turn is over while background
   work of its own still runs, work that ends by itself and after which the agent resumes on its own: a watcher
   loop, a CI watch, a long build or test run, a script, a background subagent, a Monitor. It is WORKING for
