@@ -200,10 +200,11 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
     treated as `idle` (your turn or idle, by the usual rules, with the turn-finished transition as for idle).
     Status `shell` with no background record in the transcript tail at all (launched long ago) stays watching,
     described as "a background command".
-  - Sidebar card: a still icon instead of the spinner (RICH: the hourglass U+F252, PLAIN `◷`), icon and edge
-    `#a6894d` (the dim working colour), line 2 `waiting · <description of the newest counting task>` (`+N` when
-    there are more), in the same colour; the age counts from the status change. The rail draws the same icon. An
-    unread finding (`unread`, blue) wins over the colours.
+  - Sidebar card: it asks nothing of you, so it looks idle: a still icon instead of the spinner (RICH: the
+    hourglass U+F252, PLAIN `◷`) in idle grey `#8a8a8a`, the idle edge, line 2 `waiting · <description of the
+    newest counting task>` (`+N` when there are more) in the same grey. Only the line-2 glow of working cards
+    still sweeps over it, in a neutral `#d0d0d0` instead of the warm working highlight. The age counts from the
+    status change. The rail draws the same icon. An unread finding (`unread`, blue) wins over the colours.
   - The reply that ends a turn into watching counts as a finding for `unread` (it is not a YOUR_TURN, so nothing
     else would show it): `reply_ms` also takes the newest finding of the last turn (`end_reply_ms`).
   - Header: `⠋ N working` counts only the sessions that are WORKING and not watching.

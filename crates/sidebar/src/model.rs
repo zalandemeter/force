@@ -51,9 +51,9 @@ pub const C_YOUR_TURN: Color = Color::Rgb(0x87, 0xc0, 0x8f);
 pub const C_DOWN: Color = Color::Rgb(0xd7, 0x5f, 0x5f);
 pub const C_YOUR_TURN_DIM: Color = Color::Rgb(0x79, 0xa5, 0x80); // #79a580
 pub const C_WORKING_DIM: Color = Color::Rgb(0xa6, 0x89, 0x4d); // #d7af5f at ~60% brightness
-/// A working session waiting on a background command of its own (SPEC §5, `watching`): its icon, edge and
-/// line-2 text use the dim working colour.
-pub const C_WATCHING: Color = C_WORKING_DIM;
+/// A working session waiting on background work of its own (SPEC §5, `watching`): nothing for you to do, so its
+/// icon and line-2 text are idle grey and its edge the idle edge; only the line-2 glow (app.rs) still moves.
+pub const C_WATCHING: Color = GREY;
 /// A working session whose agent wrote a finding you have not seen (SPEC §5, `unread`): its icon and edge ...
 pub const C_UNREAD: Color = Color::Rgb(0x5c, 0x9c, 0xf5); // #5c9cf5
 /// ... and its line-2 text: about 4.6:1 on the card, as readable as the working text.
@@ -148,7 +148,7 @@ pub fn item_edge_color(state: State, unread: bool, watching: bool) -> Color {
     if shows_unread(state, unread) {
         C_UNREAD
     } else if state == State::Working && watching {
-        C_WATCHING
+        edge_color(State::Idle)
     } else {
         edge_color(state)
     }
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn watching_is_a_still_hourglass_in_c_watching() {
         // SPEC §5: a WORKING claude session waiting on background work shows a still hourglass (RICH U+F252 /
-        // PLAIN ◷), not the spinner, and its icon and edge are #a6894d (C_WATCHING); nothing changes with now_ms.
+        // PLAIN ◷), not the spinner, its icon idle grey (C_WATCHING) and its edge the idle edge; nothing changes with now_ms.
         let mut s = sess(State::Working);
         s.watching = true;
         assert_eq!(card_glyph(Tier::Plain, &s, 0), '◷');
@@ -1389,7 +1389,7 @@ mod tests {
         assert_eq!(card_glyph(Tier::Rich, &s, 0), '\u{F252}');
         assert_eq!(card_glyph(Tier::Rich, &s, 7 * 125), '\u{F252}', "still: no filling pie with now_ms");
         assert_eq!(session_glyph_color(&s), C_WATCHING);
-        assert_eq!(card_edge_color(&s), C_WATCHING);
+        assert_eq!(card_edge_color(&s), edge_color(State::Idle));
         let l = line1(&s, 0, 29, NAME, Tier::Plain);
         assert_eq!(l[2].ch, '◷');
         assert_eq!(l[2].color, C_WATCHING);
