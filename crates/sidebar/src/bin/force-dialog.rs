@@ -25,7 +25,10 @@ struct Args {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    parse_args_from(std::env::args().skip(1).collect())
+}
+
+fn parse_args_from(args: Vec<String>) -> Result<Args, String> {
     let mut kind: Option<Kind> = None;
     let mut name: Option<String> = None;
     let mut registry: Option<String> = None;
@@ -37,7 +40,9 @@ fn parse_args() -> Result<Args, String> {
     while i < args.len() {
         let a = args[i].as_str();
         match a {
-            "new" | "rename" | "move" | "archive" | "delete" | "archived" | "jump" => {
+            // the first word is the dialog's kind, a second one the session's name: a session may well be called
+            // `new` (an automatic name) or `jump`, and `delete new` must open the delete dialog for it
+            _ if kind.is_none() && !a.starts_with("--") => {
                 kind = Some(parse_kind(a)?);
             }
             "--registry" => {
@@ -65,7 +70,10 @@ fn parse_args() -> Result<Args, String> {
                 if other.starts_with("--") {
                     return Err(format!("unknown argument: {}", other));
                 }
-                name = Some(other.to_string()); // "new" is its own arg kind; NAME is only for rename/archive/delete
+                if name.is_some() {
+                    return Err(format!("unexpected argument: {}", other));
+                }
+                name = Some(other.to_string()); // NAME, for rename/move/archive/delete
             }
         }
         i += 1;
@@ -203,3 +211,35 @@ fn main() {
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(words: &[&str]) -> Result<Args, String> {
+        let mut v: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+        v.extend(["--registry", "r", "--snapshot", "s", "--force-bin", "f", "--tmux-socket", "t"].map(String::from));
+        parse_args_from(v)
+    }
+
+    #[test]
+    fn a_session_named_like_a_dialog_is_its_name() {
+        // `force dialog delete new`: delete the session called `new` (an automatic name), not open the New dialog
+        for k in ["new", "jump", "archived", "rename", "move", "archive", "delete"] {
+            let a = parse(&["delete", k]).unwrap();
+            assert!(matches!(a.kind, Kind::Delete), "delete {k}");
+            assert_eq!(a.name.as_deref(), Some(k));
+        }
+        let a = parse(&["rename", "jump"]).unwrap();
+        assert!(matches!(a.kind, Kind::Rename) && a.name.as_deref() == Some("jump"));
+        let a = parse(&["new"]).unwrap();
+        assert!(matches!(a.kind, Kind::New) && a.name.is_none());
+    }
+
+    #[test]
+    fn bad_arguments_are_refused() {
+        assert!(parse(&["nope"]).is_err(), "an unknown kind");
+        assert!(parse(&["delete", "a", "b"]).is_err(), "two names");
+        assert!(parse(&[]).is_err(), "no kind");
+    }
+}

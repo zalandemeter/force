@@ -493,6 +493,12 @@ guarded by tests/test_dev_tree.py).
   no keyboard cursor; no scrollbar; `     archived (n)` and `   + new session` aligned with the names.
 - **Dialogs**: padded frame, sentence-case title, labelled fields, coloured status row (× / ✓), a
   docked key-hint footer.
+  `force-dialog KIND [NAME]`: the first word is the kind, the next the session's name, so a session called `new` or
+  `jump` (an automatic name starts as `new`) can be renamed, moved, archived and deleted. In New, Up/Down move between
+  the fields (no wrap; Tab and Shift+Tab wrap).
+  Lists (archived, jump): the mouse wheel moves the selection one entry per notch (no wrap). The archived list
+  counts its entries in the title (`Archived sessions (11)`) and shows `↑ N more` / `↓ N more` rows when entries are
+  out of view; a click on one pages up or down.
 - **Quit**: menu `q` or a click on `× quit` detach this terminal only; every session
   keeps running.
 - **Several terminals**: each attached terminal has its own current session. `force attach` opens on
@@ -1274,7 +1280,7 @@ A Claude Code session starts with Remote Control (`--remote-control NAME`, §7.2
 
 | Part | |
 |---|---|
-| New dialog | a checkbox `[x] Remote Control` under Folder, shown only while the Claude Code chip is selected, checked by default. Focus order Kind → Name → Folder → Remote Control; Space toggles it when focused, Ctrl+R toggles it from any field, a click on its row toggles it; Enter on it creates |
+| New dialog | a `Remote Control` chip under Folder (raised and lit with a check when on, flat and dim when off; a blank row before the status line; the popup is 64×20), shown only while the Claude Code chip is selected, checked by default. Focus order Kind → Name → Folder → Remote Control; Space toggles it when focused, Ctrl+R toggles it from any field, a click on its row toggles it; Enter on it creates |
 | `force new --no-remote-control` | the dialog passes it only when unchecked (a checked box sends nothing, so an older remote Force still works). Refused for OpenCode and shell sessions (they have no Remote Control) |
 | registry | `extra.remote_control: false` on the entry; absent means on. Kept for the session's life: restarts, upgrades, renames, moves and unarchive start it the same way |
 | title sync (§47) | a session without Remote Control does not wait for a connection: `/rename NAME` is typed once it is idle with an empty input line, so Claude Code's own name follows renames and automatic names (§49.6) |

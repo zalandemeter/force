@@ -21,7 +21,7 @@ from .cards import POPUP_STYLE
 FORCE = "$FORCE_BIN"          # set by tmux.conf / tmux-ui.conf (the live launcher unless an instance, SPEC §2.1)
 APP = "#{@force_app}/share"
 HELP_W, HELP_H = 72, 20          # the key help card (share/help.ansi fits inside, tests/test_keys.py checks)
-DIALOGS = {"jump": (64, 21), "new": (64, 18), "archived": (72, 21)}    # popup sizes (cli.overlay_close reopens them)
+DIALOGS = {"jump": (64, 21), "new": (64, 20), "archived": (72, 21)}    # popup sizes (cli.overlay_close reopens them)
 CHUCK_W, CHUCK_H = 72, 17        # Chuck's card (force support --ui, SPEC §50)
 UPDATE_W, UPDATE_H = 72, 20       # the update card (force update --ui, SPEC §3)
 CHUCK_STYLE = CARD_STYLE = POPUP_STYLE    # the cards' popups: the bars' surface, a light grey border (force/cards.py)
