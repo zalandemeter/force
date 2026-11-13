@@ -174,10 +174,26 @@ _server_body = b""
 _server_agents: list[str] = []          # the User-Agent of every request, newest last
 
 
+_server_conditional: list[str | None] = []   # the If-None-Match of every request, newest last
+
+
+def _etag() -> str:
+    import hashlib
+    return 'W/"' + hashlib.sha256(_server_body).hexdigest()[:12] + '"'
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         _server_agents.append(self.headers.get("User-Agent", ""))
+        _server_conditional.append(self.headers.get("If-None-Match"))
+        if self.headers.get("If-None-Match") == _etag():
+            self.send_response(304)          # as GitHub Pages: unchanged, no body
+            self.send_header("ETag", _etag())
+            self.end_headers()
+            return
         self.send_response(200)
+        self.send_header("ETag", _etag())
+        self.send_header("Last-Modified", "Fri, 13 Nov 2026 11:29:04 GMT")
         self.send_header("Content-Length", str(len(_server_body)))
         self.end_headers()
         self.wfile.write(_server_body)
@@ -301,6 +317,41 @@ def test_check_daemon_writes_update_json(fake_app, monkeypatch, tmp_path, http_s
     data = json.loads((state / "update.json").read_text())
     assert data["latest"] == "1.5.0"
     assert data["checked_ms"] > 0
+
+
+def test_check_daemon_is_conditional_after_the_first(fake_app, monkeypatch, tmp_path, http_server):
+    """SPEC §3: the hourly check sends the last ETag; an unchanged install.sh is a 304 that keeps the latest and
+    refreshes checked_ms; a new release (new ETag) is read again."""
+    state = tmp_path / "state"
+    (fake_app / "VERSION").write_text("1.0.0")
+    monkeypatch.setenv("FORCE_DOWNLOAD_BASE", http_server)
+    set_body(b'#!/bin/sh\nVERSION="1.5.0"\n')
+    _server_conditional.clear()
+    assert updates.check_daemon(state) == "1.5.0"
+    first = json.loads((state / "update.json").read_text())
+    assert first["etag"] == _etag() and first["last_modified"]
+    assert _server_conditional == [None]                      # the first check is a plain GET
+    (state / "update.json").write_text(json.dumps({**first, "checked_ms": 1}))
+    assert updates.check_daemon(state) == "1.5.0"             # 304: the known latest
+    again = json.loads((state / "update.json").read_text())
+    assert _server_conditional[-1] == first["etag"]
+    assert again["latest"] == "1.5.0" and again["checked_ms"] > 1 and again["etag"] == first["etag"]
+    set_body(b'#!/bin/sh\nVERSION="1.6.0"\n')                # a release: new body, new ETag
+    assert updates.check_daemon(state) == "1.6.0"
+    assert json.loads((state / "update.json").read_text())["etag"] == _etag()
+
+
+def test_check_daemon_sends_no_validator_without_a_known_latest(fake_app, monkeypatch, tmp_path, http_server):
+    """An update.json from before (no latest, or a bad one) never turns a check into a 304 with nothing known."""
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "update.json").write_text(json.dumps({"etag": "W/\"x\"", "checked_ms": 1}))
+    (fake_app / "VERSION").write_text("1.0.0")
+    monkeypatch.setenv("FORCE_DOWNLOAD_BASE", http_server)
+    set_body(b'#!/bin/sh\nVERSION="1.5.0"\n')
+    _server_conditional.clear()
+    assert updates.check_daemon(state) == "1.5.0"
+    assert _server_conditional == [None]
 
 
 def test_check_daemon_failure_keeps_old_file(fake_app, monkeypatch, tmp_path, http_server):

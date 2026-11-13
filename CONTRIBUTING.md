@@ -135,7 +135,7 @@ that the commit's CI passed (it waits while that CI still runs; the tests are no
 builds the Linux tarball in the builder container (static binaries, Force's own tmux) and the macOS one on a GitHub
 Mac. It then attests their provenance, publishes the GitHub Release with the tarballs, their `.sha256` and
 `install.sh`, and redeploys the website so that `curl -fsSL https://useforce.cc/install.sh | sh` installs the new
-version. Installed copies find it with `force update`, the sidebar's update note and their daily check. A pull
+version. Installed copies find it with `force update`, the sidebar's update note and their hourly check. A pull
 request that changes the release machinery runs the same builds as a dry run (version 0.0.0, nothing published).
 
 To build a release locally: `scripts/build-release.sh [X.Y.Z]` (needs Docker; output in `build/out/dist`;

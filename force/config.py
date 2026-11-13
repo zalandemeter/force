@@ -90,7 +90,7 @@ class Config:
     # admin's, kept current by them); true = Force keeps its own copy in ~/.local/share/force/opencode, updated to the latest
     # release like Claude Code updates itself (with auto_upgrade)
     opencode_managed: bool = False
-    # check once a day whether a newer Force exists (SPEC §3); a found update shows in the sidebar footer
+    # check hourly (and when a terminal opens the cockpit) whether a newer Force exists (SPEC §3); a found update shows in the sidebar footer
     check_updates: bool = True
     # classic: sidebar and header panes live in every session window of the host tmux (one server);
     # split: sessions alone in the host tmux, sidebar/header in a ui tmux per terminal that shows the
@@ -148,7 +148,7 @@ SETTINGS = [
     SettingSpec("opencodeManaged", "opencode_managed", "bool", (), True,
                "keep Force's own OpenCode copy on the latest release"),
     SettingSpec("checkForUpdates", "check_updates", "bool", (), True,
-               "check once a day whether a newer Force exists"),
+               "check hourly whether a newer Force exists"),
     SettingSpec("notifyCommand", "notify_command", "string", (), True,
                "command run when a session needs you, finishes or stops ($FORCE_MESSAGE, $FORCE_EVENT, …)"),
     SettingSpec("notifyWhenViewed", "notify_when_viewed", "bool", (), False,

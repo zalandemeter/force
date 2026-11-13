@@ -270,6 +270,8 @@ class Daemon:
         self._note_down: dict[str, tuple] = {}    # name -> (clock since down, state before) while down
         self._note_last: dict[tuple, float] = {}  # (name, event) -> clock of the last notification
         self._note_procs: list = []               # (Popen, clock started)
+        self._update_wake = threading.Event()     # wakes the update check early (SPEC §3)
+        self._client_names: set[str] | None = None  # tmux clients attached on the last tick
         # current tick state
         self._registry = []
         self._skipping = False
@@ -282,7 +284,8 @@ class Daemon:
         self._cockpit_killed[name] = True
 
     def _start_update_thread(self) -> None:
-        """A background check for a newer Force (SPEC §3): first 2 min after start, then every 24 h, only
+        """A background check for a newer Force (SPEC §3): first 2 min after start, then hourly, and soon after a
+        terminal opens the cockpit (`_update_wake`, set by `_note_clients`), at most one check per 10 min; only
         when the checkForUpdates setting is on and a base + running VERSION exist. It never blocks a tick and
         failures are silent; the snapshot picks the result up via <state>/update.json."""
         if not self.cfg.check_updates:
@@ -291,15 +294,33 @@ class Daemon:
             return
 
         def run() -> None:
-            time.sleep(updates._FIRST_DELAY)       # first check 2 min after start, then every 24 h
+            self._update_wake.wait(updates._FIRST_DELAY)
+            last = None
             while True:
-                try:
-                    updates.check_daemon(self.paths.state)
-                except Exception:
-                    pass
-                time.sleep(updates._INTERVAL)
+                self._update_wake.clear()
+                now = time.monotonic()
+                if last is None or now - last >= updates._MIN_GAP:
+                    last = now
+                    try:
+                        updates.check_daemon(self.paths.state)
+                    except Exception:
+                        pass
+                self._update_wake.wait(updates._INTERVAL)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _note_clients(self, clients) -> None:
+        """A terminal that opens the cockpit (a client name not attached on the last tick) wakes the update check
+        (SPEC §3), so a release out since the last hourly check shows when you sit down. The first tick only
+        records who is there."""
+        names = {c.name for c in clients}
+        try:            # split layout: a terminal attaches to the ui server; its host clients stay as they were
+            names |= {"ui:" + c.name for c in self.cockpit.ui_tmux.clients()}
+        except Exception:
+            pass
+        if self._client_names is not None and names - self._client_names:
+            self._update_wake.set()
+        self._client_names = names
 
     def _now_ms(self) -> int:
         return int(self.clock() * 1000)
@@ -952,6 +973,7 @@ class Daemon:
         now = self.clock()
         now_ms = int(now * 1000)
         clients = self.cockpit.tmux.clients()
+        self._note_clients(clients)
         viewed = {c.session for c in clients}
         names = {e.name for e in self._registry}
         for entry in self._registry:

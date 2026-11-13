@@ -70,7 +70,7 @@
     "checkForUpdates": {
       "type": "boolean",
       "default": true,
-      "description": "check once a day whether a newer Force exists"
+      "description": "check hourly whether a newer Force exists"
     },
     "notifyCommand": {
       "type": "string",
