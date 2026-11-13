@@ -167,6 +167,10 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
     block.
   - **Mid-turn**: a tool call follows it before the next prompt. A finding that ends the turn is its answer,
     which YOUR_TURN already shows.
+  - **Not a plan** (`activity.is_plan`): mid-turn text whose first sentence announces the next steps ("I'll make it…",
+    "Let me…", "Going with A.", "Building that split view now.", also after "Got it." / "Good,") is narration however
+    long, unless it asks you something (`?`). Measured on 355 real mid-turn findings: it removed 24, all plans. The
+    reply that ends a turn into watching is judged by length and structure alone (it is the agent's answer).
   - `reply_ms`, Claude Code: the `timestamp` of the newest such text block in the transcript's main thread
     (sidechains and API error records do not count; tool results are not prompts). OpenCode: the tick on which
     the count of such text parts in the last assistant message (a text part followed by a tool part; read while
