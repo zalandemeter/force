@@ -64,6 +64,17 @@ def test_menu_files_are_generated_from_the_table():
     assert menus.main(["--check"]) == 0, "run python -m force.menus"
 
 
+def test_update_menu_item_opens_the_card():
+    from force import menus
+    item = next(it for it in menus.ITEMS if it and it[2] == "update")
+    assert (item[0], item[1]) == ("U", "Update Force…")
+    assert "update --ui" in menus.classic()[1]["update"]
+    split = menus.split()[1]["update"]
+    assert "update --ui" in split and "FORCE_HOST" in split
+    for f in ("menu-classic.tmux", "menu-split.tmux"):
+        assert "update --ui" in (ROOT / "share" / f).read_text()
+
+
 def test_menu_items_never_take_arrows_and_have_unique_keys():
     from force import menus
     keys = [it[0] for it in menus.ITEMS if it]

@@ -1025,6 +1025,19 @@ impl App {
         }
     }
 
+    /// The update card (`force update --ui`, SPEC §3) in a popup, opened by a click on the update note. The note is
+    /// the shown host's (a ui showing a remote has that remote's snapshot), and so is the card: popup_env passes
+    /// FORCE_HOST, and the card then runs there.
+    fn open_update(&mut self) {
+        let client = self.own_client();
+        let env = self.popup_env();
+        let command = format!("{} update --ui", tmux::shell_quote(&self.cockpit_bin));
+        if let Err(e) = tmux::popup_with(self.tmux.as_ref(), client.as_deref(), &env, 72, 20,
+                                         &tmux::CHUCK_POPUP_STYLE, &command) {
+            self.show_error(format!("update: {}", e));
+        }
+    }
+
     fn popup_env(&self) -> Vec<(String, String)> {
         let mut env: Vec<(String, String)> = Vec::new();
         if self.ui_mode {
@@ -1146,6 +1159,10 @@ impl App {
         use crossterm::event::MouseEventKind as M;
         match kind {
             M::Down(MouseButton::Left) => {
+                if self.update_at(col as usize, row as usize) {
+                    self.open_update();
+                    return true;
+                }
                 if self.chip_at(col as usize, row as usize) {
                     self.open_hosts();
                     return true;
@@ -1890,6 +1907,19 @@ impl App {
         (x0 - 1..=x0 + self.chip_width()).contains(&x)
     }
 
+    /// Whether the given cell is on the clickable update note in the footer (SPEC §3): the note drawn when a newer
+    /// Force is available opens the update card. Not in rail mode (no footer there).
+    fn update_at(&self, x: usize, y: usize) -> bool {
+        if self.rail() || !self.footer_is_update() {
+            return false;
+        }
+        let Some(note) = self.footer_note() else { return false };
+        if Some(y) != self.h.checked_sub(1 + self.dock_h) {
+            return false;
+        }
+        x < note.chars().count()
+    }
+
     /// The host label set into the dock's rule, centred, like the header's labels: ` @ host ` (RICH: the
     /// codicon `remote` icon in a 2-cell slot), icon coral, name in the label colour; all red when the remote
     /// is down (its text then says offline / other version).
@@ -2579,6 +2609,65 @@ mod tests {
         let g = a.build_grid_at(NOW);
         let row: String = g.row(a.h - 1).iter().map(|c| c.ch).collect();
         assert!(row.contains("boom"), "{row:?}");
+    }
+
+    #[test]
+    fn update_click_opens_the_card_in_a_popup() {
+        let (mut tmux, log) = FakeTmux::new();
+        tmux.clients_.push(Client { name: "c0".into(), session: "own".into(), activity: 9 });
+        let mut a = app_with(tmux);
+        a.own = Some("own".into());
+        a.set_now(NOW);
+        let snap = Snapshot { update: Some("2.2.0".into()), smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        a.update_from_snapshot(Some(snap), NOW);
+        let _ = a.build_grid_at(NOW);
+        let y = a.h.checked_sub(1 + a.dock_h).unwrap();
+        assert!(a.footer_is_update() && a.footer_note().is_some(), "the update note is the footer");
+        assert!(a.update_at(0, y), "the note row is clickable");
+        assert!(a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 0, y as u16));
+        let log = log.lock().unwrap();
+        let e = log.iter().find(|e| e.first().map(|s| s.as_str()) == Some("display-popup")).expect("a popup");
+        assert_eq!(&e[1..6], &["-E", "-w", "72", "-h", "20"]);
+        for w in crate::tmux::CHUCK_POPUP_STYLE {
+            assert!(e.iter().any(|x| x == w), "styled like the card's: {w}");
+        }
+        assert_eq!(e.last().unwrap(), &format!("{} update --ui", crate::tmux::shell_quote("/bin/true")));
+    }
+
+    #[test]
+    fn update_click_without_a_newer_release_opens_nothing() {
+        let (mut tmux, log) = FakeTmux::new();
+        tmux.clients_.push(Client { name: "c0".into(), session: "own".into(), activity: 9 });
+        let mut a = app_with(tmux);
+        a.own = Some("own".into());
+        a.set_now(NOW);
+        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        a.update_from_snapshot(Some(snap), NOW);
+        let _ = a.build_grid_at(NOW);
+        let y = a.h.checked_sub(1 + a.dock_h).unwrap();
+        assert!(!a.footer_is_update(), "no update -> footer_is_update is false");
+        assert!(!a.update_at(0, y), "not clickable without an update");
+        a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 0, y as u16);
+        let log = log.lock().unwrap();
+        assert!(!log.iter().any(|e| e.first().map(|s| s.as_str()) == Some("display-popup")), "no popup");
+    }
+
+    #[test]
+    fn update_popup_passes_the_popup_env_in_ui_mode() {
+        let (mut tmux, log) = FakeTmux::new();
+        tmux.clients_.push(Client { name: "c0".into(), session: "own".into(), activity: 9 });
+        let mut a = app_with(tmux);
+        a.own = Some("own".into());
+        a.ui_mode = true;
+        a.set_now(NOW);
+        let snap = Snapshot { update: Some("2.2.0".into()), smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        a.update_from_snapshot(Some(snap), NOW);
+        let _ = a.build_grid_at(NOW);
+        let y = a.h.checked_sub(1 + a.dock_h).unwrap();
+        a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 0, y as u16);
+        let log = log.lock().unwrap();
+        let e = log.iter().find(|e| e.first().map(|s| s.as_str()) == Some("display-popup")).expect("a popup");
+        assert!(e.iter().any(|x| x.starts_with("FORCE_GLYPHS=")), "popup_env (-e FORCE_GLYPHS) is passed");
     }
 
     #[test]
