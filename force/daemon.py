@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import activity, kinds, report as report_mod, claude as claude_mod, opencode as opencode_mod, procinfo, remote as remote_mod, services, share as share_mod, updates, usage as usage_mod
 from . import config
+from . import registry as registry_mod
 from .config import Config, Paths, ensure_dirs
 from .lifecycle import Cockpit
 from .tmux import LEGACY_AGENT_ROLE, TmuxError
@@ -575,10 +576,16 @@ class Daemon:
     # --- step 2 ------------------------------------------------------------
     def _step_restore(self) -> None:
         for entry in self._registry:
-            if entry.archived:
+            if entry.archived or entry.extra.get("archiving") or entry.extra.get("moving"):
                 continue
             if not self.cockpit.tmux.has_session(entry.name):
-                self.cockpit.create(entry)
+                # the tick's registry can be older than an archive, delete or move that has just stopped this session:
+                # read it again, or the daemon brings back a session that is going away (a dead orphan, issue seen
+                # on an archive at the tick's moment)
+                fresh = registry_mod.load(self.paths.registry).get(entry.name)
+                if fresh is None or fresh.archived or fresh.extra.get("archiving") or fresh.extra.get("moving"):
+                    continue
+                self.cockpit.create(fresh)
                 print(f"force: started {entry.name}", file=sys.stderr)
 
     def _follow_opencode(self, entry, status) -> None:
