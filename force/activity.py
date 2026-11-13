@@ -184,6 +184,33 @@ def is_finding(text: str) -> bool:
             or len(_TABLE_ROW.findall(t)) >= 2 or "```" in t)
 
 
+# A plan, not a finding (SPEC §5, unread): mid-turn text whose first sentence announces what the agent is about to do
+# ("I'll make it a small diagram…", "Going with A.", "Building that split view now."), however long. Measured on 355
+# mid-turn texts that passed `is_finding`: this caught 22, all plans, and no report. A question to you keeps it a finding.
+_ACK = re.compile(r"^(?:ok(?:ay)?|good|great|sure|right|got it|understood|done|thanks|perfect|agreed)[,.:!]?\s+", re.I)
+_PLAN = re.compile(
+    r"^(?:i'll|i will|i'm going to|i am going to|let me|let's|now i'll|next,? i'll|first,? i'll|then i'll|"
+    r"going (?:to|with)|building|doing|taking|starting|switching|writing|adding|making|moving|checking|running)\b",
+    re.I)
+_SENTENCE_END = re.compile(r"(?<=[.!?:])\s")
+
+
+def is_plan(text: str) -> bool:
+    """Mid-turn text that announces the next steps rather than reporting (SPEC §5): its first sentence opens with an
+    intent ("I'll", "Let me", "Going with", "Building", …) and it asks you nothing ("?")."""
+    t = " ".join(text.split())
+    if "?" in t:
+        return False
+    t = _ACK.sub("", t, count=1)        # "Got it. I'll …": the plan is the sentence after the acknowledgement
+    m = _SENTENCE_END.search(t)
+    return bool(_PLAN.match(t[:m.start()] if m else t))
+
+
+def is_mid_turn_finding(text: str) -> bool:
+    """A finding written mid-turn (SPEC §5, unread): worth reading (`is_finding`) and not a plan (`is_plan`)."""
+    return is_finding(text) and not is_plan(text)
+
+
 class Background(NamedTuple):
     """One background task a transcript launched and has not reported ended (SPEC §5)."""
     tool_use_id: str
@@ -399,7 +426,7 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
             if b.get("type") == "tool_use":
                 tool_after = True
             elif (not replied and tool_after and b.get("type") == "text"
-                  and is_finding(str(b.get("text") or ""))):
+                  and is_mid_turn_finding(str(b.get("text") or ""))):
                 replied = True
                 reply_ms = _timestamp_ms(record.get("timestamp"))
             if end_turn and end_reply_ms is None and b.get("type") == "text" \

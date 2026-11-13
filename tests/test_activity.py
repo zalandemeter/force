@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from force.activity import Background, Scan, _model_short, describe, describe_config, is_endless, is_finding, scan, waiting_tasks
+from force.activity import Background, Scan, _model_short, describe, describe_config, is_endless, is_finding, is_mid_turn_finding, is_plan, scan, waiting_tasks
 
 
 def write(path, records):
@@ -309,6 +309,68 @@ def test_scan_reply_ms_is_the_newest_finding_mid_turn(tmp_path):
         _rec(("prompt", "go"), 0), *[_rec(("text", t), 1) for t in NARRATION], _rec(("tool",), 2),
     ])
     assert scan(narration_only)[3] is None
+
+
+PLANS = [
+    # real mid-turn texts that passed is_finding but only announce the next steps (SPEC §5)
+    "I'll make it a small diagram drawing itself, on brand. Three boxes trace their outlines, cables route between "
+    "them at right angles, and an orange signal pulse runs along the wires before the loop restarts. It'll be a static "
+    "SVG file, so the site's security policy allows it and it shows from the first paint.",
+    "Going with A. One design choice: the board builds the image with a plain `docker build` and no build args. So the "
+    "snapshot timestamp goes into the Dockerfile itself, where the board and CI read the same value every time, and "
+    "a rebuild months later still produces the same packages as the first one did.",
+    "Got it. Building the asset library as designed, then regenerating Shift Runner on it. Rough order:\n"
+    "1. **Import** every kit into the library\n2. **Bake** the shared materials once\n3. **Regenerate** the level",
+    "Building that split view now. QGroundControl's map is on the left, the Foxglove panels (3D, map, rate plots) on "
+    "the right. I'm leaving out the camera feed for now, because it would need its own bridge on the vehicle side, "
+    "and that bridge is a separate piece of work with its own tests.",
+]
+REPORTS_THAT_LOOK_LIKE_PLANS = [
+    # a question to you, a report that opens with an acknowledgement, a report whose verb only starts like a plan word
+    "I'll need your call on one thing before I go on: should the menu item restart the session now, or wait until it "
+    "is idle? Restarting now is quicker, but it cuts off whatever the agent is in the middle of doing at that moment, "
+    "and waiting can take as long as the turn does.",
+    "Got it: the base layout is the problem, not the missing effects. The page is grey boxes on grey, everything at one "
+    "scale, and the product shown small. Effects would not fix that; a layout with one clear focal point would, with "
+    "the product itself large.",
+    "Doinghaus confirmed the reading: with vsync off the CPU runs ahead and then waits for the GPU, so the average is "
+    "the GPU's real throughput, and the spikes are the frames where both happen to wait on each other at once, which "
+    "is why they come in pairs.",
+]
+
+
+@pytest.mark.parametrize("text", PLANS)
+def test_a_plan_is_not_a_mid_turn_finding(text):
+    assert is_plan(text) and not is_mid_turn_finding(text)
+
+
+def test_the_flagged_plan_was_long_enough_to_count_before():
+    assert is_finding(PLANS[0]), "the 308-character plan that turned a card blue (the reason for is_plan)"
+
+
+@pytest.mark.parametrize("text", REPORTS_THAT_LOOK_LIKE_PLANS)
+def test_reports_are_not_plans(text):
+    assert not is_plan(text)
+
+
+@pytest.mark.parametrize("text", FINDINGS)
+def test_findings_stay_mid_turn_findings(text):
+    assert is_mid_turn_finding(text)
+
+
+def test_scan_reply_ms_skips_a_plan_but_not_the_turn_ending_reply(tmp_path):
+    """SPEC §5: a plan before tool calls never turns a card blue; the reply that ends a turn is judged by is_finding
+    alone (it is the agent's answer, e.g. before it waits on a watcher)."""
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "make the loading state nicer"), 0),
+        _rec(("text", PLANS[0]), 1), _rec(("tool",), 2), _rec(("result",), 3),
+    ])
+    assert scan(p).reply_ms is None
+    q = write(tmp_path / "q.jsonl", [
+        _rec(("prompt", "watch it"), 0), _rec(("tool",), 1), _rec(("result",), 2),
+        _rec(("text", PLANS[0]), 5),
+    ])
+    assert scan(q).end_reply_ms == _ms(5)
 
 
 def test_scan_reply_ms_finding_and_tool_call_in_one_record(tmp_path):
