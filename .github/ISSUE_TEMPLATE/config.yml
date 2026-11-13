@@ -1,8 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Security problem
-    url: https://github.com/zalandemeter/force/security/policy
-    about: Don't post it here. Email hello@useforce.cc instead.
   - name: Documentation
     url: https://useforce.cc/docs.html
     about: Install, keys, sessions, other machines, notifications, scripting and every command.
