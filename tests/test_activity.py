@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from force.activity import _model_short, describe, describe_config, is_finding, scan
+from force.activity import Background, Scan, _model_short, describe, describe_config, is_endless, is_finding, is_mid_turn_finding, is_plan, scan, waiting_tasks
 
 
 def write(path, records):
@@ -209,14 +209,16 @@ def test_scan_returns_activity_model_effort_newest(tmp_path):
          "message": {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "reply"}]},
          "effort": "max"},
     ])
-    assert scan(p) == ("writing a reply", "opus 5.5", "max", None)
+    assert scan(p) == Scan("writing a reply", "opus 5.5", "max", None, None, (), False)
+    assert scan(p).activity == "writing a reply"
+    assert scan(p).background == ()
     # model/effort come from the newest assistant record even if it has no concrete action
     assert describe_config(p) == ("opus 5.5", "max")
 
 
 def test_scan_missing_file():
     from pathlib import Path
-    assert scan(Path("/no/such/file")) == (None, None, None, None)
+    assert scan(Path("/no/such/file")) == Scan(None, None, None, None, None, (), False)
     assert describe_config(Path("/no/such/file")) == (None, None)
 
 
@@ -309,6 +311,68 @@ def test_scan_reply_ms_is_the_newest_finding_mid_turn(tmp_path):
     assert scan(narration_only)[3] is None
 
 
+PLANS = [
+    # real mid-turn texts that passed is_finding but only announce the next steps (SPEC §5)
+    "I'll make it a small diagram drawing itself, on brand. Three boxes trace their outlines, cables route between "
+    "them at right angles, and an orange signal pulse runs along the wires before the loop restarts. It'll be a static "
+    "SVG file, so the site's security policy allows it and it shows from the first paint.",
+    "Going with A. One design choice: the board builds the image with a plain `docker build` and no build args. So the "
+    "snapshot timestamp goes into the Dockerfile itself, where the board and CI read the same value every time, and "
+    "a rebuild months later still produces the same packages as the first one did.",
+    "Got it. Building the asset library as designed, then regenerating Shift Runner on it. Rough order:\n"
+    "1. **Import** every kit into the library\n2. **Bake** the shared materials once\n3. **Regenerate** the level",
+    "Building that split view now. QGroundControl's map is on the left, the Foxglove panels (3D, map, rate plots) on "
+    "the right. I'm leaving out the camera feed for now, because it would need its own bridge on the vehicle side, "
+    "and that bridge is a separate piece of work with its own tests.",
+]
+REPORTS_THAT_LOOK_LIKE_PLANS = [
+    # a question to you, a report that opens with an acknowledgement, a report whose verb only starts like a plan word
+    "I'll need your call on one thing before I go on: should the menu item restart the session now, or wait until it "
+    "is idle? Restarting now is quicker, but it cuts off whatever the agent is in the middle of doing at that moment, "
+    "and waiting can take as long as the turn does.",
+    "Got it: the base layout is the problem, not the missing effects. The page is grey boxes on grey, everything at one "
+    "scale, and the product shown small. Effects would not fix that; a layout with one clear focal point would, with "
+    "the product itself large.",
+    "Doinghaus confirmed the reading: with vsync off the CPU runs ahead and then waits for the GPU, so the average is "
+    "the GPU's real throughput, and the spikes are the frames where both happen to wait on each other at once, which "
+    "is why they come in pairs.",
+]
+
+
+@pytest.mark.parametrize("text", PLANS)
+def test_a_plan_is_not_a_mid_turn_finding(text):
+    assert is_plan(text) and not is_mid_turn_finding(text)
+
+
+def test_the_flagged_plan_was_long_enough_to_count_before():
+    assert is_finding(PLANS[0]), "the 308-character plan that turned a card blue (the reason for is_plan)"
+
+
+@pytest.mark.parametrize("text", REPORTS_THAT_LOOK_LIKE_PLANS)
+def test_reports_are_not_plans(text):
+    assert not is_plan(text)
+
+
+@pytest.mark.parametrize("text", FINDINGS)
+def test_findings_stay_mid_turn_findings(text):
+    assert is_mid_turn_finding(text)
+
+
+def test_scan_reply_ms_skips_a_plan_but_not_the_turn_ending_reply(tmp_path):
+    """SPEC §5: a plan before tool calls never turns a card blue; the reply that ends a turn is judged by is_finding
+    alone (it is the agent's answer, e.g. before it waits on a watcher)."""
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "make the loading state nicer"), 0),
+        _rec(("text", PLANS[0]), 1), _rec(("tool",), 2), _rec(("result",), 3),
+    ])
+    assert scan(p).reply_ms is None
+    q = write(tmp_path / "q.jsonl", [
+        _rec(("prompt", "watch it"), 0), _rec(("tool",), 1), _rec(("result",), 2),
+        _rec(("text", PLANS[0]), 5),
+    ])
+    assert scan(q).end_reply_ms == _ms(5)
+
+
 def test_scan_reply_ms_finding_and_tool_call_in_one_record(tmp_path):
     rec = _rec(("text", FINDINGS[1]), 5)
     rec["message"]["content"].append({"type": "tool_use", "name": "Edit", "input": {}})
@@ -339,3 +403,152 @@ def test_scan_reply_ms_without_a_timestamp(tmp_path):
     p = write(tmp_path / "t.jsonl", [_rec(("prompt", "go"), 0), _rec(("text", FINDINGS[0]), 1), _rec(("tool",), 2),
                                      newest, _rec(("tool",), 6)])
     assert scan(p)[3] is None
+
+
+def test_scan_end_reply_ms_is_the_turn_ending_finding(tmp_path):
+    """SPEC §5: the reply that ends a turn counts for end_reply_ms whether or not a tool call follows it."""
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "go"), 0),
+        _rec(("text", FINDINGS[0]), 5),
+    ])
+    assert scan(p)[4] == _ms(5)
+    assert scan(p)[3] is None, "reply_ms (mid-turn) is unchanged: no tool call follows"
+
+
+def test_scan_end_reply_ms_none_for_short_narration(tmp_path):
+    """The last turn's final text is short narration: nothing to show."""
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "go"), 0),
+        _rec(("text", NARRATION[0]), 5),
+    ])
+    assert scan(p)[4] is None
+
+
+def test_scan_end_reply_ms_ignores_older_turns(tmp_path):
+    """A finding in an older turn (before the last prompt) does not count for end_reply_ms."""
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "go"), 0),
+        _rec(("text", FINDINGS[0]), 5), _rec(("tool",), 6), _rec(("result",), 7),
+        _rec(("prompt", "again"), 10),
+        _rec(("text", NARRATION[0]), 11),
+    ])
+    assert scan(p)[4] is None, "the older-turn finding is before the last prompt"
+
+
+def test_scan_end_reply_ms_newest_of_the_turn(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        _rec(("prompt", "go"), 0),
+        _rec(("text", FINDINGS[0]), 5), _rec(("tool",), 6),
+        _rec(("text", FINDINGS[1]), 8),
+    ])
+    assert scan(p)[4] == _ms(8), "newest finding in the newest turn"
+    assert scan(p)[3] == _ms(5), "reply_ms is the mid-turn finding, unchanged"
+
+
+# --- background tasks (SPEC §5) -------------------------------------------------
+
+def _bg(task_id, tool="Bash", desc="run the checks", command="", started=True):
+    return Background(tool_use_id=task_id, tool=tool, description=desc, command=command,
+                   started_ms=_ms(started) if started else None)
+
+
+def test_scan_collects_launched_background_tasks(tmp_path):
+    """Bash with run_in_background, Agent with run_in_background, and Monitor all count as launched."""
+    p = write(tmp_path / "t.jsonl", [
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:01.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {
+             "command": "pytest -q", "description": "run the tests",
+             "run_in_background": True}}]}},
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:02.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "a1", "name": "Agent", "input": {
+             "description": "plan the refactor", "run_in_background": True}}]}},
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:03.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "m1", "name": "Monitor", "input": {
+             "description": "watch the deploy"}}]}},
+    ])
+    s = scan(p)
+    assert [t.tool for t in s.background] == ["Bash", "Agent", "Monitor"]    # oldest first
+    bash = s.background[0]
+    assert bash.command == "pytest -q" and bash.tool_use_id == "b1"
+    assert s.launched_any is True
+
+
+def test_scan_background_ended_by_notice(tmp_path):
+    """A notice with a final <status> ends the task (Monitors' event notices do not)."""
+    def launch(tool, tid, ts, desc):
+        return {"type": "assistant", "timestamp": f"2026-11-11T10:00:{ts:02d}.000Z",
+               "message": {"content": [{"type": "tool_use", "id": tid, "name": tool, "input": {
+                   "description": desc, "run_in_background": True}}]}}
+    def notice(tid, status, ts):
+        return {"type": "user", "timestamp": f"2026-11-11T10:00:{ts:02d}.000Z",
+               "message": {"content": f"<task-notification><tool-use-id>{tid}</tool-use-id>"
+                                     f"<status>{status}</status></task-notification>"}}
+    p = write(tmp_path / "t.jsonl", [
+        launch("Bash", "b1", 1, "run pytest"),
+        notice("b1", "completed", 2),
+        launch("Bash", "b2", 3, "run more"),
+        notice("b2", "event", 4),       # a Monitor-style event notice: not a final status
+        launch("Monitor", "m1", 5, "monitor prod"),
+        notice("m1", "running", 6),    # an event notice: not ended
+    ])
+    s = scan(p)
+    assert [t.tool_use_id for t in s.background] == ["b2", "m1"]   # b1 completed -> dropped
+
+
+def test_scan_notice_with_two_blocks_ends_both(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:01.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {
+             "description": "a", "run_in_background": True}}]}},
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:02.000Z",
+         "message": {"content": [{"type": "tool_use", "id": "a1", "name": "Agent", "input": {
+             "description": "b", "run_in_background": True}}]}},
+        {"type": "user", "message": {"content": [{"type": "text",
+             "text": ("<task-notification><tool-use-id>b1</tool-use-id><status>stopped</status></task-notification>"
+                      "<task-notification><tool-use-id>a1</tool-use-id><status>failed</status></task-notification>")}]}},
+    ])
+    assert scan(p).background == ()
+
+
+def test_scan_background_sidechain_ignored(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        {"type": "assistant", "timestamp": "2026-11-11T10:00:01.000Z", "isSidechain": True,
+         "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {
+             "description": "bg", "run_in_background": True}}]}},
+    ])
+    s = scan(p)
+    assert s.background == () and s.launched_any is False
+
+
+def test_is_endless_patterns():
+    # SPEC §5 "Endless commands": servers/followers never make a session watching.
+    assert is_endless("gh pr checks 31 --watch") is False
+    assert is_endless("tsc --watch") is True
+    assert is_endless("npm run build") is False
+    assert is_endless("npm run dev") is True
+    assert is_endless("docker compose up -d") is False
+    assert is_endless("docker compose up") is True
+    assert is_endless("docker-compose up --detach") is False
+    assert is_endless("tail -f x.log") is True
+    assert is_endless("pytest -q") is False
+    assert is_endless("while :; do run; sleep 120; done") is False
+    assert is_endless("vite") is True
+    assert is_endless("vite build") is False
+    assert is_endless("cargo watch") is True
+    assert is_endless("jest --watch") is True
+    assert is_endless("python -m http.server 8000") is True
+
+
+def test_waiting_tasks_cutoffs():
+    now = _ms(0)
+    bg = [_bg("b1", started=1), _bg("a1", tool="Agent", started=2), _bg("m1", tool="Monitor", started=3)]
+    # Bash counts only with status shell
+    assert [t.tool_use_id for t in waiting_tasks("idle", bg, None, now)] == ["a1", "m1"]
+    assert [t.tool_use_id for t in waiting_tasks("shell", bg, None, now)] == ["b1", "a1", "m1"]
+    assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=1), _bg("b2", command="npm run dev", started=2)],
+                                                 None, now)] == ["b1"]
+    # older than the process start -> dropped (when both known)
+    assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=1)], _ms(10), now)] == []
+    # older than 24 h -> dropped; a task with no started_ms is kept
+    assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=1)], None, _ms(90000))] == []
+    assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=None)], None, now)] == ["b1"]

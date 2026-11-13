@@ -217,7 +217,8 @@ fn truncate_name(name: &str, limit: Option<usize>) -> String {
 }
 
 fn working_count(snap: &Snapshot) -> usize {
-    snap.sessions.iter().filter(|s| !s.archived && !s.support && s.state == State::Working).count()
+    // SPEC §5: `⠋ N working` counts only the sessions that are WORKING and not watching.
+    snap.sessions.iter().filter(|s| !s.archived && !s.support && s.state == State::Working && !s.watching).count()
 }
 
 fn spinner(now_ms: i64) -> char {
@@ -486,8 +487,9 @@ impl Header {
     }
 
     pub fn any_working(&self) -> bool {
+        // SPEC §5: a watching session has nothing turning, so it does not keep the spinner alive.
         match &self.snapshot {
-            Some(snap) => snap.sessions.iter().any(|s| !s.archived && s.state == State::Working),
+            Some(snap) => snap.sessions.iter().any(|s| !s.archived && s.state == State::Working && !s.watching),
             None => false,
         }
     }
@@ -1322,6 +1324,7 @@ mod tests {
             kind: "claude".into(),
             support: false,
             unread: false,
+            watching: false,
         }
     }
 
@@ -1371,6 +1374,17 @@ mod tests {
         let pills = attention_pills(&s, Some("own"));
         assert_eq!(pills.len(), 1, "only the listed session that needs you");
         assert_eq!(working_count(&snap(vec![sess("a", 1, State::Working, false, None, false), busy_chuck])), 1);
+    }
+
+    #[test]
+    fn working_count_excludes_watching() {
+        // SPEC §5: `⠋ N working` counts only the sessions that are WORKING and not watching.
+        let mut watch = sess("w", 1, State::Working, false, Some("watching a command"), false);
+        watch.watching = true;
+        assert_eq!(working_count(&snap(vec![
+            sess("a", 1, State::Working, false, None, false),
+            watch,
+        ])), 1, "the watching session is not counted");
     }
 
     fn snap(sessions: Vec<Session>) -> Snapshot {

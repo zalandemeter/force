@@ -149,6 +149,15 @@ def host_tmux_prefix(paths, r: Remote) -> str:
 
 
 # --------------------------------------------------------------------------- the host side ------------
+def _release_of(app) -> str | None:
+    """The release the `app` link points at, or None while it is missing or being swapped (an upgrade replaces the
+    link; macOS's realpath can raise EINVAL in that moment): the next check sees the new one."""
+    try:
+        return os.path.realpath(app) if os.path.lexists(app) else None
+    except OSError:
+        return None
+
+
 def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, heartbeat: float = 2.0,
           out=sys.stdout, inp=sys.stdin) -> int:
     """`force watch` (on a host): a hello line, then {"snapshot", "registry"} whenever the snapshot changes
@@ -182,9 +191,10 @@ def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, hear
         out.flush()
         last, beat = None, 0.0
         app = paths.home / "app"
-        live = os.path.realpath(app) if app.exists() else None
+        live = _release_of(app)
         while True:
-            if live and os.path.realpath(app) != live:
+            now_live = _release_of(app)
+            if live and now_live and now_live != live:
                 return 0            # upgraded: the reader reconnects to the new version (its hello)
             try:
                 st = os.stat(paths.snapshot)
@@ -220,7 +230,9 @@ def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, hear
 # --------------------------------------------------------------------------- the client side ----------
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    # one temp file per thread: the daemon's tick and a watcher's reader thread write the same status file, and a
+    # shared name let one's replace take the other's file away (FileNotFoundError)
+    tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(data, separators=(",", ":")))
     os.replace(tmp, path)
 

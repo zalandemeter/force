@@ -11,6 +11,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 _TAIL = 256 * 1024           # read at most this many bytes from the end of the transcript
 
@@ -183,6 +184,180 @@ def is_finding(text: str) -> bool:
             or len(_TABLE_ROW.findall(t)) >= 2 or "```" in t)
 
 
+# A plan, not a finding (SPEC §5, unread): mid-turn text whose first sentence announces what the agent is about to do
+# ("I'll make it a small diagram…", "Going with A.", "Building that split view now."), however long. Measured on 355
+# mid-turn texts that passed `is_finding`: this caught 22, all plans, and no report. A question to you keeps it a finding.
+_ACK = re.compile(r"^(?:ok(?:ay)?|good|great|sure|right|got it|understood|done|thanks|perfect|agreed)[,.:!]?\s+", re.I)
+_PLAN = re.compile(
+    r"^(?:i'll|i will|i'm going to|i am going to|let me|let's|now i'll|next,? i'll|first,? i'll|then i'll|"
+    r"going (?:to|with)|building|doing|taking|starting|switching|writing|adding|making|moving|checking|running)\b",
+    re.I)
+_SENTENCE_END = re.compile(r"(?<=[.!?:])\s")
+
+
+def is_plan(text: str) -> bool:
+    """Mid-turn text that announces the next steps rather than reporting (SPEC §5): its first sentence opens with an
+    intent ("I'll", "Let me", "Going with", "Building", …) and it asks you nothing ("?")."""
+    t = " ".join(text.split())
+    if "?" in t:
+        return False
+    t = _ACK.sub("", t, count=1)        # "Got it. I'll …": the plan is the sentence after the acknowledgement
+    m = _SENTENCE_END.search(t)
+    return bool(_PLAN.match(t[:m.start()] if m else t))
+
+
+def is_mid_turn_finding(text: str) -> bool:
+    """A finding written mid-turn (SPEC §5, unread): worth reading (`is_finding`) and not a plan (`is_plan`)."""
+    return is_finding(text) and not is_plan(text)
+
+
+class Background(NamedTuple):
+    """One background task a transcript launched and has not reported ended (SPEC §5)."""
+    tool_use_id: str
+    tool: str            # "Bash" | "Agent" | "Monitor" (or another tool with run_in_background)
+    description: str
+    command: str         # "" unless Bash
+    started_ms: int | None   # the record's timestamp
+
+
+class Scan(NamedTuple):
+    """The result of `scan`: the single-line activity, the newest model/effort, the unread reply times (SPEC §5)
+    and the `background` tasks (oldest first) the transcript tail shows still running, plus `launched_any` (whether
+    any background record appeared there at all)."""
+    activity: str | None
+    model: str | None
+    effort: str | None
+    reply_ms: int | None
+    end_reply_ms: int | None
+    background: tuple[Background, ...] = ()
+    launched_any: bool = False
+
+
+def _task_desc(task: Background) -> str:
+    """The one-line description of a counting task, with a fallback when it has no description (SPEC §5)."""
+    if task.description:
+        return task.description
+    return {"Bash": "a background command", "Agent": "a subagent", "Monitor": "a monitor"}.get(task.tool,
+                                                                                               "a background command")
+
+
+def waiting_tasks(status_word: str, background, process_start_ms: int | None, now_ms: int | None) -> list[Background]:
+    """The counting tasks of a watching session (SPEC §5): the launched, not-ended background tasks that make the
+    session watching. Tasks with a `started_ms` older than the process it runs in (they died with an earlier process)
+    or older than 24 h stay (see below) never count; a Bash task counts as running only while the status is `shell`;
+    endless commands (`is_endless`) never count. Agent and Monitor always count."""
+    out = []
+    for t in background:
+        if t.started_ms is not None:
+            if now_ms is not None and t.started_ms < now_ms - 24 * 3600 * 1000:
+                continue
+            if process_start_ms is not None and t.started_ms < process_start_ms:
+                continue
+        if t.tool == "Bash" and (status_word != "shell" or is_endless(t.command)):
+            continue
+        out.append(t)
+    return out
+
+
+# --- background-task notices (SPEC §5) -----------------------------------------
+# A user record that ends a background task holds one or more <task-notification> blocks, each with a
+# <tool-use-id> and a <status>; the launched task is "ended" only when that status is a final one.
+_TASK_NOTICE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
+_TOOL_USE_ID = re.compile(r"<tool-use-id>([^<]+)</tool-use-id>", re.I)
+_TASK_STATUS = re.compile(r"<status>([^<]+)</status>", re.I)
+_ENDED_STATUSES = ("completed", "failed", "killed", "stopped", "expired")
+
+
+def _ended_ids(record: dict) -> set[str]:
+    """The background tool-use ids a user record reports as ended (a final task-notification status)."""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+    else:
+        text = ""
+    ended = set()
+    for block in _TASK_NOTICE.findall(text) or ([text] if text else []):
+        m = _TOOL_USE_ID.search(block)
+        s = _TASK_STATUS.search(block)
+        if m and s and s.group(1).lower() in _ENDED_STATUSES:
+            ended.add(m.group(1))
+    return ended
+
+
+def _launched_tasks(record: dict) -> list[Background]:
+    """Background tasks an assistant record launches: any tool_use with `input.run_in_background` true, or a
+    Monitor tool_use (SPEC §5). Carries the record's timestamp as `started_ms`."""
+    message = record.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else None
+    out = []
+    if not isinstance(blocks, list):
+        return out
+    ts = _timestamp_ms(record.get("timestamp"))
+    for b in blocks:
+        if not isinstance(b, dict) or b.get("type") != "tool_use":
+            continue
+        name = str(b.get("name") or "")
+        inp = b.get("input")
+        inp = inp if isinstance(inp, dict) else {}
+        if not (inp.get("run_in_background") or name == "Monitor"):
+            continue
+        command = str(inp.get("command") or "") if name == "Bash" else ""
+        out.append(Background(
+            tool_use_id=str(b.get("id") or ""),
+            tool=name,
+            description=str(inp.get("description") or "").strip(),
+            command=command,
+            started_ms=ts,
+        ))
+    return out
+
+
+# --- endless commands (SPEC §5): servers and followers that run until stopped -------------------------------
+# Each pattern has a comment naming the case it covers.
+_ENDLESS: tuple[re.Pattern, ...] = (
+    # `npm|pnpm|yarn|bun run dev|start|serve`: a dev/build server that runs until stopped.
+    re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+run\s+(?:dev|start|serve)\b"),
+    # `next dev`: the Next.js dev server.
+    re.compile(r"\bnext\s+dev\b"),
+    # Python web servers / REPLs that run until stopped.
+    re.compile(r"\buvicorn\b"),
+    re.compile(r"\bgunicorn\b"),
+    re.compile(r"\bflask\s+run\b"),
+    re.compile(r"\bmanage\.py\s+runserver\b"),
+    re.compile(r"\bpython\s+-m\s+http\.server\b"),
+    re.compile(r"\bjupyter\b"),
+    # log/port/stream followers that run until stopped.
+    re.compile(r"\btail\s+-(?:f|F)\b"),
+    re.compile(r"\bjournalctl\s+-f\b"),
+    re.compile(r"\bkubectl\s+logs\s+-f\b"),
+    # `cargo watch` re-runs on every change forever.
+    re.compile(r"\bcargo\s+watch\b"),
+)
+
+
+def is_endless(command: str) -> bool:
+    """True when `command` runs until stopped (a server or follower), so it never makes a session watching
+    (SPEC §5). Everything else ends by itself and counts."""
+    c = command.strip()
+    if any(p.search(c) for p in _ENDLESS):
+        return True
+    # `vite` alone is a dev server that runs until stopped; `vite build` is a build that ends.
+    if re.search(r"\bvite\b", c) and not re.search(r"\bvite\s+build\b", c):
+        return True
+    # `docker compose up` / `docker-compose up` run a stack until stopped, unless detached.
+    if re.search(r"\b(?:docker\s+compose|docker-compose)\s+up\b", c) \
+            and not re.search(r"(?:-d|--detach)\b", c):
+        return True
+    # a `--watch` of a builder (tsc/webpack/jest/vitest/nodemon) follows files until stopped; `gh`'s
+    # `--watch` is a poll that ends, so it never counts.
+    return bool(re.search(r"\b(?:tsc|webpack|jest|vitest|nodemon)\b", c)
+               and "--watch" in c
+               and not re.search(r"\bgh\b", c))
+
+
 def _is_prompt(record: dict) -> bool:
     """A user record that starts a turn: anything but the tool results Claude Code also records as user."""
     message = record.get("message")
@@ -191,18 +366,23 @@ def _is_prompt(record: dict) -> bool:
                 and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks))
 
 
-def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, str | None, int | None]:
-    """(activity, model_short, effort, reply_ms) from the tail of `transcript`: `activity` from the newest
-    concrete assistant turn, `model_short`/`effort` from the newest non-sidechain assistant record, and
-    `reply_ms` (SPEC §5, unread) from the newest finding (`is_finding`) written mid-turn: a tool call follows it
-    before the next prompt. All four are read from the file in a single pass. Each is None when the file is
-    missing/unreadable or no suitable record is found."""
+def scan(transcript: Path, max_len: int = 60) -> Scan:
+    """A `Scan` from the tail of `transcript`: `activity` from the newest concrete assistant turn,
+    `model_short`/`effort` from the newest non-sidechain assistant record, `reply_ms` (SPEC §5, unread) from the
+    newest finding (`is_finding`) written mid-turn (a tool call follows it before the next prompt), `end_reply_ms` from
+    the newest finding in the newest turn (whether or not a tool call follows it), and `background` the launched,
+    not-ended background tasks (oldest first) with `launched_any` whether any background record appeared. Everything
+    is read from the file in a single pass; each is empty/None when the file is missing/unreadable or no suitable
+    record is found."""
     lines = _scan_tail(transcript)
     if lines is None:
-        return None, None, None, None
-    model = effort = reply_ms = None
+        return Scan(None, None, None, None, None, (), False)
+    model = effort = reply_ms = end_reply_ms = None
     newest = replied = tool_after = False
+    end_turn = True     # still in the newest turn until we walk back past its starting prompt
     desc = None
+    launched: list[Background] = []
+    ended: set[str] = set()
     for line in reversed(lines):
         if not line.strip():
             continue
@@ -214,6 +394,10 @@ def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, s
             continue
         if record.get("type") == "user" and _is_prompt(record):
             tool_after = False          # walking back past a prompt: the tool calls seen belong to a later turn
+            end_turn = False            # walking back past a prompt: the records seen belong to an older turn
+        if record.get("type") == "user":
+            ended.update(_ended_ids(record))
+            continue
         if record.get("type") != "assistant":
             continue
         message = record.get("message")
@@ -222,6 +406,7 @@ def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, s
         if record.get("isApiErrorMessage") or (
                 isinstance(message, dict) and str(message.get("model", "")).startswith("<")):
             continue
+        launched.extend(_launched_tasks(record))
         if not newest:
             newest = True
             if isinstance(message, dict):
@@ -241,10 +426,15 @@ def scan(transcript: Path, max_len: int = 60) -> tuple[str | None, str | None, s
             if b.get("type") == "tool_use":
                 tool_after = True
             elif (not replied and tool_after and b.get("type") == "text"
-                  and is_finding(str(b.get("text") or ""))):
+                  and is_mid_turn_finding(str(b.get("text") or ""))):
                 replied = True
                 reply_ms = _timestamp_ms(record.get("timestamp"))
-    return desc, model, effort, reply_ms
+            if end_turn and end_reply_ms is None and b.get("type") == "text" \
+                    and is_finding(str(b.get("text") or "")):
+                end_reply_ms = _timestamp_ms(record.get("timestamp"))
+    # oldest first (we walked backwards); drop the launched tasks a later notice reported ended
+    background = tuple(t for t in reversed(launched) if t.tool_use_id not in ended)
+    return Scan(desc, model, effort, reply_ms, end_reply_ms, background, bool(launched))
 
 
 def describe(transcript: Path, max_len: int = 60) -> str | None:
