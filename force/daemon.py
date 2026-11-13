@@ -250,6 +250,8 @@ class Daemon:
         # cockpit-initiated kill marks
         self._cockpit_killed: dict[str, bool] = {}
         self.cockpit.on_cockpit_kill = self._mark
+        # before the thread starts: it waits on this at once (1.4.0–1.4.2 created it later, and the hourly check died)
+        self._update_wake = threading.Event()     # wakes the update check early (SPEC §3)
         self._start_update_thread()
         # crash restarts per name (list of clock timestamps)
         self._crash_restarts: dict[str, list[float]] = {}
@@ -286,7 +288,10 @@ class Daemon:
         self._note_down: dict[str, tuple] = {}    # name -> (clock since down, state before) while down
         self._note_last: dict[tuple, float] = {}  # (name, event) -> clock of the last notification
         self._note_procs: list = []               # (Popen, clock started)
-        self._update_wake = threading.Event()     # wakes the update check early (SPEC §3)
+        # autoUpdate (SPEC §46): the last look, the version tried and when, the running `force update --here`
+        self._auto_looked = 0.0
+        self._auto_tried: dict[str, float] = {}
+        self._auto_proc = None
         self._client_names: set[str] | None = None  # tmux clients attached on the last tick
         # SPEC §53 follow Claude: name -> (pid, seen connected in this pid, disconnected since ms or None)
         self._rc_seen: dict[str, tuple[int, bool, int | None]] = {}
@@ -326,6 +331,59 @@ class Daemon:
                 self._update_wake.wait(updates._INTERVAL)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _remote_versions(self) -> tuple:
+        """The Force each connected, enabled remote runs (its last hello, SPEC §46): the sidebar's update note also
+        says so when only a remote is behind."""
+        out = []
+        try:
+            for r in remote_mod.load(self.paths):
+                if r.enabled:
+                    st = remote_mod.read_status(self.paths, r.name)
+                    if st.get("state") == "connected" and st.get("version"):
+                        out.append(st["version"])
+        except Exception:
+            pass
+        return tuple(out)
+
+    def _step_auto_update(self) -> None:
+        """autoUpdate (SPEC §46): once the hourly check found a newer release and no terminal attached to the cockpit
+        (host or ui server) has had a key or click for 10 min, install it (`force update --here`, detached, its output
+        in <state>/update.log). One try per version every 6 h; sessions keep running."""
+        if not (self.cfg.auto_update and self.cfg.check_updates):
+            return
+        now = self.clock()
+        if now - self._auto_looked < 60:
+            return
+        self._auto_looked = now
+        cur, latest = updates.current_version(), updates.latest_known(self.paths.state)
+        if cur is None or latest is None or updates.download_base() is None:
+            return
+        if updates._tuple(latest) <= updates._tuple(cur):
+            return
+        if now - self._auto_tried.get(latest, -1e12) < 6 * 3600:
+            return
+        if self._auto_proc is not None and self._auto_proc.poll() is None:
+            return
+        clients = list(self.cockpit.tmux.clients())
+        try:
+            clients += list(self.cockpit.ui_tmux.clients())
+        except Exception:
+            pass
+        wall = time.time()
+        if any(wall - c.activity < 600 for c in clients):
+            return                                  # someone is at the cockpit: not now
+        self._auto_tried[latest] = now
+        try:
+            log = open(self.paths.state / "update.log", "ab")
+            self._auto_proc = subprocess.Popen([config.launcher_path(), "update", "--here"], stdout=log,
+                                               stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                               start_new_session=True)
+            log.close()
+        except OSError as e:
+            _log("auto_update", e)
+            return
+        print(f"force: autoUpdate: installing Force {latest} (was {cur})", file=sys.stderr)
 
     def _note_clients(self, clients) -> None:
         """A terminal that opens the cockpit (a client name not attached on the last tick) wakes the update check
@@ -560,6 +618,7 @@ class Daemon:
                 ("remotes", self._step_remotes, False),
                 ("tiers", self._step_tiers, False),
                 ("opencode_update", self._step_opencode_update, False),
+                ("auto_update", self._step_auto_update, False),
                 ("reload", self._step_reload, False),
             ]
             for name, fn, sc in steps:
@@ -1193,7 +1252,7 @@ class Daemon:
                                if limits else None),
                         limits=limits,
                         smoke=self._smoke_status(),
-                        update=updates.snapshot_update(self.paths.state))
+                        update=updates.snapshot_update(self.paths.state, self._remote_versions()))
         write_snapshot(self.paths.snapshot, snap)
         # The header is a pane (`force header`) reading the snapshot; no status-line files any more.
 

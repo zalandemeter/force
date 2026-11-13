@@ -92,6 +92,8 @@ class Config:
     opencode_managed: bool = False
     # check hourly (and when a terminal opens the cockpit) whether a newer Force exists (SPEC §3); a found update shows in the sidebar footer
     check_updates: bool = True
+    # install a newer Force by itself once nobody has typed in the cockpit for 10 min (SPEC §46)
+    auto_update: bool = True
     # new Claude Code sessions start with Remote Control (SPEC §53): `force new`'s and the New dialog's default
     remote_control: bool = True
     # classic: sidebar and header panes live in every session window of the host tmux (one server);
@@ -151,6 +153,8 @@ SETTINGS = [
                "keep Force's own OpenCode copy on the latest release"),
     SettingSpec("checkForUpdates", "check_updates", "bool", (), True,
                "check hourly whether a newer Force exists"),
+    SettingSpec("autoUpdate", "auto_update", "bool", (), True,
+               "install a newer Force by itself when nobody has typed in the cockpit for 10 min"),
     SettingSpec("remoteControl", "remote_control", "bool", (), True,
                "new Claude Code sessions start with Remote Control (the New dialog's default)"),
     SettingSpec("notifyCommand", "notify_command", "string", (), True,

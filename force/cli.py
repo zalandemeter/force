@@ -2356,9 +2356,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", default=None, help="install this release instead of the latest")
     p.add_argument("--check", action="store_true", help="only say whether a newer release exists")
 
-    p = sub.add_parser("update", help="update Force to the latest release (—check just says whether one exists)")
+    p = sub.add_parser("update", help="update Force on this machine and every remote (—check just says whether one exists)")
     p.add_argument("--check", action="store_true", help="only say whether a newer release exists")
     p.add_argument("--ui", action="store_true", help=argparse.SUPPRESS)
+    w = p.add_mutually_exclusive_group()
+    w.add_argument("--here", action="store_true", help="this machine only (default: every host, remotes first)")
+    w.add_argument("--host", default=None, metavar="NAME", help="that remote only")
 
     p = sub.add_parser("uninstall", help="remove Force from this machine (—purge also removes your data)")
     p.add_argument("--purge", action="store_true", help="also remove your registry, state and config")
@@ -2615,7 +2618,7 @@ def _dispatch(args) -> int:
         from . import updates
         if args.ui:
             return updates.ui_command()
-        return updates.update_command(args.check)
+        return updates.update_command(args.check, here=args.here, host=args.host)
     if cmd == "uninstall":
         return uninstall_command(cockpit, args.purge, args.yes)
     if cmd == "rename":

@@ -72,6 +72,11 @@
       "default": true,
       "description": "check hourly whether a newer Force exists"
     },
+    "autoUpdate": {
+      "type": "boolean",
+      "default": true,
+      "description": "install a newer Force by itself when nobody has typed in the cockpit for 10 min"
+    },
     "remoteControl": {
       "type": "boolean",
       "default": true,
