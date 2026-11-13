@@ -95,12 +95,12 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    env:
-      FORCE_BUILD_ROOT: ${{ github.workspace }}/../build
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: scripts/build-release.sh "${VERSION#v}"
+        run: |
+          echo "FORCE_BUILD_ROOT=$RUNNER_TEMP/build" >> "$GITHUB_ENV"     # outside the checkout
+          FORCE_BUILD_ROOT="$RUNNER_TEMP/build" scripts/build-release.sh "${VERSION#v}"
       - uses: actions/attest-build-provenance@v2
         if: github.event_name == 'push'
         with:
