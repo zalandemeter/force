@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "force"
-version = "1.1.0"
+# not the release version: a release takes it from its tag vX.Y.Z (CONTRIBUTING.md, "Releases")
+version = "0.0.0"
 description = "A tmux cockpit for AI coding agent sessions"
 requires-python = ">=3.11"
 license = {text = "MIT"}

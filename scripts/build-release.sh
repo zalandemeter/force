@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a Force release tarball (SPEC §46): everything a machine needs, prebuilt and static.
 #
-#   scripts/build-release.sh [VERSION]      VERSION defaults to pyproject.toml's; output in $FORCE_BUILD_OUT
+#   scripts/build-release.sh [VERSION]      VERSION defaults to the newest release tag's; output in $FORCE_BUILD_OUT
 #                                           (default $FORCE_BUILD_ROOT/dist; the root defaults to build/out)
 #
 # Produces force-VERSION-linux-ARCH.tar.gz and its .sha256. Inside (force-VERSION/): the Python package (force/),
@@ -11,7 +11,7 @@
 # The binaries are built in the force-builder container (build/Dockerfile, Alpine/musl): no toolchain on the host.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/pyproject.toml" | head -1)}"
+VERSION="${1:-$("$REPO/scripts/version.sh")}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "build-release: version must be X.Y.Z, got '$VERSION'" >&2; exit 2; }
 ARCH="$(uname -m)"
 case "$ARCH" in x86_64|aarch64) ;; *) echo "build-release: unsupported arch $ARCH" >&2; exit 2 ;; esac

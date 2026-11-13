@@ -127,16 +127,19 @@ A merge is not a release. `main` collects features, and the maintainer decides w
 of them. Only the maintainer starts a release; an agent working on Force never does. Then:
 
 1. Try it: `scripts/try-release.sh`.
-2. Set the version in `pyproject.toml` (plain `X.Y.Z`) in a pull request (`chore: release X.Y.Z`) and merge it.
-3. Tag it and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+2. Tag a commit of `main` and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z` (plain `X.Y.Z`, newer than
+   every release). That is the whole release: no commit sets the version, the tag is the version.
 
-The release workflow checks that the tag matches `pyproject.toml`, runs the tests, builds the tarball in the
-builder container (static binaries, Force's own tmux), attests its provenance, publishes the GitHub Release with
-the tarball, its `.sha256` and `install.sh`, and redeploys the website so that
-`curl -fsSL https://useforce.cc/install.sh | sh` installs the new version. Installed copies find it with
-`force update` and in their daily check.
+The release workflow checks that the tagged commit is on `main`, that the version is newer than every release and
+that the commit's CI passed (it waits while that CI still runs; the tests are not run again). At the same time it
+builds the Linux tarball in the builder container (static binaries, Force's own tmux) and the macOS one on a GitHub
+Mac. It then attests their provenance, publishes the GitHub Release with the tarballs, their `.sha256` and
+`install.sh`, and redeploys the website so that `curl -fsSL https://useforce.cc/install.sh | sh` installs the new
+version. Installed copies find it with `force update`, the sidebar's update note and their daily check. A pull
+request that changes the release machinery runs the same builds as a dry run (version 0.0.0, nothing published).
 
-To build a release locally: `scripts/build-release.sh [X.Y.Z]` (needs Docker; output in `build/out/dist`).
+To build a release locally: `scripts/build-release.sh [X.Y.Z]` (needs Docker; output in `build/out/dist`;
+the version defaults to the newest release tag's, `scripts/version.sh`).
 
 ### Trying a branch on a real machine
 

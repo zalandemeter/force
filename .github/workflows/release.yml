@@ -1,17 +1,69 @@
-# A tag vX.Y.Z (matching pyproject.toml's version) builds the release tarballs (Linux in the builder container, macOS
-# on a GitHub Mac, SPEC §51), attests their provenance, publishes a GitHub Release with the tarballs, their .sha256
-# and install.sh (pinning every platform's SHA), then redeploys the website (on main) so
-# https://useforce.cc/install.sh installs the new version.
+# A release is a tag: `git tag vX.Y.Z && git push origin vX.Y.Z` on a commit of main. The tag is the version
+# (nothing in the repository holds it). The workflow checks the commit (on main, newer than every release, its CI
+# passed), builds the tarballs (Linux in the builder container, macOS on a GitHub Mac, SPEC §51) at the same time,
+# attests their provenance, publishes a GitHub Release with the tarballs, their .sha256 and install.sh (pinning
+# every platform's SHA), then redeploys the website (on main) so https://useforce.cc/install.sh installs it.
+#
+# A pull request that changes the release machinery runs the same builds and assembles install.sh as 0.0.0, and
+# publishes nothing.
 name: Release
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/build-release.sh
+      - scripts/build-darwin.sh
+      - scripts/fill-installer.py
+      - scripts/version.sh
+      - share/get-force.sh
+      - build/Dockerfile
 
 permissions:
   contents: read
 
+env:
+  # the tag's version for a release; a dry run (pull request) builds 0.0.0
+  VERSION: ${{ github.event_name == 'push' && github.ref_name || 'v0.0.0' }}
+
 jobs:
+  check:
+    name: The tag can be released
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0               # main and every tag
+      - name: On main, newer than every release
+        run: |
+          git fetch -q origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_REF_NAME is not on main: tag a commit of main"; exit 1; }
+          newest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+          [[ "$newest" == "$GITHUB_REF_NAME" ]] \
+            || { echo "::error::$GITHUB_REF_NAME is not newer than every release ($newest is)"; exit 1; }
+      - name: The commit's CI passed (waits for it while it runs)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # the tests ran on this commit when it reached main (ci.yml); they are not run again here
+          for _ in $(seq 1 30); do
+            id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --event push \
+                  --limit 1 --json databaseId -q '.[0].databaseId')"
+            [[ -n "$id" ]] && break
+            sleep 10
+          done
+          [[ -n "$id" ]] || { echo "::error::no CI run for $GITHUB_SHA on main"; exit 1; }
+          gh run watch "$id" --repo "$GITHUB_REPOSITORY" --interval 20 --exit-status >/dev/null \
+            || { echo "::error::CI on $GITHUB_SHA did not pass (run $id): fix main, then tag a newer commit"; exit 1; }
+          echo "CI passed: run $id"
+
   darwin:
     name: macOS tarball
     runs-on: macos-26
@@ -21,71 +73,84 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
-      - name: The tag matches pyproject.toml
-        run: |
-          v="${GITHUB_REF_NAME#v}"
-          grep -qx "version = \"$v\"" pyproject.toml \
-            || { echo "::error::tag $GITHUB_REF_NAME, but pyproject.toml has $(grep -m1 '^version' pyproject.toml)"; exit 1; }
-          echo "VERSION=$v" >> "$GITHUB_ENV"
       - name: Build
         run: |
           command -v pkg-config >/dev/null || brew install pkgconf
-          scripts/build-darwin.sh "$VERSION"
+          scripts/build-darwin.sh "${VERSION#v}"
       - uses: actions/attest-build-provenance@v2
+        if: github.event_name == 'push'
         with:
-          subject-path: build/out-darwin/dist/releases/force-${{ env.VERSION }}-darwin-arm64.tar.gz
+          subject-path: build/out-darwin/dist/releases/force-*-darwin-arm64.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: darwin
-          path: build/out-darwin/dist/releases/force-${{ env.VERSION }}-darwin-arm64.tar.gz*
+          path: build/out-darwin/dist/releases/force-*-darwin-arm64.tar.gz*
           if-no-files-found: error
           retention-days: 3
 
-  release:
-    needs: darwin
+  linux:
+    name: Linux tarball
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          echo "FORCE_BUILD_ROOT=$RUNNER_TEMP/build" >> "$GITHUB_ENV"     # outside the checkout
+          FORCE_BUILD_ROOT="$RUNNER_TEMP/build" scripts/build-release.sh "${VERSION#v}"
+      - uses: actions/attest-build-provenance@v2
+        if: github.event_name == 'push'
+        with:
+          subject-path: ${{ env.FORCE_BUILD_ROOT }}/dist/releases/force-*-linux-*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: ${{ env.FORCE_BUILD_ROOT }}/dist/releases/force-*-linux-*.tar.gz*
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: ${{ github.event_name == 'push' && 'Publish' || 'Assemble (dry run)' }}
+    needs: [check, darwin, linux]
+    # the check is skipped on a pull request (a dry run); a failed one stops the release
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      id-token: write
-      attestations: write
       actions: write
     steps:
       - uses: actions/checkout@v4
-      - name: The tag matches pyproject.toml
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/releases
+          merge-multiple: true
+      - name: install.sh with every platform's SHA
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          grep -qx "version = \"$v\"" pyproject.toml \
-            || { echo "::error::tag $GITHUB_REF_NAME, but pyproject.toml has $(grep -m1 '^version' pyproject.toml)"; exit 1; }
-          echo "VERSION=$v" >> "$GITHUB_ENV"
-          echo "FORCE_BUILD_ROOT=$RUNNER_TEMP/build" >> "$GITHUB_ENV"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Tests
-        run: |
-          sudo apt-get update -q && sudo apt-get install -yq tmux
-          cargo fetch --locked --manifest-path crates/sidebar/Cargo.toml
-          cargo fetch --locked --manifest-path crates/intro/Cargo.toml
-          python -m pip install -q pytest && python -m pytest -q
-      - name: The macOS tarball (its SHA goes into install.sh)
-        uses: actions/download-artifact@v4
-        with:
-          name: darwin
-          path: ${{ env.FORCE_BUILD_ROOT }}/dist/releases
-      - name: Build the tarball and install.sh
-        run: scripts/build-release.sh "$VERSION"
-      - uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: ${{ env.FORCE_BUILD_ROOT }}/dist/releases/force-${{ env.VERSION }}-linux-*.tar.gz
+          v="${VERSION#v}"; r=dist/releases
+          sha() { cut -d' ' -f1 "$r/force-$v-$1.tar.gz.sha256"; }
+          for p in linux-x86_64 darwin-arm64; do
+            (cd "$r" && sha256sum -c "force-$v-$p.tar.gz.sha256")
+          done
+          aarch64=""; [[ -f "$r/force-$v-linux-aarch64.tar.gz.sha256" ]] && aarch64="$(sha linux-aarch64)"
+          python3 scripts/fill-installer.py share/get-force.sh dist/install.sh "$v" https://useforce.cc \
+            "https://github.com/zalandemeter/force/releases/download/v$v" \
+            "$(sha linux-x86_64)" "$aarch64" "$(sha darwin-arm64)"
+          sh -n dist/install.sh
+          grep -m1 '^VERSION=' dist/install.sh
+          ls -l dist dist/releases
       - name: Publish the release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          d="$FORCE_BUILD_ROOT/dist"
-          gh release create "$GITHUB_REF_NAME" --title "Force $VERSION" --generate-notes --verify-tag \
-            "$d"/releases/force-"$VERSION"-*.tar.gz "$d"/releases/force-"$VERSION"-*.tar.gz.sha256 \
-            "$d/install.sh"
+          v="${VERSION#v}"
+          gh release create "$GITHUB_REF_NAME" --title "Force $v" --generate-notes --verify-tag \
+            dist/releases/force-"$v"-*.tar.gz dist/releases/force-"$v"-*.tar.gz.sha256 dist/install.sh
       - name: Put the new install.sh on the website
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         # the website workflow runs on main: Pages publishes a deployment from main, not one from a tag
