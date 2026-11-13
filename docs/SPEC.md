@@ -493,6 +493,9 @@ guarded by tests/test_dev_tree.py).
   no keyboard cursor; no scrollbar; `     archived (n)` and `   + new session` aligned with the names.
 - **Dialogs**: padded frame, sentence-case title, labelled fields, coloured status row (× / ✓), a
   docked key-hint footer.
+  `force-dialog KIND [NAME]`: the first word is the kind, the next the session's name, so a session called `new` or
+  `jump` (an automatic name starts as `new`) can be renamed, moved, archived and deleted. In New, Up/Down move between
+  the fields (no wrap; Tab and Shift+Tab wrap).
   Lists (archived, jump): the mouse wheel moves the selection one entry per notch (no wrap). The archived list
   counts its entries in the title (`Archived sessions (11)`) and shows `↑ N more` / `↓ N more` rows when entries are
   out of view; a click on one pages up or down.

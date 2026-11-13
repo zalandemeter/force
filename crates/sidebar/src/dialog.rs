@@ -1294,6 +1294,16 @@ impl Dialog {
             self.cycle_new_focus(-1);
             return;
         }
+        // Up / Down: the field above / below (no wrap; Tab and Shift+Tab wrap)
+        if matches!(code, crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down) {
+            let up = code == crossterm::event::KeyCode::Up;
+            let order = self.new_focus_order();
+            let cur = order.iter().position(|f| *f == self.new_focus).unwrap_or(0);
+            if (up && cur > 0) || (!up && cur + 1 < order.len()) {
+                self.cycle_new_focus(if up { -1 } else { 1 });
+            }
+            return;
+        }
         if code == crossterm::event::KeyCode::Tab {
             if self.new_focus == NewFocus::Folder && self.complete_folder() {
                 // Tab completed a path in the Folder field; focus stays in Folder.
@@ -1345,11 +1355,16 @@ impl Dialog {
         }
     }
 
-    fn cycle_new_focus(&mut self, step: i32) {
+    fn new_focus_order(&self) -> Vec<NewFocus> {
         let mut order = vec![NewFocus::Kind, NewFocus::Name, NewFocus::Folder];
         if self.remote_offered() {
             order.push(NewFocus::Remote);
         }
+        order
+    }
+
+    fn cycle_new_focus(&mut self, step: i32) {
+        let order = self.new_focus_order();
         let cur = order.iter().position(|f| *f == self.new_focus).unwrap_or(0);
         let next = (cur as i32 + step).rem_euclid(order.len() as i32) as usize;
         self.new_focus = order[next];
@@ -2379,6 +2394,28 @@ mod tests {
         assert!(rc_default(Some(r#"{"intro": true}"#.into())), "an older Force without the key");
         assert!(rc_default(Some(r#"{"remoteControl": "no"}"#.into())), "not a boolean");
         assert!(!rc_default(Some(r#"{"remoteControl": false}"#.into())));
+    }
+
+    #[test]
+    fn new_up_and_down_move_between_fields() {
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let mut d = Dialog::new(Kind::New, None, &reg, &snap, Box::new(FakeRunner::new()), Tier::Plain, 64, 17);
+        assert!(d.new_focus == NewFocus::Name);
+        d.handle_key(rc_key(KeyCode::Down, KeyModifiers::NONE), 0);
+        assert!(d.new_focus == NewFocus::Folder);
+        d.handle_key(rc_key(KeyCode::Down, KeyModifiers::NONE), 0);
+        assert!(d.new_focus == NewFocus::Remote);
+        d.handle_key(rc_key(KeyCode::Down, KeyModifiers::NONE), 0);
+        assert!(d.new_focus == NewFocus::Remote, "the last field stays (no wrap)");
+        for _ in 0..3 {
+            d.handle_key(rc_key(KeyCode::Up, KeyModifiers::NONE), 0);
+        }
+        assert!(d.new_focus == NewFocus::Kind);
+        d.handle_key(rc_key(KeyCode::Up, KeyModifiers::NONE), 0);
+        assert!(d.new_focus == NewFocus::Kind, "the first field stays");
+        d.handle_key(rc_key(KeyCode::Right, KeyModifiers::NONE), 0);
+        assert_eq!(d.new_kind, 1, "Left/Right still choose the kind on the Kind row");
     }
 
     #[test]
