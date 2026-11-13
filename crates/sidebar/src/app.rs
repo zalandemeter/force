@@ -1050,7 +1050,7 @@ impl App {
         let client = self.own_client();
         let env = self.popup_env();
         let command = format!("{} update --ui", tmux::shell_quote(&self.cockpit_bin));
-        if let Err(e) = tmux::popup_with(self.tmux.as_ref(), client.as_deref(), &env, 72, 20,
+        if let Err(e) = tmux::popup_with(self.tmux.as_ref(), client.as_deref(), &env, 72, 24,
                                          &tmux::CHUCK_POPUP_STYLE, &command) {
             self.show_error(format!("update: {}", e));
         }
@@ -2651,7 +2651,7 @@ mod tests {
         assert!(a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 0, y as u16));
         let log = log.lock().unwrap();
         let e = log.iter().find(|e| e.first().map(|s| s.as_str()) == Some("display-popup")).expect("a popup");
-        assert_eq!(&e[1..6], &["-E", "-w", "72", "-h", "20"]);
+        assert_eq!(&e[1..6], &["-E", "-w", "72", "-h", "24"]);
         for w in crate::tmux::CHUCK_POPUP_STYLE {
             assert!(e.iter().any(|x| x == w), "styled like the card's: {w}");
         }

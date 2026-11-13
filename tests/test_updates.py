@@ -24,6 +24,13 @@ class _FakePopen:
         return self.returncode
 
 
+@pytest.fixture(autouse=True)
+def _no_real_hosts(monkeypatch):
+    """`force update` now updates every remote in hosts.json (SPEC §46): no test may reach this machine's real ones.
+    Tests that want remotes set `updates._remotes` themselves."""
+    monkeypatch.setattr(updates, "_remotes", lambda paths, host: [])
+
+
 def _patch_ui(monkeypatch, cur="1.0.0", latest=b'VERSION="9.9.9"\n', base="https://useforce.cc", key="\r",
               err=None, code=0):
     monkeypatch.setattr(updates, "download_base", lambda: base)
@@ -46,7 +53,7 @@ def test_ui_up_to_date(monkeypatch, capsys):
     procs = _patch_ui(monkeypatch, latest=b'VERSION="1.0.0"\n')
     assert updates.ui_command() == 0
     out = capsys.readouterr().out
-    assert "is the newest release" in out
+    assert "the newest release" in out
     assert procs == [], "no install for an up-to-date build"
 
 
@@ -76,7 +83,7 @@ def test_ui_newer_enter_installs_and_removes_tmp(monkeypatch, capsys):
 def test_ui_newer_enter_failure_returns_code(monkeypatch, capsys):
     _patch_ui(monkeypatch, key="\n", code=3)
     assert updates.ui_command() == 3
-    assert "The update failed (exit 3)" in capsys.readouterr().out
+    assert "failed (exit 3)" in capsys.readouterr().out
 
 
 def test_ui_fetch_error_shows_url_and_returns_1(monkeypatch, capsys):
@@ -108,66 +115,6 @@ def test_ui_no_terminal_does_not_update(monkeypatch, capsys):
     assert updates.ui_command() == 0
     assert procs == [], "no terminal ('' key) must not update"
 
-
-def test_ui_remote_delegates(monkeypatch, capsys):
-    monkeypatch.setenv("FORCE_HOST", "h")
-    calls = []
-
-    def fake_call(argv):
-        calls.append(argv)
-        return 7
-
-    monkeypatch.setattr(updates.subprocess, "call", fake_call)
-
-    from force import remote
-    monkeypatch.setattr(remote, "get", lambda paths, name: remote.Remote("h", "h"))
-    assert updates.ui_command() == 7
-    assert calls and calls[0][-1].endswith("update --ui") and "-t" in calls[0]
-
-
-def test_ui_remote_old_force_updates_without_ui(monkeypatch, capsys):
-    monkeypatch.setenv("FORCE_HOST", "h")
-    calls = []
-
-    def fake_call(argv):
-        calls.append(argv)
-        return 2 if len(calls) == 1 else 0
-
-    monkeypatch.setattr(updates.subprocess, "call", fake_call)
-
-    from force import remote
-    monkeypatch.setattr(remote, "get", lambda paths, name: remote.Remote("h", "h"))
-    from force import support
-    monkeypatch.setattr(support, "_wait_key", lambda: "\r")
-    assert updates.ui_command() == 0
-    assert len(calls) == 2
-    assert calls[0][-1].endswith("update --ui") and "-t" in calls[0]
-    assert calls[1][-1].endswith("update") and not calls[1][-1].endswith("--ui")
-    assert "h is updated" in capsys.readouterr().out
-
-
-def test_ui_remote_unreachable_says_so_before_closing(monkeypatch, capsys):
-    monkeypatch.setenv("FORCE_HOST", "h")
-    calls = []
-    monkeypatch.setattr(updates.subprocess, "call", lambda argv: calls.append(argv) or 255)
-    from force import remote, support
-    monkeypatch.setattr(remote, "get", lambda paths, name: remote.Remote("h", "h"))
-    keys = []
-    monkeypatch.setattr(support, "_wait_key", lambda: keys.append(1) or "x")
-    assert updates.ui_command() == 255
-    assert len(calls) == 1 and keys == [1]
-    assert "cannot reach h over ssh" in capsys.readouterr().out
-
-
-def test_ui_remote_unknown_host_returns_1(monkeypatch, capsys):
-    monkeypatch.setenv("FORCE_HOST", "nope")
-
-    from force import remote, support
-    monkeypatch.setattr(remote, "get", lambda paths, name: None)
-    monkeypatch.setattr(support, "_wait_key", lambda: "\r")
-    assert updates.ui_command() == 1
-    out = capsys.readouterr().out
-    assert "no host" in out and "nope" in out
 
 # The handler reads a module-global body so each test can set what install.sh returns.
 _server_body = b""
@@ -389,3 +336,122 @@ def test_fetch_names_force_as_the_user_agent(fake_app, http_server):
     content, err = updates.fetch_install(http_server, 5)
     assert err is None and content
     assert _server_agents[-1] == "force/1.0.2"
+
+
+# --- every host (SPEC §46) ---------------------------------------------------------------------------------------
+class _Run:
+    """A fake subprocess.run for `ssh … force update …`: answers per remote name, records the argv."""
+    def __init__(self, answers):
+        self.answers, self.calls = answers, []
+
+    def __call__(self, argv, **kw):
+        self.calls.append(argv)
+        cmd = argv[-1]
+        for name, (code, out, err) in self.answers.items():
+            if name in " ".join(argv[:-1]):
+                if code == "older":                 # a Force from before --here
+                    if "--here" in cmd:
+                        return SimpleNamespace(returncode=2, stdout="",
+                                               stderr="force: error: unrecognized arguments: --here")
+                    return SimpleNamespace(returncode=0, stdout=out, stderr=err)
+                return SimpleNamespace(returncode=code, stdout=out, stderr=err)
+        return SimpleNamespace(returncode=255, stdout="", stderr="ssh: no route")
+
+
+def _remote(name):
+    from force import remote
+    return remote.Remote(name, name)
+
+
+@pytest.mark.parametrize("code, text, want", [
+    (0, "force: updating 1.4.1 -> 1.4.2 (sessions keep running)\nforce: ready.", "1.4.1 → 1.4.2"),
+    (0, "force: Force 1.4.2 is up to date", "already 1.4.2"),
+    (0, "force: update available: 1.4.1 -> 1.4.2 (run: force update)", "1.4.1 → 1.4.2 available"),
+    (3, "force: updating 1.4.1 -> 1.4.2 (sessions keep running)\nboom", "1.4.1 → 1.4.2 failed (exit 3)"),
+    (255, "ssh: connect to host lab port 22: No route to host", "unreachable (ssh failed)"),
+    (1, "force: cannot fetch https://useforce.cc/install.sh: timed out", "cannot fetch https://useforce.cc/install.sh: timed out"),
+])
+def test_remote_summary(code, text, want):
+    assert updates._summary(code, text) == want
+
+
+def test_update_remote_asks_an_older_force_again_without_here(tmp_path):
+    from force import config
+    run = _Run({"old": ("older", "force: updating 1.0.0 -> 1.4.2 (sessions keep running)", "")})
+    ok, summary = updates.update_remote(config.get_paths(), _remote("old"), run=run)
+    assert ok and summary == "1.0.0 → 1.4.2"
+    assert run.calls[0][-1].endswith("update --here") and run.calls[1][-1].endswith("update")
+
+
+def test_update_command_does_every_remote_then_this_machine(monkeypatch, capsys):
+    run = _Run({"devbox": (0, "force: updating 1.4.1 -> 1.4.2 (sessions keep running)", ""),
+                "pi": (0, "force: Force 1.4.2 is up to date", ""),
+                "lab": (255, "", "ssh: no route")})
+    monkeypatch.setattr(updates, "_remotes", lambda paths, host: [_remote(n) for n in ("devbox", "pi", "lab")
+                                                                   if host in (None, n)])
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    order = []
+    monkeypatch.setattr(updates, "_update_here", lambda check: order.append("here") or 0)
+    assert updates.update_command() == 1, "one host failed"
+    out = capsys.readouterr().out
+    assert "✓ devbox: 1.4.1 → 1.4.2" in out and "✓ pi: already 1.4.2" in out and "✗ lab: unreachable" in out
+    assert order == ["here"], "this machine last, after every remote, even when one failed"
+    assert all("--here" in c[-1] for c in run.calls if "update" in c[-1])
+
+
+def test_update_command_here_and_host(monkeypatch, capsys):
+    run = _Run({"devbox": (0, "force: Force 1.4.2 is up to date", "")})
+    monkeypatch.setattr(updates, "_remotes", lambda paths, host: [_remote(n) for n in ("devbox", "pi")
+                                                                   if host in (None, n)])
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    order = []
+    monkeypatch.setattr(updates, "_update_here", lambda check: order.append(("here", check)) or 0)
+    assert updates.update_command(here=True) == 0
+    assert run.calls == [] and order == [("here", False)], "--here: this machine only"
+    order.clear()
+    assert updates.update_command(host="devbox") == 0
+    assert order == [] and len(run.calls) == 1 and "devbox" in " ".join(run.calls[0]), "--host: that remote only"
+    assert updates.update_command(host="nope") == 1
+    assert "no enabled host" in capsys.readouterr().err
+    order.clear()
+    assert updates.update_command(check=True) == 1          # pi did not answer
+    assert order == [("here", True)] and run.calls[-1][-1].endswith("update --check --here")
+
+
+def test_snapshot_update_counts_remotes_behind(fake_app, tmp_path):
+    state = tmp_path / "s"
+    state.mkdir()
+    (state / "update.json").write_text(json.dumps({"latest": "1.4.2"}))
+    (fake_app / "VERSION").write_text("1.4.2")
+    assert updates.snapshot_update(state) is None
+    assert updates.snapshot_update(state, ("1.4.2",)) is None
+    assert updates.snapshot_update(state, ("1.4.1-feat-x-abc1234",)) == "1.4.2", "a remote on a branch build of 1.4.1"
+    assert updates.snapshot_update(state, ("garbage",)) is None
+
+
+def test_card_lists_every_host_and_updates_the_ones_behind(monkeypatch, capsys):
+    procs = _patch_ui(monkeypatch, cur="1.4.1", latest=b'VERSION="1.4.2"\n')
+    from force import remote
+    monkeypatch.setattr(updates, "_remotes", lambda paths, host: [_remote(n) for n in ("devbox", "pi", "lab")])
+    states = {"devbox": {"state": "connected", "version": "1.4.1"}, "pi": {"state": "connected", "version": "1.4.2"},
+              "lab": {"state": "down"}}
+    monkeypatch.setattr(remote, "read_status", lambda paths, name: states[name])
+    run = _Run({"devbox": (0, "force: updating 1.4.1 -> 1.4.2 (sessions keep running)", ""),
+                "lab": (255, "", "")})
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    assert updates.ui_command() == 1, "lab could not be reached"
+    out = capsys.readouterr().out
+    assert "devbox" in out and "pi" in out and "offline" in out and "Update all" in out
+    assert "pi" not in " ".join(" ".join(c) for c in run.calls), "pi already runs 1.4.2: not asked"
+    assert "devbox" in " ".join(" ".join(c) for c in run.calls) and "lab" in " ".join(" ".join(c) for c in run.calls)
+    assert len(procs) == 1, "this machine installed last"
+    assert "1.4.1 → 1.4.2" in out and "Not every host was updated" in out
+
+
+def test_card_says_every_host_is_current(monkeypatch, capsys):
+    _patch_ui(monkeypatch, cur="1.4.2", latest=b'VERSION="1.4.2"\n')
+    from force import remote
+    monkeypatch.setattr(updates, "_remotes", lambda paths, host: [_remote("pi")])
+    monkeypatch.setattr(remote, "read_status", lambda paths, name: {"state": "connected", "version": "1.4.2"})
+    assert updates.ui_command() == 0
+    assert "Every host runs Force 1.4.2" in capsys.readouterr().out

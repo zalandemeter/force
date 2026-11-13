@@ -112,8 +112,9 @@ def find_latest(timeout: int) -> tuple[str | None, str | None, bytes | None, str
     return cur, latest, content, None
 
 
-def update_command(check: bool = False) -> int:
-    """`force update [--check]`. Installs the newer release (runs its install.sh --no-fonts) or reports."""
+def _update_here(check: bool) -> int:
+    """This machine only (`force update --here`): installs the newer release (runs its install.sh --no-fonts) or
+    reports."""
     cur, latest, content, problem = find_latest(_FETCH_TIMEOUT)
     if problem is not None:
         if problem.startswith("development build"):
@@ -138,18 +139,130 @@ def update_command(check: bool = False) -> int:
             pass
 
 
+# a remote's `force update --here` answer, as one short line (SPEC §46)
+_UPDATING = re.compile(r"updating (\S+) -> (\S+)")
+_UP_TO_DATE = re.compile(r"Force (\S+) is up to date")
+_AVAILABLE = re.compile(r"update available: (\S+) -> (\S+)")
+_REMOTE_TIMEOUT = 900
+
+
+def _summary(code: int, text: str) -> str:
+    """One line for a host's update: `1.4.1 → 1.4.2`, `already 1.4.2`, `1.4.1 → 1.4.2 available`, or why not."""
+    from .cards import plain
+    lines = [plain(ln).strip() for ln in text.splitlines() if plain(ln).strip()]
+    joined = "\n".join(lines)
+    if code == 255:
+        return "unreachable (ssh failed)"
+    if (m := _UPDATING.search(joined)) is not None:
+        return f"{m.group(1)} → {m.group(2)}" + ("" if code == 0 else f" failed (exit {code})")
+    if (m := _AVAILABLE.search(joined)) is not None:
+        return f"{m.group(1)} → {m.group(2)} available"
+    if (m := _UP_TO_DATE.search(joined)) is not None:
+        return f"already {m.group(1)}"
+    last = lines[-1] if lines else ""
+    if last.startswith("force: "):
+        last = last[len("force: "):]
+    return last or (f"exit {code}" if code else "done")
+
+
+def update_remote(paths, r, check: bool = False, timeout: int = _REMOTE_TIMEOUT, run=None) -> tuple[bool, str]:
+    """`force update --here [--check]` on remote `r` over Force's ssh (it fetches its own platform's release).
+    An older Force there has no `--here` (argparse: exit 2): ask again without it, which meant the same then.
+    -> (ok, one-line summary)."""
+    from . import remote
+    run = run or subprocess.run         # looked up now, not when the module loaded (tests replace it)
+    words = ["update", *(["--check"] if check else []), "--here"]
+    try:
+        p = run(remote.ssh_argv(paths, r, remote.REMOTE_FORCE, *words), capture_output=True, text=True,
+                timeout=timeout, stdin=subprocess.DEVNULL)
+        if p.returncode == 2 and "--here" in (p.stderr or ""):
+            p = run(remote.ssh_argv(paths, r, remote.REMOTE_FORCE, *words[:-1]), capture_output=True, text=True,
+                    timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return False, f"no answer within {timeout // 60} min"
+    except OSError as e:
+        return False, f"ssh: {e}"
+    return p.returncode == 0, _summary(p.returncode, (p.stdout or "") + "\n" + (p.stderr or ""))
+
+
+def _remotes(paths, host: str | None):
+    from . import remote
+    rs = [r for r in remote.load(paths) if r.enabled]
+    return [r for r in rs if r.name == host] if host else rs
+
+
+def update_remotes(paths, rs, check: bool, on_done, run=None) -> bool:
+    """Update remotes `rs` in parallel; `on_done(name, ok, summary)` as each finishes (from worker threads, one at a
+    time). -> True when all of them were fine."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    lock = threading.Lock()
+    ok_all = True
+
+    def one(r):
+        nonlocal ok_all
+        ok, summary = update_remote(paths, r, check=check, run=run)
+        with lock:
+            ok_all = ok_all and ok
+            on_done(r.name, ok, summary)
+    if rs:
+        with ThreadPoolExecutor(max_workers=min(8, len(rs))) as pool:
+            list(pool.map(one, rs))
+    return ok_all
+
+
+def update_command(check: bool = False, here: bool = False, host: str | None = None) -> int:
+    """`force update [--check] [--here | --host NAME]` (SPEC §46): every enabled remote first (in parallel, each
+    its own `force update --here`), then this machine, last because its update restarts the daemon. `--here`: this
+    machine only; `--host NAME`: that remote only. Exit 1 when any host failed."""
+    from . import config
+    if here:
+        return _update_here(check)
+    paths = config.get_paths()
+    rs = _remotes(paths, host)
+    if host and not rs:
+        print(f"force: no enabled host {host!r} (force host list)", file=sys.stderr)
+        return 1
+
+    def report(name, ok, summary):
+        print(f"{'✓' if ok else '✗'} {name}: {summary}", flush=True)
+    remotes_ok = update_remotes(paths, rs, check, report)
+    if host:
+        return 0 if remotes_ok else 1
+    code = _update_here(check)
+    return code or (0 if remotes_ok else 1)
+
+
+def _host_rows(paths) -> list[tuple[str, str | None, bool]]:
+    """The update card's hosts (SPEC §46): (name, the X.Y.Z it runs or None, connected) for this machine and each
+    enabled remote, the remote's version from its last hello (`status.json`)."""
+    import socket
+    from . import remote
+    rows = [(socket.gethostname().split(".")[0] + " (this machine)", current_version(), True)]
+    for r in _remotes(paths, None):
+        st = remote.read_status(paths, r.name)
+        rows.append((r.name, base_version(st.get("version")), st.get("state") == "connected"))
+    return rows
+
+
 def _ui_local() -> int:
-    """`force update --ui` on this machine (SPEC §3): the update card, live in the popup. `_wait_key` from
-    force.support: '' (no terminal) means Esc: nothing is updated."""
+    """`force update --ui` (SPEC §46): the update card, always on this machine, for every host: what each runs, a
+    live check, Enter updates them all (the remotes in parallel, then this machine), one line per host. `_wait_key`
+    from force.support: '' (no terminal) means Esc: nothing is updated."""
+    from . import config
     from .cards import CARD_W, c, doctor_line, head, keys_right, plain
     from .support import _wait_key
 
-    cur = current_version() or "a development build"
+    paths = config.get_paths()
+    hosts = _host_rows(paths)
+    name_w = min(max(len(h[0]) for h in hosts) + 2, 34)
     print("\x1b[?25l", end="", flush=True)                       # no blinking cursor on the card
-    out = "\n".join(head("↑", "Update Force", "force update")) + "\n"
-    out += "  " + c(f"This machine runs Force {cur}.", "name") + "\n"
-    out += "  " + c("Checking for a newer release…", "grey")
-    sys.stdout.write(out)                                            # no trailing newline: the row is erased later
+    print("\n".join(head("↑", "Update Force", "force update")), flush=True)
+    for name, ver, connected in hosts:
+        shown = (ver or "a development build") if connected else "offline"
+        print("  " + c(f"{name[:name_w - 2]:<{name_w}}", "name") + c(shown, "grey" if connected else "dim"), flush=True)
+    print("", flush=True)
+    sys.stdout.write("  " + c("Checking for a newer release…", "grey"))
     sys.stdout.flush()
 
     cur, latest, content, problem = find_latest(_FETCH_TIMEOUT)
@@ -162,106 +275,67 @@ def _ui_local() -> int:
         print(keys_right(("any key", "Close")), flush=True)
         _wait_key()
 
-    if problem is not None:
-        close(doctor_line("✗ " + problem))
-        return 0 if problem.startswith("development build") else 1
-    if _tuple(latest) <= _tuple(cur):
-        close(doctor_line(f"✓ Force {cur} is the newest release."))
+    if latest is None:                                           # no answer from the site: nothing to compare with
+        close(doctor_line("✗ " + (problem or "no newest release found")))
+        return 0 if (problem or "").startswith("development build") else 1
+    behind = [h for h in hosts[1:] if h[1] is None or _tuple(h[1]) < _tuple(latest)]   # offline counts: try it
+    here_behind = cur is not None and _tuple(cur) < _tuple(latest)
+    if not behind and not here_behind:
+        close(doctor_line(f"✓ Every host runs Force {latest}, the newest release."))
         return 0
 
     print("\r\x1b[K", end="", flush=True)                       # erase the "Checking…" line
     print("  " + c(f"Force {latest} is available.", "white", bold=True), flush=True)
-    print("", flush=True)
-    print("  " + c("Sessions keep running; the cockpit reloads with the new version.", "dim"), flush=True)
+    print("  " + c("Sessions keep running; each cockpit reloads with the new version.", "dim"), flush=True)
     base = download_base()
     if base and urllib.parse.urlparse(base).hostname == "useforce.cc":
         print("  " + c(f"What's new: https://github.com/zalandemeter/force/releases/tag/v{latest}", "dim"),
               flush=True)
     print("", flush=True)
-    print(keys_right(("Esc", "Close"), button="Enter  Update"), flush=True)
+    print(keys_right(("Esc", "Close"), button="Enter  Update all"), flush=True)
     if _wait_key() not in ("\r", "\n"):
         return 0                                                 # Esc or no terminal: no update
 
     print("\x1b[1A\r\x1b[K" + "  " + c("Updating…", "grey"), flush=True)     # in place of the keys row
-    tmp = None
-    try:
-        tmp = _write_tmp(content)
-        proc = subprocess.Popen(["sh", tmp, "--no-fonts"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              stdin=subprocess.DEVNULL, text=True, errors="replace")
-        for line in (proc.stdout or ()):
-            text = plain(line).strip()
-            if text.startswith("force: "):
-                text = text[len("force: "):]
-            elif text.startswith("force "):
-                text = text[6:]
-            if text:
-                print("  " + c(text[:CARD_W - 2], "grey"), flush=True)
-        code = proc.wait()
-    finally:
-        if tmp is not None:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-    if code == 0:
+
+    def report(name, ok, summary):
+        print("  " + c("✓" if ok else "✗", "ok" if ok else "bad", bold=True) + " "
+              + c(f"{name[:name_w - 2]:<{name_w}}", "name") + c(summary[:CARD_W - name_w - 4], "grey"), flush=True)
+    remotes_ok = update_remotes(paths, [r for r in _remotes(paths, None) if any(h[0] == r.name for h in behind)],
+                                False, report)
+    code = 0
+    if here_behind:
+        tmp = None
+        try:
+            tmp = _write_tmp(content)
+            proc = subprocess.Popen(["sh", tmp, "--no-fonts"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, text=True, errors="replace")
+            for line in (proc.stdout or ()):
+                text = plain(line).strip()
+                if text.startswith("force: "):
+                    text = text[len("force: "):]
+                elif text.startswith("force "):
+                    text = text[6:]
+                if text:
+                    print("  " + c(text[:CARD_W - 2], "grey"), flush=True)
+            code = proc.wait()
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        report(hosts[0][0], code == 0, f"{cur} → {latest}" + ("" if code == 0 else f" failed (exit {code})"))
+    if code == 0 and remotes_ok:
         rows = doctor_line(f"✓ Force {latest} installed. Sessions keep running.")
     else:
-        rows = doctor_line(f"✗ The update failed (exit {code}). Run force update in a shell for the details.")
+        rows = doctor_line("✗ Not every host was updated (above). Run force update in a shell for the details.")
     close(rows)
-    return code
-
-
-def _ui_remote(host: str) -> int:
-    """`force update --ui` on a remote host (FORCE_HOST set, SPEC §3): the remote's own card runs there; only a
-    host whose Force predates the card (argparse refuses --ui, exit 2) is handled here."""
-    from . import config, remote
-    from .cards import c, doctor_line, head, keys_right
-    from .support import _wait_key
-
-    paths = config.get_paths()
-    r = remote.get(paths, host)
-    if r is None:
-        print("\x1b[?25l", end="", flush=True)
-        print("\n".join(head("↑", "Update Force", "force update")), flush=True)
-        for row in doctor_line(f"✗ no host {host!r}"):
-            print(row, flush=True)
-        print("", flush=True)
-        print(keys_right(("any key", "Close")), flush=True)
-        _wait_key()
-        return 1
-    code = subprocess.call(remote.ssh_argv(paths, r, remote.REMOTE_FORCE, "update", "--ui", tty=True))
-    if code == 255:                                              # ssh itself failed: say so before the popup closes
-        print("\x1b[?25l", end="", flush=True)
-        print("\n".join(head("↑", "Update Force", "force update")), flush=True)
-        for row in doctor_line(f"✗ cannot reach {host} over ssh (ssh {r.ssh} must work without a password)"):
-            print(row, flush=True)
-        print("", flush=True)
-        print(keys_right(("any key", "Close")), flush=True)
-        _wait_key()
-        return code
-    if code != 2:
-        return code                                              # the remote's card already waited for its key
-    print("\x1b[?25l", end="", flush=True)
-    print("\n".join(head("↑", "Update Force", "force update")), flush=True)
-    print("  " + c(f"{host} runs an older Force; updating it with force update…", "grey"), flush=True)
-    code = subprocess.call(remote.ssh_argv(paths, r, remote.REMOTE_FORCE, "update"))
-    if code == 0:
-        rows = doctor_line(f"✓ {host} is updated.")
-    else:
-        rows = doctor_line(f"✗ The update on {host} failed (exit {code}).")
-    for row in rows:
-        print(row, flush=True)
-    print("", flush=True)
-    print(keys_right(("any key", "Close")), flush=True)
-    _wait_key()
-    return code
+    return code or (0 if remotes_ok else 1)
 
 
 def ui_command() -> int:
-    """`force update --ui`: the update card in the popup (SPEC §3). With FORCE_HOST it runs on the remote."""
-    host = os.environ.get("FORCE_HOST", "").strip()
-    if host:
-        return _ui_remote(host)
+    """`force update --ui`: the update card in the popup (SPEC §46), always on this machine, for every host."""
     return _ui_local()
 
 
@@ -337,19 +411,31 @@ def check_daemon(state: Path) -> str | None:
     return latest
 
 
-def snapshot_update(state: Path) -> str | None:
-    """The value for the snapshot's `"update"` key: the checked latest when it is newer than the running
-    VERSION, else None (no key)."""
-    if current_version() is None:
-        return None
+def base_version(v: str | None) -> str | None:
+    """The `X.Y.Z` a release name starts with (`1.4.1-feat-x-abc123` -> `1.4.1`), else None."""
+    m = re.match(r"(\d+\.\d+\.\d+)", v or "")
+    return m.group(1) if m else None
+
+
+def latest_known(state: Path) -> str | None:
+    """The newest release the last check found (`<state>/update.json`), or None."""
     try:
-        data = json.loads((state / "update.json").read_text())
-        latest = data.get("latest")
+        latest = json.loads((state / "update.json").read_text()).get("latest")
     except (OSError, ValueError, AttributeError):
         return None
-    if not isinstance(latest, str):
+    return latest if isinstance(latest, str) and _tuple(latest) is not None else None
+
+
+def snapshot_update(state: Path, others: tuple = ()) -> str | None:
+    """The value for the snapshot's `"update"` key (SPEC §3): the checked latest when this machine, or any of
+    `others` (the versions the enabled remotes run), runs an older one; else None (no key)."""
+    if current_version() is None:
         return None
-    a, b = _tuple(latest), _tuple(current_version())
-    if a is None or b is None or a <= b:
+    latest = latest_known(state)
+    if latest is None:
         return None
-    return latest
+    for v in (current_version(), *others):
+        b = _tuple(base_version(v))
+        if b is not None and _tuple(latest) > b:
+            return latest
+    return None

@@ -1531,3 +1531,94 @@ def test_restore_does_not_bring_back_a_session_archived_during_the_tick(env, mon
     monkeypatch.setattr(cockpit.tmux, "has_session", lambda name: False)
     d._step_restore()
     assert created == ["back"], "only the session that is still live comes back"
+
+
+# --- autoUpdate (SPEC §46) ----------------------------------------------------------------------------------------
+def _auto(env, monkeypatch, latest="1.4.2", cur="1.4.1", clients=(), ui_clients=()):
+    from force import daemon as daemon_mod, updates
+    monkeypatch.setattr(Daemon, "_start_update_thread", lambda self: None)    # the step is tested, not the thread
+    cockpit = env.make_cockpit()
+    clock = FakeClock(start=10_000.0)
+    d = Daemon(cockpit, clock)
+    monkeypatch.setattr(updates, "current_version", lambda: cur)
+    monkeypatch.setattr(updates, "latest_known", lambda state: latest)
+    monkeypatch.setattr(updates, "download_base", lambda: "https://useforce.cc")
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda: list(clients))
+    monkeypatch.setattr(cockpit.ui_tmux, "clients", lambda: list(ui_clients))
+    started = []
+
+    class P:
+        def __init__(self, argv, **kw):
+            started.append((argv, kw))
+            self.rc = None
+
+        def poll(self):
+            return self.rc
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", P)
+    return d, clock, started
+
+
+def test_auto_update_installs_when_nobody_is_at_the_cockpit(env, monkeypatch):
+    d, clock, started = _auto(env, monkeypatch)
+    d._step_auto_update()
+    assert len(started) == 1
+    argv, kw = started[0]
+    assert argv[1:] == ["update", "--here"] and kw.get("start_new_session") is True
+    d._step_auto_update()
+    assert len(started) == 1, "at most one look a minute, and not while it runs"
+    clock.t += 3600
+    d._auto_proc.rc = 1                                  # it failed
+    d._step_auto_update()
+    assert len(started) == 1, "one try per version every 6 h"
+    clock.t += 6 * 3600
+    d._step_auto_update()
+    assert len(started) == 2
+
+
+def test_auto_update_waits_while_someone_types(env, monkeypatch):
+    import time as time_mod
+    busy = [Client(name="/dev/pts/3", session="s", width=80, height=24, activity=int(time_mod.time()) - 30)]
+    d, clock, started = _auto(env, monkeypatch, ui_clients=busy)
+    d._step_auto_update()
+    assert started == [], "a key 30 s ago on the ui server: not now"
+    quiet = [Client(name="/dev/pts/3", session="s", width=80, height=24, activity=int(time_mod.time()) - 900)]
+    d, clock, started = _auto(env, monkeypatch, clients=quiet)
+    d._step_auto_update()
+    assert len(started) == 1, "15 min without a key: install"
+
+
+@pytest.mark.parametrize("kw", [dict(latest="1.4.1"), dict(latest=None), dict(cur=None)])
+def test_auto_update_has_nothing_to_do(env, monkeypatch, kw):
+    d, clock, started = _auto(env, monkeypatch, **kw)
+    d._step_auto_update()
+    assert started == [], kw
+
+
+def test_auto_update_off_by_setting(env, monkeypatch):
+    d, clock, started = _auto(env, monkeypatch)
+    d.cfg = dataclasses.replace(d.cfg, auto_update=False)
+    d._step_auto_update()
+    assert started == []
+    d.cfg = dataclasses.replace(d.cfg, auto_update=True, check_updates=False)
+    d._step_auto_update()
+    assert started == []
+
+
+def test_the_update_check_thread_starts_with_its_event_in_place(env, monkeypatch):
+    """1.4.0–1.4.2 started the update thread before `_update_wake` existed: the thread died at once and no install
+    checked for updates again. Start it for real (a fake check) and see it run."""
+    from force import updates
+    import threading as th
+    ran = th.Event()
+    monkeypatch.setattr(updates, "download_base", lambda: "https://useforce.cc")
+    monkeypatch.setattr(updates, "current_version", lambda: "1.4.1")
+    monkeypatch.setattr(updates, "_FIRST_DELAY", 0)
+    def check(state):
+        ran.set()
+        raise SystemExit           # ends the thread quietly: no thread left behind for later tests
+    monkeypatch.setattr(updates, "check_daemon", check)
+    errors = []
+    monkeypatch.setattr(th, "excepthook", lambda a: None if a.exc_type is SystemExit else errors.append(a.exc_value))
+    Daemon(env.make_cockpit(), FakeClock())
+    assert ran.wait(5), f"the check never ran: {errors}"
+    assert errors == []
