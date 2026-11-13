@@ -648,3 +648,29 @@ def test_move_carries_the_transcript(env, tmp_path, monkeypatch):
     assert (dst / f"{old.session_id}.jsonl").read_text().count('"user"') == 1
     assert not (src / f"{old.session_id}.jsonl").exists() and not (src / old.session_id).exists()
     assert sorted(p.name for p in (dst / old.session_id).iterdir()) == ["agent.jsonl", "other.jsonl"]
+
+
+def test_create_that_loses_the_race_to_the_daemon_is_not_an_error(env, monkeypatch):
+    """`force new` and the daemon's tick can both create a new entry's session; the second new-session gets tmux's
+    "duplicate session". The session is there, so the loser returns quietly (it failed `force new` on macOS CI)."""
+    from force.tmux import TmuxError
+    cockpit = env.make_cockpit()
+    with locked(env.paths.home) as reg:
+        e = reg.add("raced", "00000000-0000-4000-8000-000000000001", "/tmp")
+    real_has = cockpit.tmux.has_session
+    calls = {"n": 0}
+
+    def has_session(name):              # the check before new-session misses the daemon's session ...
+        calls["n"] += 1
+        return False if calls["n"] == 1 else real_has(name)
+    monkeypatch.setattr(cockpit.tmux, "has_session", has_session)
+    cockpit.create(e)                   # ... the daemon wins the race
+    monkeypatch.setattr(cockpit.tmux, "new_session",
+                        lambda *a, **k: (_ for _ in ()).throw(TmuxError("duplicate session: raced")))
+    calls["n"] = 0
+    cockpit.create(e)                   # the loser: no exception
+    monkeypatch.setattr(cockpit.tmux, "new_session",
+                        lambda *a, **k: (_ for _ in ()).throw(TmuxError("no server")))
+    calls["n"] = 0
+    with pytest.raises(TmuxError):
+        cockpit.create(e)               # any other failure still raises

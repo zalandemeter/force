@@ -19,7 +19,7 @@ from .claude import find_transcript, global_memory_dir, memory_dir_for, project_
 from .config import Config, Paths
 from .registry import Entry, RegistryError, is_claude, is_opencode, is_shell, locked, valid_name
 from .state import load_seen, save_seen
-from .tmux import Tmux
+from .tmux import Tmux, TmuxError
 
 DEFAULT_SIZE = (200, 50)
 _POLL = 0.2
@@ -133,10 +133,17 @@ class Cockpit:
             return
         width, height = self.client_size()
         cmd = self.pane_command(entry.name)
-        pane_id = self.tmux.new_session(
-            entry.name, width, height, entry.cwd, cmd,
-            env={"FORCE_SESSION": entry.name},
-        )
+        try:
+            pane_id = self.tmux.new_session(
+                entry.name, width, height, entry.cwd, cmd,
+                env={"FORCE_SESSION": entry.name},
+            )
+        except TmuxError as e:
+            # `force new` and the daemon's tick can both create a new entry's session: the one that comes second gets
+            # tmux's "duplicate session". The first one runs these same steps, so the session is there as it should be.
+            if "duplicate session" in str(e) and self.tmux.has_session(entry.name):
+                return
+            raise
         self.tmux.run("set-option", "-p", "-t", pane_id, "@force_role", "agent")
         self.tmux.run("set-option", "-t", entry.name, "remain-on-exit", "on")
         if not self.split:           # split mode: the ui server draws them (SPEC §39)

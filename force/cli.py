@@ -1126,7 +1126,16 @@ def _target_session(cockpit: Cockpit, name: str | None) -> str:
 
 
 def new_command(cockpit: Cockpit, name: str | None, cwd: str | None, no_switch: bool,
-              shell: bool = False, kind: str | None = None, remote_control: bool = True) -> int:
+              shell: bool = False, kind: str | None = None, remote_control: bool | None = None) -> int:
+    """`force new`. remote_control (SPEC §53): True/False from --remote-control/--no-remote-control (Claude Code
+    only), None = the remoteControl setting."""
+    k = "shell" if shell else (kind or "claude")
+    if remote_control is not None and k != "claude":
+        print(f"force: --{'' if remote_control else 'no-'}remote-control is for Claude Code sessions only, not {k}",
+              file=sys.stderr)
+        return 1
+    if remote_control is None:
+        remote_control = cockpit.cfg.remote_control if k == "claude" else True
     return create_session(cockpit, name, cwd, no_switch, shell=shell, kind=kind, remote_control=remote_control)
 
 
@@ -1317,6 +1326,52 @@ def restart_command(cockpit: Cockpit, name: str | None, all_: bool = False) -> i
             print(f"{n}: restart failed", file=sys.stderr)
         else:
             print(f"{n}: restarted")
+    return 0
+
+
+def remote_control_command(cockpit: Cockpit, name: str, action: str) -> int:
+    """`force remote-control NAME on|off|toggle|status` (SPEC §53): a Claude Code session's Remote Control choice.
+    A change restarts the session to apply it (its conversation kept): now when it is idle, after this turn when it
+    works or needs you, at its next start when it is down or archived."""
+    entry = registry.load(cockpit.paths.registry).get(name)
+    if entry is None:
+        print(f"force: no session {name!r}", file=sys.stderr)
+        return 1
+    if not registry.is_claude(entry):
+        print(f"force: {name} is a {registry.kind(entry)} session; Remote Control is for Claude Code sessions",
+              file=sys.stderr)
+        return 1
+    on = registry.remote_control(entry)
+    pane = None if entry.archived else cockpit.agent_pane(name)
+    if action == "status":
+        connected = claude.rc_connected(cockpit.paths.claude_dir, pane.pid if pane is not None else None)
+        print(f"{'on' if on else 'off'} ({'connected' if connected else 'not connected'})")
+        return 0
+    want = (not on) if action == "toggle" else (action == "on")
+    word = "on" if want else "off"
+    if want == on:
+        print(f"{name}: Remote Control already {word}")
+        return 0
+    state = None if entry.archived or pane is None or pane.dead else _current_state_for(cockpit, name)
+    busy = state in (State.WORKING, State.NEEDS_YOU)
+    with registry.locked(cockpit.paths.home) as reg:
+        r = reg.get(name)
+        if r is None:
+            print(f"force: no session {name!r}", file=sys.stderr)
+            return 1
+        if want:
+            r.extra.pop("remote_control", None)        # absent = on
+        else:
+            r.extra["remote_control"] = False
+        if busy:
+            r.extra["pending_restart"] = True
+    if entry.archived or pane is None or pane.dead:
+        print(f"{name}: Remote Control {word} (applies when it starts)")
+    elif busy:
+        print(f"{name}: Remote Control {word} (restarts after this turn)")
+    else:
+        cockpit.restart(name)
+        print(f"{name}: Remote Control {word} (restarting)")
     return 0
 
 
@@ -2284,8 +2339,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--shell", action="store_true", help="create a managed shell session instead of an agent")
     p.add_argument("--kind", choices=["claude", "opencode", "shell"], default=None,
                    help="session kind: claude (default), opencode or shell")
-    p.add_argument("--no-remote-control", dest="remote_control", action="store_false",
-                   help="start a Claude Code session without Remote Control (not on your phone or claude.ai)")
+    rc = p.add_mutually_exclusive_group()
+    rc.add_argument("--remote-control", dest="remote_control", action="store_true", default=None,
+                    help="start a Claude Code session with Remote Control (default: the remoteControl setting)")
+    rc.add_argument("--no-remote-control", dest="remote_control", action="store_false",
+                    help="start a Claude Code session without Remote Control (not on your phone or claude.ai)")
 
     p = sub.add_parser("kinds", help="session kinds this server can run (claude, opencode, shell)")
     p.add_argument("--json", action="store_true")
@@ -2329,6 +2387,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", nargs="?")
     p.add_argument("--all", dest="all_", action="store_true",
                    help="all sessions; busy ones restart as soon as they are idle")
+
+    p = sub.add_parser("remote-control", help="a Claude Code session's Remote Control: on, off, toggle or status")
+    p.add_argument("name")
+    p.add_argument("action", choices=["on", "off", "toggle", "status"])
 
     p = sub.add_parser("upgrade", help="upgrade outdated sessions")
     p.add_argument("name", nargs="?")
@@ -2566,6 +2628,8 @@ def _dispatch(args) -> int:
         return unarchive_command(cockpit, args.name)
     if cmd == "restart":
         return restart_command(cockpit, args.name, args.all_)
+    if cmd == "remote-control":
+        return remote_control_command(cockpit, args.name, args.action)
     if cmd == "upgrade":
         return upgrade_command(cockpit, args.name, args.all)
     if cmd == "list":
@@ -2663,6 +2727,7 @@ def _dispatch(args) -> int:
 
 # commands that act on a host's sessions: run on the remote the ui shows (FORCE_HOST, SPEC §40)
 _FORWARDED = {"new", "rename", "sync-titles", "delete", "archive", "unarchive", "restart", "upgrade", "list", "switch",
+              "remote-control",
               "forget", "move", "kinds", "dirs", "prompt", "wait", "read", "keys", "report", "status", "explain",
               "import"}
 

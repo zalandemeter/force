@@ -299,6 +299,8 @@ class SessionView:
     title: str | None = None     # cleaned pane title (SPEC §43.4)
     unread: bool = False         # WORKING with a finding you have not seen (SPEC §5)
     watching: bool = False       # WORKING claude waiting on a background command (SPEC §5)
+    remote_control: bool | None = None   # a Claude Code session's Remote Control choice (SPEC §53)
+    rc_connected: bool = False   # its Remote Control is connected now (SPEC §53)
 
 
 @dataclass
@@ -367,6 +369,8 @@ class Snapshot:
                 "support": s.support,
                 "unread": s.unread,
                 "watching": s.watching,
+                "remote_control": s.remote_control,
+                "rc_connected": s.rc_connected,
             } for s in self.sessions],
         }
         if self.update:
@@ -403,6 +407,8 @@ class Snapshot:
                 title=s.get("title"),
                 unread=bool(s.get("unread")),
                 watching=bool(s.get("watching")),
+                remote_control=s.get("remote_control") if isinstance(s.get("remote_control"), bool) else None,
+                rc_connected=bool(s.get("rc_connected")),
             ))
         return Snapshot(generated_ms=d.get("generated_ms", 0),
                         latest_version=d.get("latest_version"),
