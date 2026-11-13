@@ -29,7 +29,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .activity import is_finding
+from .activity import is_mid_turn_finding
 from .claude import AgentStatus
 
 _TIMEOUT = 0.4
@@ -178,7 +178,7 @@ def activity_from_parts(parts) -> str | None:
 
 def reply_key(message) -> str | None:
     """The findings an assistant message has written you mid-turn (SPEC §5, unread): "<message id>:<count>" for
-    its text parts that are findings (`activity.is_finding`) with a tool part after them, else None (narration,
+    its text parts that are findings (`activity.is_mid_turn_finding`) with a tool part after them, else None (narration,
     a reply that ends the turn, the user's own message)."""
     if not isinstance(message, dict):
         return None
@@ -190,7 +190,7 @@ def reply_key(message) -> str | None:
         return None
     parts = [p for p in parts if isinstance(p, dict)]
     n = sum(1 for i, p in enumerate(parts)
-            if p.get("type") == "text" and is_finding(str(p.get("text") or ""))
+            if p.get("type") == "text" and is_mid_turn_finding(str(p.get("text") or ""))
             and any(q.get("type") == "tool" for q in parts[i + 1:]))
     if not n:
         return None
