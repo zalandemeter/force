@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the macOS release tarball (SPEC §51) on a Mac with Apple Silicon: no container, everything native.
 #
-#   scripts/build-darwin.sh [VERSION]      VERSION defaults to pyproject.toml's; output in $FORCE_BUILD_OUT
+#   scripts/build-darwin.sh [VERSION]      VERSION defaults to the newest release tag's; output in $FORCE_BUILD_OUT
 #                                          (default $FORCE_BUILD_ROOT/dist; the root defaults to build/out-darwin)
 #   scripts/build-darwin.sh --tmux-only    only Force's tmux (cached); prints the folder of its binary (CI puts it
 #                                          first on PATH, so the tests run the tmux Force ships, not Homebrew's)
@@ -16,7 +16,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TMUX_ONLY=0
 if [[ "${1:-}" == --tmux-only ]]; then TMUX_ONLY=1; shift; fi
-VERSION="${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/pyproject.toml" | head -1)}"
+VERSION="${1:-$("$REPO/scripts/version.sh")}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "build-darwin: version must be X.Y.Z, got '$VERSION'" >&2; exit 2; }
 [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo "build-darwin: run on macOS, Apple Silicon" >&2; exit 2; }
 DEFAULT_OUT="${FORCE_BUILD_ROOT:-$REPO/build/out-darwin}"

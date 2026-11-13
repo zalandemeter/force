@@ -49,7 +49,7 @@ jobs:
         run: command -v pkg-config >/dev/null || brew install pkgconf
       - name: Build the darwin-arm64 tarball
         run: |
-          v=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          v=$(scripts/version.sh)
           echo "VERSION=$v" >> "$GITHUB_ENV"
           scripts/build-darwin.sh "$v"
       - name: install.sh for the local web root
