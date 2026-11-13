@@ -84,6 +84,11 @@ def compute_state_why(entry: Entry, pane: PaneInfo | None, status: AgentStatus |
             return State.DOWN, prefix + f"agent pane dead (exit {pane.dead_status})"
         return State.DOWN, prefix + "agent pane dead"
 
+    # a status file without a status yet (issue #23): Claude Code is still starting, as with no file at all
+    if status is not None and not status.status:
+        prefix += "status file has no status yet; "
+        status = None
+
     if status is None:
         start_ms = pane.pane_started_ms
         if start_ms is None:
@@ -106,7 +111,7 @@ def compute_state_why(entry: Entry, pane: PaneInfo | None, status: AgentStatus |
         if seen.turn_done_ms > seen.last_seen_ms:
             return State.YOUR_TURN, "status: idle; turn finished, not viewed since"
         stale_ms = int(cfg.stale_hours * 3600 * 1000)
-        if now_ms - status.status_updated_ms > stale_ms:
+        if status.status_updated_ms is not None and now_ms - status.status_updated_ms > stale_ms:
             return State.STALE, (f"status: idle, unchanged for "
                                  f"{(now_ms - status.status_updated_ms) // 3600000} h "
                                  f"(stale after {cfg.stale_hours:g} h)")

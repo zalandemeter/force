@@ -1210,3 +1210,19 @@ They live in the `gui/<uid>` domain (`launchctl bootstrap` / `bootout` / `kickst
 while the user is logged in; there is no linger. Setup never reloads a loaded, unchanged tmux agent (it holds
 the sessions). A daemon started by launchd starts the tmux agent (`kickstart`), never a bare server, as under
 systemd.
+
+## 52. Messages between hosts
+An agent on one host drives a session on another with the §43.1 commands, addressed `HOST:NAME` (or `--host
+HOST`); session names never contain `:`. Force's own ssh connection (§40) carries it; nothing new to run.
+
+| Part | |
+|---|---|
+| HOST | a name from this machine's `hosts.json`, else a remote whose last hello named that machine (its short host name, `status.json` `detail`), else a **peer**: a host whose daemon watches this one (below). This machine's own short name means local. Anything else: `no_route` |
+| this machine connects to HOST | `prompt`, `wait`, `read`, `keys`, `explain` run there over ssh (`force CMD NAME [options] --from SENDER -- TEXT…` for prompt and keys, so a word starting with `-` stays text), with the local rules and options (`--wait`, `--until`, `--timeout`, `--json`, `-` = stdin, which is passed through ssh) and exit codes |
+| HOST watches this machine (a peer) | only `prompt`, without `--wait`: queued in `<state>/outbox/HOST/`, streamed to HOST over its `force watch` connection and delivered there by its daemon (`force prompt NAME - --from SENDER`). The sender gets `queued` (exit 0); the outcome is in HOST's message log. A peer = `<state>/peers/HOST.json` written by a live `force watch` (its pid), which reads the watching host's name as a first stdin line `{"peer": NAME}`; older readers send none and are no peer. Lines `{"prompt": {…}}` are ignored by older readers; the reader delivers one only when its sender's host is that remote (its name here or the name its hello gave), so a host cannot speak for another one. Queued messages older than 10 min are dropped (logged) |
+| sender | `--from SESSION@HOST`, filled in by Force: the calling pane's Force session (as `force report`, §43.2), else none (`@HOST`); HOST = this machine's short host name. Never typed by hand |
+| receiving host | `prompt` and `keys` with `--from` are refused (`not_accepted`, nothing sent) unless the setting `acceptPromptsFrom` (a space- or comma-separated list of host names, `*` = any; default empty = off) lists the sender's host. The §43.1 refusals still apply (`blocked` for a session that needs you, …). `read`, `wait`, `explain` need no setting (they change nothing; ssh access already reaches them) |
+| header | a delivered prompt starts with one line `[from SESSION on HOST · reply: force prompt HOST:SESSION "…"]` (`[from HOST]` without a session), then the text |
+| log | every cross-host prompt and keys, sent, queued, delivered or refused, as one JSON line in `<state>/messages.log` on both hosts: time, direction, from, to, command, result, length (never the text) |
+| trust | this is consent, not authentication: whoever can ssh to a host can run anything there. `acceptPromptsFrom` stops agents from driving another host's sessions unless its owner opted in |
+| agents | `share/skill.md` documents `HOST:NAME`, the header and replying |

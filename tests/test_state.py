@@ -7,7 +7,7 @@ from force.claude import AgentStatus
 from force.config import Config
 from force.registry import Entry
 from force.state import (PaneInfo, Seen, SessionView, Snapshot, State,
-                       color, compute_state, format_age, glyph, load_seen,
+                       color, compute_state, compute_state_why, format_age, glyph, load_seen,
                        read_snapshot, save_seen, unread, write_snapshot)
 
 
@@ -42,6 +42,21 @@ def cfg(**kw):
 
 
 NOW = 1_000_000
+
+
+def test_status_file_without_a_status_yet_is_starting():
+    # issue #23: the file exists, the status does not (yet): STARTING within the start grace, not UNKNOWN
+    st, why = compute_state_why(entry(), pane(start=NOW - 2_000), status(status="", updated=None), Seen(), NOW, cfg())
+    assert st is State.STARTING
+    assert "no status yet" in why
+    # after the grace, as with no status file at all
+    st, _ = compute_state_why(entry(), pane(start=NOW - 40_000), status(status="", updated=None), Seen(), NOW, cfg())
+    assert st is State.DOWN
+
+
+def test_idle_without_an_update_time_is_not_stale():
+    st, _ = compute_state_why(entry(), pane(), status(status="idle", updated=None), Seen(), NOW, cfg())
+    assert st is State.IDLE
 
 
 @pytest.mark.parametrize("entry_,pane_,status_,seen,expected", [

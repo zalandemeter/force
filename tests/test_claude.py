@@ -75,23 +75,31 @@ def test_read_status_missing_session_id(tmp_path):
     assert read_status(tmp_path, pid) is None
 
 
-def test_read_status_missing_fields_defaults(tmp_path):
+def test_read_status_before_the_first_status(tmp_path):
+    # issue #23: Claude Code writes the file before its first status; that is "not yet", never 1970
     pid = os.getpid()
     write_status(tmp_path, pid)
-    # remove status and statusUpdatedAt, add extra key
     data = {"pid": pid, "sessionId": "s-1", "extraKey": "x"}
     (tmp_path / "sessions" / f"{pid}.json").write_text(json.dumps(data))
     st = read_status(tmp_path, pid)
     assert st.session_id == "s-1"
-    assert st.status == "unknown"
-    assert st.status_updated_ms == 0
+    assert st.status == ""
+    assert st.status_updated_ms is None
 
 
-def test_read_status_non_int_status_updated(tmp_path):
+@pytest.mark.parametrize("bad", ["not-a-number", 0, -5, True, None, 1.5])
+def test_read_status_unusable_status_updated(tmp_path, bad):
     pid = os.getpid()
-    write_status(tmp_path, pid, statusUpdatedAt="not-a-number")
+    write_status(tmp_path, pid, statusUpdatedAt=bad)
     st = read_status(tmp_path, pid)
-    assert st.status_updated_ms == 0
+    assert st.status_updated_ms is None
+    assert st.status == "idle"
+
+
+def test_read_status_non_string_status_is_unknown(tmp_path):
+    pid = os.getpid()
+    write_status(tmp_path, pid, status=7)
+    assert read_status(tmp_path, pid).status == "unknown"
 
 
 def test_read_status_tolerates_extra_keys(tmp_path):

@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 
-from force import cli, remote
+from force import cli, messages, remote
 from force.config import get_paths
 from force.registry import locked
 
@@ -527,3 +527,45 @@ def test_remote_tmux_is_asked_once_and_kept(tmp_path, monkeypatch):
         returncode, stdout = 255, ""
 
     assert remote.remote_tmux(paths, remote.Remote("other", "x"), lambda a, **k: Fail()) == "tmux"
+
+
+def test_watch_peer_marks_streams_and_unmarks(env):
+    paths = env.paths
+    messages.queue(paths, "lap", {"to": "s", "text": "hi", "from": "a@h", "at": time.time()})
+    out = Lines(2)                                     # hello, then the single prompt line -> stop
+    remote.watch(paths, None, "split", interval=0.02, out=out, inp=io.StringIO('{"peer": "lap"}\n'))
+    lines = [json.loads(l) for l in out.getvalue().splitlines()]
+    assert lines[1] == {"prompt": {"to": "s", "text": "hi", "from": "a@h", "at": lines[1]["prompt"]["at"]}}
+    assert not list((paths.state / "outbox" / "lap").iterdir())     # the item was drained and deleted
+    assert not messages.peer_alive(paths, "lap")                     # unmarked on exit
+
+
+def test_watcher_sends_peer_and_delivers_prompt(env, monkeypatch, tmp_path):
+    _fake_ssh(monkeypatch, tmp_path, f"""
+import json, sys, time
+line = sys.stdin.readline()
+peer = json.loads(line)["peer"]
+print(json.dumps({{"hello": {{"proto": {remote.PROTO}, "version": "r9", "host": peer}}}}), flush=True)
+# a host cannot speak for another one over its own connection: this one is dropped
+print(json.dumps({{"prompt": {{"to": "sess", "text": "spoofed", "from": "a@somehost"}}}}), flush=True)
+print(json.dumps({{"prompt": {{"to": "sess", "text": "hi there", "from": "a@h"}}}}), flush=True)
+time.sleep(0.5)
+""")
+    paths = env.paths
+    remote.save(paths, [remote.Remote("h", "h")])
+    calls = []
+    monkeypatch.setattr(remote.subprocess, "run",
+                       lambda *a, **k: calls.append((a, k)) or type("R", (), {"returncode": 0})())
+    ws = remote.Watchers(paths)
+    ws.tick()
+    # the peer line (this machine's short host name) reached the script and came back as its hello host
+    assert wait_for(lambda: remote.read_status(paths, "h").get("detail") == messages.short_host())
+    # and the {"prompt": …} line was delivered by calling the launcher with the --from header and the text as stdin
+    assert wait_for(lambda: calls)
+    argv, kw = calls[0]
+    assert argv[0][1:3] == ["prompt", "sess"]
+    assert "--from" in argv[0] and "a@h" in argv[0]
+    assert kw.get("input") == "hi there"
+    time.sleep(0.3)
+    assert len(calls) == 1                     # the spoofed sender was not delivered
+    ws.stop()

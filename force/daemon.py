@@ -681,7 +681,8 @@ class Daemon:
             lv = latest[kind.name]
             if not (pv and lv and pv != lv):
                 continue
-            if now_ms - status.status_updated_ms < int(self.cfg.upgrade_idle_minutes * 60_000):
+            if status.status_updated_ms is None \
+                    or now_ms - status.status_updated_ms < int(self.cfg.upgrade_idle_minutes * 60_000):
                 continue
             if any(c.session == entry.name for c in clients):
                 continue
@@ -980,7 +981,8 @@ class Daemon:
                 latest_by_kind[kind.name] = lv if kind.name == "claude" else kind.latest_version(self.paths)
             latest = latest_by_kind[kind.name]
             outdated = bool(pv and latest and pv != latest)
-            since = status.status_updated_ms if status else pi.pane_started_ms
+            # no status written yet (issue #23): the pane's start, never 1970
+            since = status.status_updated_ms if status and status.status_updated_ms else pi.pane_started_ms
             card = kind.card(self, entry, _pane, reading)
             act, model, effort, mode = card.activity, card.model, card.effort, card.mode
             state, why0 = compute_state_why(entry, pi, status, seen.get(name, Seen()), now_ms, self.cfg)
