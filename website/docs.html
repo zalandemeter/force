@@ -136,6 +136,7 @@
           <tr><th scope="row"><kbd>K</kbd> <kbd>J</kbd></th><td>Move it up or down in the sidebar.</td></tr>
           <tr><th scope="row"><kbd>x</kbd></th><td>Restart it, same conversation.</td></tr>
           <tr><th scope="row"><kbd>u</kbd></th><td>Upgrade it to the newest agent version now.</td></tr>
+          <tr><th scope="row"><kbd>R</kbd></th><td>Remote Control on or off for it (restarts it when idle, keeping the conversation).</td></tr>
           <tr><th scope="row"><kbd>a</kbd> <kbd>A</kbd></th><td>Archive it; open the archive (<kbd>Enter</kbd> restores, <kbd>d</kbd> deletes).</td></tr>
           <tr><th scope="row"><kbd>d</kbd></th><td>Delete it for good (asks first).</td></tr>
           <tr><th scope="row"><kbd>e</kbd></th><td>Restart all sessions, busy ones once idle; for example after changing <code>~/.claude/settings.json</code>.</td></tr>
@@ -175,7 +176,10 @@
         session and Force deletes it; a session moved there stays stopped instead, its conversation kept.</p>
       <p>Claude Code sessions also appear in the Claude app under their Force name (Remote Control), so the name
         is the same in Force, in Claude and on your phone. To keep a session off your phone and claude.ai, uncheck
-        "Remote Control" in the new session dialog (Ctrl+R), or use <code>force new --no-remote-control</code>.</p>
+        "Remote Control" in the new session dialog (Ctrl+R), or use <code>force new --no-remote-control</code>.
+        For a session that already runs, Ctrl+Space <kbd>R</kbd> turns it on or off, and so does
+        <code>/remote-control</code> inside the session: Force follows it, so the session keeps that choice after a
+        restart. The <code>remoteControl</code> setting decides what new sessions get.</p>
       <h3>Bringing in sessions you already have</h3>
       <p><code>force import</code> lists the Claude Code sessions Force doesn't manage yet: running ones in any
         terminal and older stopped ones. <code>force import ID</code> (or a prefix of six or more characters) takes
@@ -270,6 +274,7 @@
           <tr><th scope="row"><code>layout</code></th><td><code>split</code></td><td><code>split</code> or <code>classic</code>.</td></tr>
           <tr><th scope="row"><code>opencodeManaged</code></th><td><code>false</code></td><td>Keep Force's own copy of OpenCode on the latest release.</td></tr>
           <tr><th scope="row"><code>checkForUpdates</code></th><td><code>true</code></td><td>The hourly check for a new Force.</td></tr>
+          <tr><th scope="row"><code>remoteControl</code></th><td><code>true</code></td><td>New Claude Code sessions start with Remote Control (the new session dialog's default).</td></tr>
           <tr><th scope="row"><code>supportAgent</code></th><td><code>auto</code></td><td>The agent Chuck runs on: <code>claude</code>, <code>opencode</code>, or the first one installed.</td></tr>
           <tr><th scope="row"><code>supportModel</code></th><td>the agent's</td><td>Chuck's model: for Claude Code <code>opus</code>, <code>sonnet</code> or an id; for OpenCode <code>provider/model</code>.</td></tr>
         </tbody>

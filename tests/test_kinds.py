@@ -381,4 +381,6 @@ def test_no_remote_control_is_for_claude_only(env, monkeypatch, capsys):
 def test_new_parser_no_remote_control():
     args = cli.build_parser().parse_args(["new", "x", "--no-remote-control"])
     assert args.remote_control is False
-    assert cli.build_parser().parse_args(["new", "x"]).remote_control is True
+    # no flag: the remoteControl setting decides (SPEC §53); --remote-control is the explicit opposite
+    assert cli.build_parser().parse_args(["new", "x"]).remote_control is None
+    assert cli.build_parser().parse_args(["new", "x", "--remote-control"]).remote_control is True

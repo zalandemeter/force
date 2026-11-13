@@ -72,6 +72,11 @@
       "default": true,
       "description": "check hourly whether a newer Force exists"
     },
+    "remoteControl": {
+      "type": "boolean",
+      "default": true,
+      "description": "new Claude Code sessions start with Remote Control (the New dialog's default)"
+    },
     "notifyCommand": {
       "type": "string",
       "default": "",

@@ -2,7 +2,7 @@
 # Key actions of a ui window (split mode, SPEC §39/§40): act on the host the window shows. This machine:
 # its tmux directly (fast); a remote: `force …` with FORCE_HOST, which runs it there over ssh.
 # Usage: ui-key.sh <ui socket_path> <window_id> <action> [arg]
-#   idx N | next | prev | last | restart | restart-all | upgrade | up | down | newshell NAME
+#   idx N | next | prev | last | restart | restart-all | upgrade | rc | up | down | newshell NAME
 S="$1"; W="$2"; A="$3"; ARG="$4"
 t() { tmux -S "$S" "$@"; }
 host=$(t display -p -t "$W" '#{@force_host}')
@@ -55,6 +55,7 @@ case "$A" in
   restart) on_shown; f restart "$sess" >/dev/null 2>&1 ;;
   restart-all) f restart --all >/dev/null 2>&1 ;;
   upgrade) on_shown; f upgrade "$sess" >/dev/null 2>&1 ;;
+  rc) on_shown; m=$(f remote-control "$sess" toggle 2>&1); t display-message -d 4000 " $m " ;;    # SPEC §53
   up|down) on_shown; f move "$sess" "$A" >/dev/null 2>&1 ;;
   newshell) f new "$ARG" --shell --no-switch >/dev/null 2>&1 && $htmux switch-client -c "$nested" -t "=$ARG" 2>/dev/null ;;
 esac

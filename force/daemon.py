@@ -192,6 +192,21 @@ def notify_env(view, event: str) -> dict[str, str]:
     }
 
 
+RC_OFF_AFTER_MS = 60_000
+
+
+def rc_follow(choice_on: bool, connected: bool, seen_connected: bool, disconnected_for_ms: int | None) -> bool | None:
+    """SPEC §53, follow Claude: the session's new Remote Control choice, or None to keep it. Connected while the
+    choice is off -> on (`/remote-control` in the session). Not connected while it is on -> off only when this
+    process was seen connected and has been disconnected for RC_OFF_AFTER_MS (the panel's Disconnect; a short
+    network drop is not a choice, and a session that never connected is left alone)."""
+    if connected:
+        return True if not choice_on else None
+    if choice_on and seen_connected and disconnected_for_ms is not None and disconnected_for_ms >= RC_OFF_AFTER_MS:
+        return False
+    return None
+
+
 def title_sync_ready(screen: str, connected: bool = False) -> bool:
     """Remote Control is connected (`connected`: Claude's status file names its Remote Control session; or the
     screen still shows "remote-control is active", which scrolls away in a long session) and the input line is
@@ -272,6 +287,8 @@ class Daemon:
         self._note_procs: list = []               # (Popen, clock started)
         self._update_wake = threading.Event()     # wakes the update check early (SPEC §3)
         self._client_names: set[str] | None = None  # tmux clients attached on the last tick
+        # SPEC §53 follow Claude: name -> (pid, seen connected in this pid, disconnected since ms or None)
+        self._rc_seen: dict[str, tuple[int, bool, int | None]] = {}
         # current tick state
         self._registry = []
         self._skipping = False
@@ -792,14 +809,42 @@ class Daemon:
 
     def _rc_connected(self, pane_info) -> bool:
         """Claude's status file (sessions/<pid>.json) names its Remote Control session: it is connected."""
-        pid = getattr(pane_info, "pane_pid", None)
+        return claude_mod.rc_connected(self.paths.claude_dir, getattr(pane_info, "pane_pid", None))
+
+    def _follow_rc(self, entry, pi, now_ms: int) -> tuple[bool, str | None]:
+        """SPEC §53: whether this Claude session's Remote Control is connected now, and follow a `/remote-control`
+        typed in it into the registry choice (so a restart keeps it). Returns (connected, a why clause or None)."""
+        pid = getattr(pi, "pane_pid", None)
+        connected = self._rc_connected(pi)
         if not pid:
-            return False
-        try:
-            data = json.loads((self.paths.claude_dir / "sessions" / f"{pid}.json").read_text())
-        except (OSError, ValueError):
-            return False
-        return isinstance(data, dict) and bool(data.get("bridgeSessionId"))
+            self._rc_seen.pop(entry.name, None)
+            return connected, None
+        prev = self._rc_seen.get(entry.name)
+        if prev is None or prev[0] != pid:
+            prev = (pid, False, None)           # a new process: watch afresh
+        _pid, seen, since = prev
+        if connected:
+            seen, since = True, None
+        elif since is None:
+            since = now_ms
+        self._rc_seen[entry.name] = (pid, seen, since)
+        choice = remote_control(entry)
+        new = rc_follow(choice, connected, seen, None if since is None else now_ms - since)
+        if new is None:
+            return connected, None
+        with locked(self.paths.home) as reg:
+            e = reg.get(entry.name)
+            if e is None:
+                return connected, None
+            if new:
+                e.extra.pop("remote_control", None)
+            else:
+                e.extra["remote_control"] = False
+        if new:                                 # this tick's copy follows too
+            entry.extra.pop("remote_control", None)
+        else:
+            entry.extra["remote_control"] = False
+        return connected, f"remote control: turned {'on' if new else 'off'} in the session"
 
     def _clear_title_sync(self, name: str, why: str) -> None:
         with locked(self.paths.home) as reg:
@@ -1094,6 +1139,12 @@ class Daemon:
                 and status.status == "shell"
             if is_watching:
                 clauses.append("watching: waits on background work of its own")
+            rc_choice = rc_live = None
+            if kind_of(entry) == "claude" and not is_support(entry):
+                rc_live, rc_clause = self._follow_rc(entry, pi, now_ms)
+                rc_choice = remote_control(entry)
+                if rc_clause:
+                    clauses.append(rc_clause)
             note = None
             mark = None if is_shell(entry) else self.cockpit.restarted(name)
             if mark is not None:
@@ -1118,10 +1169,13 @@ class Daemon:
                 mode=mode, model=model, effort=effort,
                 shared=(entry.extra.get("shares") or None) if self.cfg.sharing else None,
                 note=note, kind=kind_of(entry), why="; ".join(clauses), title=title,
-                support=is_support(entry), unread=is_unread, watching=is_watching))
+                support=is_support(entry), unread=is_unread, watching=is_watching,
+                remote_control=rc_choice, rc_connected=bool(rc_live)))
         self._views = views
         # a session that went away takes its reply times along: one created again under its name starts without them
         ids, names = {e.session_id for e in self._registry}, {e.name for e in self._registry}
+        for n in [n for n in self._rc_seen if n not in names]:
+            self._rc_seen.pop(n)
         for k in [k for k in self._reply if k not in ids]:
             del self._reply[k]
         for k in [k for k in self._oc_reply if k not in names]:

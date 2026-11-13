@@ -39,6 +39,19 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def rc_connected(claude_dir: Path, pid: int | None) -> bool:
+    """Remote Control is connected for the Claude process `pid` (SPEC §53): its status file
+    (sessions/<pid>.json) names its Remote Control session (`bridgeSessionId`), which goes away when it is
+    disconnected (the /remote-control panel's Disconnect)."""
+    if not pid:
+        return False
+    try:
+        data = json.loads((claude_dir / "sessions" / f"{pid}.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and bool(data.get("bridgeSessionId"))
+
+
 def read_status(claude_dir: Path, pid: int) -> AgentStatus | None:
     """Read claude_dir/sessions/<pid>.json. None if missing, unreadable, not JSON, missing sessionId,
     or the pid is not alive (os.kill(pid, 0) raises ProcessLookupError). Claude Code writes the file before its

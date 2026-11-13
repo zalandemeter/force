@@ -304,6 +304,8 @@ pub struct Dialog {
     pub new_focus: NewFocus,
     /// Start a Claude Code session with Remote Control (the checkbox, checked by default; SPEC §53).
     pub new_remote: bool,
+    /// This machine's `remoteControl` setting (SPEC §53): the box's start value.
+    pub new_remote_default: bool,
 
     // rename
     pub rename_input: String,
@@ -410,6 +412,7 @@ impl Dialog {
             cwd_input: default_cwd,
             new_focus: NewFocus::Name,
             new_remote: true,
+            new_remote_default: true,
             rename_input: String::new(),
             rename_cursor: 0,
             move_input: String::new(),
@@ -435,6 +438,8 @@ impl Dialog {
         match kind {
             Kind::New => {
                 d.new_kinds = parse_kinds(d.runner.cockpit(&["kinds".to_string(), "--json".to_string()]).ok());
+                d.new_remote_default = rc_default(d.runner.cockpit(&["settings".to_string(), "--json".to_string()]).ok());
+                d.new_remote = d.new_remote_default;
                 d.new_focus = NewFocus::Name; // type the name right away (as the Python dialog)
                 d.validate_new();
             }
@@ -1321,9 +1326,14 @@ impl Dialog {
             Some("opencode") => argv.extend(["--kind".to_string(), "opencode".to_string()]),
             _ => {}
         }
-        // only when unchecked, so an older Force (a remote host) still takes a checked box (SPEC §53)
-        if self.remote_offered() && !self.new_remote {
-            argv.push("--no-remote-control".to_string());
+        // SPEC §53: unchecked -> --no-remote-control; checked -> --remote-control only against an "off" default, so an
+        // older Force (a remote host) never sees a flag it does not know unless the box was turned on against it
+        if self.remote_offered() {
+            if !self.new_remote {
+                argv.push("--no-remote-control".to_string());
+            } else if !self.new_remote_default {
+                argv.push("--remote-control".to_string());
+            }
         }
         match self.runner.cockpit(&argv) {
             Err(e) => self.set_status(StatusKind::Error, e),
@@ -1744,6 +1754,14 @@ fn toggle(buf: &mut Buffer, x: usize, y: usize, label: &str, bg: Color, fg: Colo
 
 /// The kinds `<force-bin> kinds --json` reports, in the dialog's order; claude + shell when it cannot be
 /// asked (an older force) or answers nothing usable.
+/// The `remoteControl` setting from `force settings --json` (SPEC §53): its boolean, else on (no answer, an older
+/// Force without the key, anything unexpected).
+fn rc_default(out: Option<String>) -> bool {
+    out.and_then(|o| serde_json::from_str::<serde_json::Value>(&o).ok())
+        .and_then(|v| v.get("remoteControl").and_then(|b| b.as_bool()))
+        .unwrap_or(true)
+}
+
 fn parse_kinds(out: Option<String>) -> Vec<String> {
     let known = ["claude", "opencode", "shell"];
     let got: Vec<String> = out
@@ -2168,7 +2186,7 @@ mod tests {
         assert!(d.done);
         let c = runner.logs.cockpit.borrow();
         assert_eq!(c[0], vec!["kinds", "--json"], "asks which kinds exist");
-        assert_eq!(c[1], vec!["new", "portal", "--cwd", "/tmp", "--no-switch"]);
+        assert_eq!(c[2], vec!["new", "portal", "--cwd", "/tmp", "--no-switch"]);
         let t = runner.logs.tmux.borrow();
         assert_eq!(t[0], vec!["switch-client", "-t", "=portal"]);
     }
@@ -2180,6 +2198,7 @@ mod tests {
         let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
         let runner = FakeRunner::new();
         runner.logs.cockpit_resp.borrow_mut().push_back(Ok(r#"["claude","opencode","shell"]"#.to_string()));
+        runner.logs.cockpit_resp.borrow_mut().push_back(Ok("{}".to_string()));   // settings --json (SPEC §53)
         runner.logs.cockpit_resp.borrow_mut().push_back(Ok("new-2".to_string()));
         let mut d = Dialog::new(Kind::New, None, &reg, &snap, Box::new(runner.clone()), Tier::Plain, 64, 17);
         d.name_input = "".into();
@@ -2191,7 +2210,7 @@ mod tests {
         d.action_submit_new();
         assert!(d.done);
         let c = runner.logs.cockpit.borrow();
-        assert_eq!(c[1], vec!["new", "--cwd", "/tmp", "--no-switch"]);
+        assert_eq!(c[2], vec!["new", "--cwd", "/tmp", "--no-switch"]);
         assert_eq!(runner.logs.tmux.borrow()[0], vec!["switch-client", "-t", "=new-2"]);
     }
 
@@ -2217,7 +2236,7 @@ mod tests {
         d.name_input = "portal".into();
         d.cwd_input = "/tmp".into();
         d.action_submit_new();
-        assert_eq!(runner.logs.cockpit.borrow()[1], vec!["new", "portal", "--cwd", "/tmp", "--no-switch"]);
+        assert_eq!(runner.logs.cockpit.borrow()[2], vec!["new", "portal", "--cwd", "/tmp", "--no-switch"]);
     }
 
     #[test]
@@ -2241,7 +2260,7 @@ mod tests {
         assert!(rc_row(&buf).contains("[ ] Remote Control"));
         d.handle_key(rc_key(KeyCode::Enter, KeyModifiers::NONE), 0);
         assert!(d.done);
-        assert_eq!(runner.logs.cockpit.borrow()[1],
+        assert_eq!(runner.logs.cockpit.borrow()[2],
                    vec!["new", "portal", "--cwd", "/tmp/", "--no-switch", "--no-remote-control"]);
     }
 
@@ -2259,6 +2278,42 @@ mod tests {
             column: 4, row: NEW_REMOTE_Y as u16, modifiers: KeyModifiers::NONE });
         assert!(d.new_remote, "a click on the row toggles it back");
         assert_eq!(d.new_focus, NewFocus::Remote);
+    }
+
+    #[test]
+    fn new_remote_control_default_from_the_setting() {
+        // SPEC §53: the box starts from remoteControl; checked against an "off" default sends --remote-control
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let runner = FakeRunner::new();
+        runner.logs.cockpit_resp.borrow_mut().push_back(Ok(r#"["claude","shell"]"#.to_string()));
+        runner.logs.cockpit_resp.borrow_mut().push_back(Ok(r#"{"remoteControl": false, "intro": true}"#.to_string()));
+        let mut d = Dialog::new(Kind::New, None, &reg, &snap, Box::new(runner.clone()), Tier::Plain, 64, 17);
+        assert!(!d.new_remote_default && !d.new_remote, "off by the setting: unchecked");
+        assert_eq!(runner.logs.cockpit.borrow()[1], vec!["settings", "--json"]);
+        d.name_input = "a".into();
+        d.cwd_input = "/tmp".into();
+        d.action_submit_new();
+        assert_eq!(runner.logs.cockpit.borrow()[2], vec!["new", "a", "--cwd", "/tmp", "--no-switch", "--no-remote-control"]);
+
+        let runner = FakeRunner::new();
+        runner.logs.cockpit_resp.borrow_mut().push_back(Ok(r#"["claude","shell"]"#.to_string()));
+        runner.logs.cockpit_resp.borrow_mut().push_back(Ok(r#"{"remoteControl": false}"#.to_string()));
+        let mut d = Dialog::new(Kind::New, None, &reg, &snap, Box::new(runner.clone()), Tier::Plain, 64, 17);
+        d.new_remote = true;                       // turned on against the default
+        d.name_input = "b".into();
+        d.cwd_input = "/tmp".into();
+        d.action_submit_new();
+        assert_eq!(runner.logs.cockpit.borrow()[2], vec!["new", "b", "--cwd", "/tmp", "--no-switch", "--remote-control"]);
+    }
+
+    #[test]
+    fn new_remote_control_default_is_on_without_an_answer() {
+        assert!(rc_default(None));
+        assert!(rc_default(Some("not json".into())));
+        assert!(rc_default(Some(r#"{"intro": true}"#.into())), "an older Force without the key");
+        assert!(rc_default(Some(r#"{"remoteControl": "no"}"#.into())), "not a boolean");
+        assert!(!rc_default(Some(r#"{"remoteControl": false}"#.into())));
     }
 
     #[test]
@@ -2282,7 +2337,7 @@ mod tests {
         d.name_input = "sh".into();
         d.cwd_input = "/tmp".into();
         d.action_submit_new();
-        assert_eq!(runner.logs.cockpit.borrow()[1], vec!["new", "sh", "--cwd", "/tmp", "--no-switch", "--shell"]);
+        assert_eq!(runner.logs.cockpit.borrow()[2], vec!["new", "sh", "--cwd", "/tmp", "--no-switch", "--shell"]);
     }
 
     #[test]
@@ -2296,7 +2351,7 @@ mod tests {
         d.new_kind = d.new_kinds.iter().position(|k| k == "shell").unwrap();
         d.action_submit_new();
         let c = runner.logs.cockpit.borrow();
-        assert_eq!(c[1], vec!["new", "shell1", "--cwd", "/tmp", "--no-switch", "--shell"]);
+        assert_eq!(c[2], vec!["new", "shell1", "--cwd", "/tmp", "--no-switch", "--shell"]);
     }
 
     #[test]
@@ -2323,7 +2378,7 @@ mod tests {
         d.step_kind(1);
         d.action_submit_new();
         let c = runner.logs.cockpit.borrow();
-        assert_eq!(c[1], vec!["new", "oc1", "--cwd", "/tmp", "--no-switch", "--kind", "opencode"]);
+        assert_eq!(c[2], vec!["new", "oc1", "--cwd", "/tmp", "--no-switch", "--kind", "opencode"]);
     }
 
     #[test]

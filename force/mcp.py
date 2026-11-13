@@ -84,7 +84,7 @@ TOOLS: dict[str, tuple[str, dict, bool]] = {
                        cwd=_str("its folder (default: home)", optional=True),
                        kind=_str("claude, opencode or shell", optional=True, enum=["claude", "opencode", "shell"]),
                        remote_control={"type": "boolean", "description": "Claude Code only: false starts it "
-                                       "without Remote Control (default true)", "optional": True}),
+                                       "without Remote Control, true with it (default: the remoteControl setting)", "optional": True}),
                     False),
     "session_rename": ("Rename a session (force rename OLD NEW).",
                        _s("", old=_str("its name now"), new=_str("the new name")), False),
@@ -223,6 +223,8 @@ def call(name: str, args: dict, paths=None, ssh_check=None) -> tuple[bool, str]:
                 argv += ["--kind", args["kind"]]
             if args.get("remote_control") is False:
                 argv.append("--no-remote-control")
+            elif args.get("remote_control") is True:
+                argv.append("--remote-control")       # SPEC §53: on a host whose remoteControl default is off
             argv.append("--no-switch")
             rc, out = _force(*argv)
         elif name == "session_rename":
