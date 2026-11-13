@@ -945,11 +945,14 @@ impl Dialog {
     }
 
     fn draw_archived(&mut self, buf: &mut Buffer) {
-        self.draw_title(buf, '\u{F187}', "Archived sessions");
+        let entries = archived_sorted(&self.entries);
+        // the count in the title: the list can hold more than fits (11 archived, 7 shown)
+        let title = if entries.is_empty() { "Archived sessions".to_string() }
+                    else { format!("Archived sessions ({})", entries.len()) };
+        self.draw_title(buf, '\u{F187}', &title);
         let list_top = ARCH_LIST_TOP;
         let bottom = self.h.saturating_sub(3);
         let list_h = bottom.saturating_sub(list_top);
-        let entries = archived_sorted(&self.entries);
         if entries.is_empty() {
             let lines = ["Nothing archived yet.", "Archive a session with Ctrl+Space a."];
             let start = list_top + (list_h / 2).saturating_sub(1);
@@ -960,10 +963,13 @@ impl Dialog {
             self.status_text_y(buf, bottom);
             return;
         }
-        let visible = list_h / 2;
-        let top = scroll_top(self.arch_cursor, visible, entries.len());
-        let mut row = list_top;
-        for (idx, e) in entries.iter().enumerate().skip(top) {
+        let (top, visible, up, down) = self.arch_layout(entries.len());
+        let more = |n: usize, arrow: char| format!("{arrow} {n} more");
+        if up {
+            let _ = put(buf, CONTENT_LEFT, list_top, &more(top, '↑'), FG_DIM);
+        }
+        let mut row = list_top + up as usize;
+        for (idx, e) in entries.iter().enumerate().skip(top).take(visible) {
             if row + 1 >= bottom {
                 break;
             }
@@ -980,7 +986,31 @@ impl Dialog {
             let _ = put_trunc_on(buf, CONTENT_LEFT, row + 1, &meta, FG_DIM, bg, self.content_w());
             row += 2;
         }
+        if down {
+            let below = entries.len().saturating_sub(top + visible);
+            let _ = put(buf, CONTENT_LEFT, list_top + up as usize + 2 * visible, &more(below, '↓'), FG_DIM);
+        }
         self.status_text_y(buf, bottom);
+    }
+
+    /// The archived list's layout: (first entry shown, entries that fit, a `↑ N more` row above them, a `↓ N more`
+    /// row below them). Each entry takes two rows and each `more` row one, so the two depend on each other: settle
+    /// them in a few passes. Drawing and clicks both use it.
+    fn arch_layout(&self, n: usize) -> (usize, usize, bool, bool) {
+        let rows = self.h.saturating_sub(3).saturating_sub(ARCH_LIST_TOP);
+        let (mut up, mut down) = (false, false);
+        let mut out = (0, 0, false, false);
+        for _ in 0..4 {
+            let visible = (rows.saturating_sub(up as usize + down as usize) / 2).max(1);
+            let top = scroll_top(self.arch_cursor, visible, n);
+            out = (top, visible, up, down);
+            let (u, d) = (top > 0, top + visible < n);
+            if (u, d) == (up, down) {
+                break;
+            }
+            (up, down) = (u, d);
+        }
+        out
     }
 
     fn draw_jump(&mut self, buf: &mut Buffer) {
@@ -1126,6 +1156,20 @@ impl Dialog {
         if self.done {
             return;
         }
+        // the wheel moves the selection one entry per notch, which scrolls the list as the arrow keys do
+        if let MouseEventKind::ScrollUp | MouseEventKind::ScrollDown = m.kind {
+            let down = matches!(m.kind, MouseEventKind::ScrollDown);
+            let step = |cur: usize, n: usize| if down { (cur + 1).min(n.saturating_sub(1)) } else { cur.saturating_sub(1) };
+            match self.kind {
+                Kind::Archived => {
+                    let n = archived_sorted(&self.entries).len();
+                    self.arch_cursor = step(self.arch_cursor, n);
+                }
+                Kind::Jump => self.jump_sel = step(self.jump_sel, self.jump_shown.len()),
+                _ => {}
+            }
+            return;
+        }
         if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
             return;
         }
@@ -1152,17 +1196,18 @@ impl Dialog {
                 if entries.is_empty() {
                     return;
                 }
-                let list_top = ARCH_LIST_TOP;
-                let bottom = self.h.saturating_sub(3);
-                let visible = (bottom - list_top) / 2;
-                let top = scroll_top(self.arch_cursor, visible, entries.len());
-                if row < list_top {
-                    return;
-                }
-                let idx = top + (row - list_top) / 2;
-                if idx < entries.len() {
-                    self.arch_cursor = idx;
-                    self.action_arch_choose();
+                let (top, visible, up, down) = self.arch_layout(entries.len());
+                let first = ARCH_LIST_TOP + up as usize;
+                if up && row == ARCH_LIST_TOP {
+                    self.arch_cursor = top.saturating_sub(visible);                 // `↑ N more`: a page up
+                } else if down && row == first + 2 * visible {
+                    self.arch_cursor = (top + 2 * visible - 1).min(entries.len() - 1);   // `↓ N more`: a page down
+                } else if row >= first && row < first + 2 * visible {
+                    let idx = top + (row - first) / 2;
+                    if idx < entries.len() {
+                        self.arch_cursor = idx;
+                        self.action_arch_choose();
+                    }
                 }
             }
             Kind::Jump => {
@@ -2683,6 +2728,89 @@ mod tests {
             fn tmux_ok(&self, _a: &[String]) -> bool { false }
         }
         Box::new(R)
+    }
+
+    fn archived_reg(n: usize) -> std::path::PathBuf {
+        let rows: Vec<String> = (0..n).map(|i| format!(
+            r#"{{"name":"s{i:02}","cwd":"/tmp","archived":true,"archived_at":"2026-11-{:02}T00:00:00Z","created_at":"x","order":0}}"#,
+            28 - i)).collect();
+        tmp_file(&format!(r#"{{"sessions":[{}]}}"#, rows.join(",")))
+    }
+
+    fn screen(d: &mut Dialog) -> Vec<String> {
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, d.w as u16, d.h as u16));
+        d.draw(&mut buf);
+        (0..d.h as u16).map(|y| (0..d.w as u16).map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string())
+            .unwrap_or_default()).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn archived_shows_the_count_and_what_is_out_of_view() {
+        // 11 archived in a 72x19 popup: the title counts them, a `↓ N more` row says some are below
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let mut d = Dialog::new(Kind::Archived, None, &archived_reg(11), &snap, Box::new(FakeRunner::new()), Tier::Plain, 72, 19);
+        let rows = screen(&mut d);
+        assert!(rows[1].contains("Archived sessions (11)"), "{:?}", rows[1]);
+        let (top, visible, up, down) = d.arch_layout(11);
+        assert!((top, up, down) == (0, false, true), "{top} {visible} {up} {down}");
+        assert!(rows.iter().any(|r| r.contains(&format!("↓ {} more", 11 - visible))), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("↑")));
+        // the wheel moves the selection, and the list follows it
+        for _ in 0..10 {
+            d.handle_mouse(&wheel(true));
+        }
+        assert_eq!(d.arch_cursor, 10, "ten notches down: the last entry");
+        d.handle_mouse(&wheel(true));
+        assert_eq!(d.arch_cursor, 10, "the wheel stops at the end (it does not wrap like the arrow keys)");
+        let rows = screen(&mut d);
+        let (top, _, up, down) = d.arch_layout(11);
+        assert!(up && !down);
+        assert!(rows.iter().any(|r| r.contains(&format!("↑ {top} more"))), "{rows:#?}");
+        d.handle_mouse(&wheel(false));
+        assert_eq!(d.arch_cursor, 9);
+    }
+
+    #[test]
+    fn archived_more_rows_page_on_click_and_entries_still_hit() {
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let mut d = Dialog::new(Kind::Archived, None, &archived_reg(11), &snap, Box::new(FakeRunner::new()), Tier::Plain, 72, 19);
+        let (_, visible, _, _) = d.arch_layout(11);
+        let down_row = (ARCH_LIST_TOP + 2 * visible) as u16;
+        d.handle_mouse(&click(10, down_row));
+        assert_eq!(d.arch_cursor, (2 * visible - 1).min(10), "`↓ N more`: a page down (at most the last), nothing restored");
+        assert!(!d.done);
+        let (top, visible, up, _) = d.arch_layout(11);
+        assert!(up);
+        d.handle_mouse(&click(10, ARCH_LIST_TOP as u16));
+        assert_eq!(d.arch_cursor, top.saturating_sub(visible), "`↑ N more`: a page up");
+    }
+
+    #[test]
+    fn jump_scrolls_with_the_wheel() {
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[
+            {"name":"a","state":"IDLE","index":1,"cwd":"/"},{"name":"b","state":"IDLE","index":2,"cwd":"/"},
+            {"name":"c","state":"IDLE","index":3,"cwd":"/"}]}"#);
+        let mut d = Dialog::new(Kind::Jump, None, &reg, &snap, Box::new(FakeRunner::new()), Tier::Plain, 64, 17);
+        let start = d.jump_sel;
+        d.handle_mouse(&wheel(true));
+        assert_eq!(d.jump_sel, (start + 1).min(d.jump_shown.len() - 1));
+        d.handle_mouse(&wheel(false));
+        assert_eq!(d.jump_sel, start);
+    }
+
+    fn wheel(down: bool) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: if down { crossterm::event::MouseEventKind::ScrollDown } else { crossterm::event::MouseEventKind::ScrollUp },
+            column: 10, row: 8, modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn click(col: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: col, row, modifiers: crossterm::event::KeyModifiers::NONE,
+        }
     }
 
     #[test]

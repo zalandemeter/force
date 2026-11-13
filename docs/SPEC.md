@@ -493,6 +493,9 @@ guarded by tests/test_dev_tree.py).
   no keyboard cursor; no scrollbar; `     archived (n)` and `   + new session` aligned with the names.
 - **Dialogs**: padded frame, sentence-case title, labelled fields, coloured status row (× / ✓), a
   docked key-hint footer.
+  Lists (archived, jump): the mouse wheel moves the selection one entry per notch (no wrap). The archived list
+  counts its entries in the title (`Archived sessions (11)`) and shows `↑ N more` / `↓ N more` rows when entries are
+  out of view; a click on one pages up or down.
 - **Quit**: menu `q` or a click on `× quit` detach this terminal only; every session
   keeps running.
 - **Several terminals**: each attached terminal has its own current session. `force attach` opens on
