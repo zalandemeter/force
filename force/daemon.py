@@ -1,6 +1,7 @@
 """The force supervisor loop (SPEC §6)."""
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import json
 import os
@@ -123,12 +124,18 @@ def _install_join(tmux_conf: Path) -> None:
         _log("shares", e)
 
 
-def shown_activity(status, act: str | None) -> str | None:
-    """The activity phrase for a session. Claude reports `shell` when its turn is over but a background
-    command it started is still running (it resumes when that ends): the transcript's last record is then
-    usually the reply text, so the phrase would wrongly say "writing a reply"."""
+def shown_activity(status, act: str | None, waiting=None) -> str | None:
+    """The activity phrase for a session. A watching Claude session (SPEC §5) — its effective status is `shell` —
+    shows `waiting · <the newest counting task's description>` (`+N` when more count; "a background command"
+    when none are known), not the transcript's last-record phrase ("writing a reply")."""
     if status is not None and status.status == "shell":
-        return "waiting for a command"
+        if waiting:
+            desc = activity._task_desc(waiting[-1])
+            out = f"waiting · {desc}"
+            if len(waiting) > 1:
+                out += f" +{len(waiting) - 1}"
+            return out
+        return "waiting · a background command"
     return act
 
 
@@ -254,6 +261,7 @@ class Daemon:
         self._oc_agent: dict[str, str] = {}       # OpenCode sessions: name -> agent seen on screen
         self._shell_prog: dict[str, tuple] = {}   # shells: name -> (pid, program, since clock, change ms) (§49.3)
         self._readings: dict[str, kinds.Reading] = {}   # name -> this tick's kinds.Reading (§49.1)
+        self._waiting: dict[str, list] = {}            # name -> the counting background tasks (SPEC §5, watching)
         self._claude_name: dict[str, tuple] = {}  # name -> (pid, the name in Claude's status file) last tick
         self._auto_name_last: dict[str, float] = {}   # name -> clock of the last first-prompt look (§49.6)
         # notifications (SPEC §49.4)
@@ -296,15 +304,15 @@ class Daemon:
     def _now_ms(self) -> int:
         return int(self.clock() * 1000)
 
-    def _config_for(self, session_id: str) -> tuple[str | None, str | None, str | None, int | None]:
-        """(activity, model, effort, reply_ms) for a live session, cached per transcript path keyed by
-        (st_mtime_ns, st_size) and throttled to at most one recompute per 3 s of clock time per session. All
-        None when no session_id, no transcript, or the transcript is unreadable."""
+    def _config_for(self, session_id: str) -> tuple[str | None, str | None, str | None, int | None, int | None]:
+        """A `Scan` for a live session, cached per transcript path keyed by (st_mtime_ns, st_size) and throttled to
+        at most one recompute per 3 s of clock time per session. Empty when no session_id, no transcript, or the
+        transcript is unreadable."""
         if not session_id:
-            return None, None, None, None
+            return activity.Scan(None, None, None, None, None, (), False)
         path = claude_mod.find_transcript(self.paths.claude_dir, session_id)
         if path is None:
-            return None, None, None, None
+            return activity.Scan(None, None, None, None, None, (), False)
         try:
             st = os.stat(path)
             key = (st.st_mtime_ns, st.st_size)
@@ -385,6 +393,13 @@ class Daemon:
         reading = kinds.Reading()
         if entry is not None:
             reading = kinds.of(entry).read(self, entry, pane)
+            if kind_of(entry) == "claude" and reading.status is not None:
+                # effective status (SPEC §5 watching): the counting background tasks decide what a `shell`/`idle`
+                # status means, and the rest of the daemon (turn transition, is_watching, unread) reads it.
+                eff, tasks = self._effective_status(entry, reading.status,
+                                                (pane.started_ms if pane else None))
+                reading = dataclasses.replace(reading, status=eff)
+                self._waiting[name] = tasks
         self._readings[name] = reading
         status = reading.status
         pane_info = PaneInfo(
@@ -396,6 +411,21 @@ class Daemon:
             dead_signal=(pane.dead_signal if pane else None),
         )
         return pane, status, pane_info
+
+    def _effective_status(self, entry, status, pane_started_ms):
+        """The status the §5 watching rules act on (SPEC §5 "Effective status"): a `shell`/`idle` status with at
+        least one counting background task is treated as `shell` (WORKING, watching); `shell` without one but with a
+        background record (only endless commands, or whose notice came) is treated as `idle`; `shell` with no
+        background record at all stays `shell` (watching, described as "a background command")."""
+        sc = self._config_for(entry.session_id)
+        tasks = activity.waiting_tasks(status.status, sc.background, pane_started_ms, self._now_ms())
+        if status.status in ("shell", "idle") and tasks:
+            eff = dataclasses.replace(status, status="shell")
+        elif status.status == "shell" and (sc.background or sc.launched_any):
+            eff = dataclasses.replace(status, status="idle")
+        else:
+            eff = status
+        return eff, tasks
 
     def _per_tick(self) -> dict:
         """name -> (pane, status, pane_info, version), built lazily once per tick from the live
@@ -1037,6 +1067,10 @@ class Daemon:
             if is_unread:
                 clauses.append(f"unread: a finding written {max(0, now_ms - self._reply[sid]) // 1000} s ago, "
                                "not viewed since")
+            is_watching = state is State.WORKING and kind_of(entry) == "claude" and status is not None \
+                and status.status == "shell"
+            if is_watching:
+                clauses.append("watching: waits on background work of its own")
             note = None
             mark = None if is_shell(entry) else self.cockpit.restarted(name)
             if mark is not None:
@@ -1061,7 +1095,7 @@ class Daemon:
                 mode=mode, model=model, effort=effort,
                 shared=(entry.extra.get("shares") or None) if self.cfg.sharing else None,
                 note=note, kind=kind_of(entry), why="; ".join(clauses), title=title,
-                support=is_support(entry), unread=is_unread))
+                support=is_support(entry), unread=is_unread, watching=is_watching))
         self._views = views
         # a session that went away takes its reply times along: one created again under its name starts without them
         ids, names = {e.session_id for e in self._registry}, {e.name for e in self._registry}

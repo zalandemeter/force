@@ -262,6 +262,21 @@ def test_snapshot_to_from_json_roundtrip(tmp_path):
     assert loaded.sessions[0].since_ms == 5
 
 
+def test_snapshot_watching_roundtrip(tmp_path):
+    """SPEC §5: the `watching` flag flows through the snapshot dict (write and read)."""
+    sv = SessionView(name="w", index=1, state=State.WORKING, since_ms=5,
+                   version="2.1.1", outdated=False, archived=False, order=1,
+                   cwd="/home", session_id="s", pid=10, waiting_for=None, viewed=False)
+    sv.watching = True
+    d = Snapshot(1, "2.1.2", [sv]).to_json()
+    assert d["sessions"][0]["watching"] is True
+    loaded = Snapshot.from_json(d).sessions[0]
+    assert loaded.watching is True
+    # absent -> False
+    d["sessions"][0].pop("watching")
+    assert Snapshot.from_json(d).sessions[0].watching is False
+
+
 def test_snapshot_counts_live_only():
     def one(name, state, archived=False):
         return SessionView(name, None, state, 0, None, False, archived, 0, "/",

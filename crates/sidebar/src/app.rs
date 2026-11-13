@@ -86,6 +86,8 @@ struct Item {
     state: State,
     /// a working session with an unread finding: its edge is blue (SPEC §5).
     unread: bool,
+    /// a working claude session waiting on a background command of its own: its edge is the dim working colour (SPEC §5).
+    watching: bool,
     /// grid columns [from, to) this item owns when it shares its row with another (the one-row actions).
     cols: Option<(usize, usize)>,
 }
@@ -227,6 +229,9 @@ const CARD_DUR_MS: f64 = 160.0;
 const SHIMMER_PERIOD_MS: f64 = 1600.0;
 const FINISH_BG: Color = Color::Rgb(0x3f, 0x5a, 0x45);
 const SHIMMER_FG: Color = Color::Rgb(0xf2, 0xd4, 0x9b);
+/// The glow on a waiting session's line 2 (SPEC §5 `watching`): a neutral light grey, so the grey card moves
+/// without asking for attention.
+const WAITING_SHIMMER_FG: Color = Color::Rgb(0xd0, 0xd0, 0xd0);
 const FINISH_CHECK: Color = Color::Rgb(0x87, 0xc0, 0x8f);
 
 struct FinishFlash {
@@ -719,7 +724,7 @@ impl App {
 
     /// True while the continuous working shimmer would animate (full mode, viewed, something working).
     pub fn continuous_running(&self) -> bool {
-        self.anims.shimmer() && self.viewed() && self.any_working()
+        self.anims.shimmer() && self.viewed() && self.any_glowing()
     }
 
     /// True while the own-card arrival fade still needs frames (3 frames ~40 ms apart).
@@ -815,7 +820,7 @@ impl App {
 
     /// Sweep a 4-cell light band left→right across `y` (a line-2 row). Blends each nearby glyph's fg
     /// toward `SHIMMER_FG` with `k = max(0, 1 - |x-center|/2.5)`.
-    fn shimmer_row(&self, grid: &mut Grid, y: usize, now_ms: i64) {
+    fn shimmer_row(&self, grid: &mut Grid, y: usize, now_ms: i64, glow: Color) {
         let progress = ((now_ms % SHIMMER_PERIOD_MS as i64) as f64) / SHIMMER_PERIOD_MS;
         let min_x = 1i64;
         let max_x = (self.w as i64).saturating_sub(2).max(min_x);
@@ -825,7 +830,7 @@ impl App {
             let k = 1.0 - ((x as f64) - center).abs() / 2.5;
             if k > 0.0 {
                 let cell = grid.row(y)[x];
-                let new = lerp_bg(cell.fg, SHIMMER_FG, k.min(1.0));
+                let new = lerp_bg(cell.fg, glow, k.min(1.0));
                 grid.set(y, x, RowCell { ch: cell.ch, fg: new, bg: cell.bg, bold: cell.bold });
             }
         }
@@ -869,6 +874,16 @@ impl App {
     }
 
     pub fn any_working(&self) -> bool {
+        // SPEC §5: a watching session has nothing turning, so it does not keep the spinner alive.
+        match &self.snapshot {
+            Some(snap) => snap.sessions.iter().any(|s| !s.archived && s.state == State::Working && !s.watching),
+            None => false,
+        }
+    }
+
+    /// Any session whose line 2 glows (SPEC §5): working ones, and waiting ones (`watching`), whose still icon needs
+    /// no frames but whose glow does.
+    fn any_glowing(&self) -> bool {
         match &self.snapshot {
             Some(snap) => snap.sessions.iter().any(|s| !s.archived && s.state == State::Working),
             None => false,
@@ -894,7 +909,7 @@ impl App {
         }
         if self.fx.snappy_running() || self.event_anim_running() || self.fx.attention_running() {
             Some(self.now_ms + 33)
-        } else if self.anims.shimmer() && self.any_working() {
+        } else if self.anims.shimmer() && self.any_glowing() {
             Some(self.now_ms + 100)
         } else {
             None
@@ -1343,6 +1358,7 @@ impl App {
                 current: false,
                 state: State::Idle,
                 unread: false,
+                watching: false,
                 cols: None,
             });
             return (items, 1);
@@ -1423,6 +1439,7 @@ impl App {
                 current,
                 state: s.state,
                 unread: s.unread,
+                watching: s.watching,
                 cols: None,
             });
             running += height;
@@ -1459,6 +1476,7 @@ impl App {
             current: false,
             state: State::Idle,
             unread: false,
+            watching: false,
             cols,
         };
         if left.len() + 2 + right.len() <= rule_n {
@@ -1766,14 +1784,15 @@ impl App {
                     }
                     // working shimmer across the line-2 activity text
                     if line_idx == 1 && it.state == State::Working && self.anims.shimmer() && viewed {
-                        self.shimmer_row(&mut grid, y, now_ms);
+                        let glow = if it.watching && !it.unread { WAITING_SHIMMER_FG } else { SHIMMER_FG };
+                        self.shimmer_row(&mut grid, y, now_ms, glow);
                     }
                     // the edge `▍` in column 1: the state's colour, coral for the own card, swept top to bottom when the
                     // own session changes; drawn after the shimmer, which must not recolour it
                     let edge = if it.current {
-                        lerp_bg(m::card_edge_color(it.state, it.unread), m::ACCENT, own_alpha)
+                        lerp_bg(m::item_edge_color(it.state, it.unread, it.watching), m::ACCENT, own_alpha)
                     } else {
-                        m::card_edge_color(it.state, it.unread)
+                        m::item_edge_color(it.state, it.unread, it.watching)
                     };
                     let edge_show = match sweep {
                         Some(st) if it.current && own_alpha > 0.0 && viewed => (line_idx as f64) < st,
@@ -2026,6 +2045,7 @@ impl App {
                 current,
                 state: s.state,
                 unread: s.unread,
+                watching: s.watching,
                 cols: None,
             };
             let mb = 0.0;
@@ -2042,9 +2062,9 @@ impl App {
             let base = set_pulse(base, &self.fx, &it, now_ms, viewed);
             let bg = attention_bg(&self.fx, &it, now_ms, viewed, lerp_bg(base, m::BG, mb));
             let edge = if current {
-                lerp_bg(m::card_edge_color(s.state, s.unread), m::ACCENT, own_alpha)
+                lerp_bg(m::card_edge_color(s), m::ACCENT, own_alpha)
             } else {
-                m::card_edge_color(s.state, s.unread)
+                m::card_edge_color(s)
             };
 
             // row background over the full width
@@ -2071,7 +2091,7 @@ impl App {
             if self.finish_flash_for(&s.name, now_ms).is_some() {
                 grid.set(y, 4, RowCell { ch: glyphs::state(self.tier, '✓', glyphs::CHECK_RICH), fg: FINISH_CHECK, bg, bold: true });
             } else {
-                let glyph = m::glyph(self.tier, s.state, now_ms);
+                let glyph = m::card_glyph(self.tier, s, now_ms);
                 let gfg = lerp_bg(m::session_glyph_color(s), m::BG, mb);
                 grid.set(y, 4, RowCell { ch: glyph, fg: gfg, bg, bold: m::is_bold_glyph(s.state) });
             }
@@ -2402,6 +2422,7 @@ mod tests {
             kind: "claude".into(),
             support: false,
             unread: false,
+            watching: false,
         }
     }
 
@@ -3479,6 +3500,24 @@ mod tests {
     }
 
     // --- shimmer: centre lit, far unchanged; subtle/off never shimmer -------------
+    #[test]
+    fn waiting_glows_grey_and_keeps_frames_coming() {
+        // SPEC §5 watching: a waiting card is grey, but its line 2 still glows, in the neutral grey
+        let (tmux, _) = FakeTmux::new();
+        let mut a = app_with(tmux);
+        let mut s = sess("s0", 0, State::Working, false, true);
+        s.order = 0;
+        s.watching = true;
+        s.activity = Some("waiting · watch the deploy".into());
+        a.set_now(NOW);
+        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
+        a.seen_viewed = true;
+        assert!(!a.any_working(), "nothing turns: no spinner frames for it");
+        assert!(a.continuous_running(), "but the glow keeps animating");
+        let g = a.build_grid_at(NOW + 800);
+        assert_eq!(g.row(BRAND_H + 1)[13].fg, lerp_bg(m::C_WATCHING, WAITING_SHIMMER_FG, 0.8), "grey text, lifted toward the neutral glow");
+    }
+
     #[test]
     fn shimmer_lights_band_only_in_full() {
         let make = |tmux: Box<dyn Tmux>| {

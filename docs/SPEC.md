@@ -177,6 +177,39 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
   - The sidebar draws the whole card blue: icon and edge `#5c9cf5`, the line-2 activity (or the "working" label)
     `#5b8fd6` (about 4.6:1 on the card, like the working text). The spinner keeps turning; name and age stay
     grey.
+- `watching` is a separate boolean flag, not a state: a Claude Code session whose turn is over while background
+  work of its own still runs, work that ends by itself and after which the agent resumes on its own: a watcher
+  loop, a CI watch, a long build or test run, a script, a background subagent, a Monitor. It is WORKING for
+  everything that acts on states (`force wait`, `--until`, notifications, the §43 refusals, `force list` counts);
+  only the cockpit shows it apart, because nothing happens there for minutes or hours.
+  - **Background tasks** come from the transcript tail (`activity.scan`): a `tool_use` with
+    `input.run_in_background` true (Bash, Agent) or named `Monitor`, with its `description` (Bash/Agent/Monitor
+    all carry one) and, for Bash, its `command`. It has ended when a later user record's text holds
+    `<tool-use-id>ID</tool-use-id>` with a `<status>` of completed, failed, killed, stopped or expired (a Monitor's
+    event notices carry other words and do not end it). A task launched before this Claude process started (the
+    pane's start) or more than 24 h ago does not count (it died with an earlier process, or its notice was lost).
+    A Bash task counts as running only while the status is `shell` (Claude's own word that a shell runs).
+  - **Endless commands** (`activity.is_endless(command)`, a pattern list) never make a session watching: servers
+    and followers that run until stopped (`npm|pnpm|yarn|bun run dev|start|serve`, `vite` but not `vite build`,
+    `next dev`, `uvicorn`, `gunicorn`, `flask run`, `manage.py runserver`, `python -m http.server`,
+    `jupyter`, `docker compose up` / `docker-compose up` without `-d`/`--detach`, `tail -f|-F`, `journalctl -f`,
+    `kubectl logs -f`, `cargo watch`, `--watch` of a builder (`tsc`, `webpack`, `jest`, `vitest`, `nodemon`) but
+    not of `gh`). Everything else ends by itself and counts.
+  - **Effective status**: status `shell` or `idle` with at least one counting task -> treated as `shell`: WORKING
+    with `watching`; status `shell` without one (only endless commands, or a Bash task whose notice came) ->
+    treated as `idle` (your turn or idle, by the usual rules, with the turn-finished transition as for idle).
+    Status `shell` with no background record in the transcript tail at all (launched long ago) stays watching,
+    described as "a background command".
+  - Sidebar card: it asks nothing of you, so it looks idle: a still icon instead of the spinner (RICH: the
+    hourglass U+F252, PLAIN `◷`) in idle grey `#8a8a8a`, the idle edge, line 2 `waiting · <description of the
+    newest counting task>` (`+N` when there are more) in the same grey. Only the line-2 glow of working cards
+    still sweeps over it, in a neutral `#d0d0d0` instead of the warm working highlight. The age counts from the
+    status change. The rail draws the same icon. An unread finding (`unread`, blue) wins over the colours.
+  - The reply that ends a turn into watching counts as a finding for `unread` (it is not a YOUR_TURN, so nothing
+    else would show it): `reply_ms` also takes the newest finding of the last turn (`end_reply_ms`).
+  - Header: `⠋ N working` counts only the sessions that are WORKING and not watching.
+  - Snapshot `"watching": true|false`; `force list --json` carries it. OpenCode and shell sessions are never
+    watching.
 - `since_ms` (for the age column) = `statusUpdatedAt` when a status file exists, else pane start.
 - **turn_done_ms**: the daemon records `now` when it observes a session go from `busy`/`waiting`
   to `idle` (not on first sight, not after a (re)start). Persisted in `$FORCE_STATE/seen.json`.
@@ -459,7 +492,8 @@ guarded by tests/test_dev_tree.py).
 - **Several terminals**: each attached terminal has its own current session. `force attach` opens on
   the most recently seen session that no other terminal shows; sidebar clicks and popups act on the
   most recently active terminal of that session; the header pills show the state toasts.
-- **Status `shell`** (the agent running a shell command) counts as WORKING.
+- **Status `shell`** (the agent's turn is over, a background command of its own still runs): WORKING, shown as
+  waiting, when that command ends by itself; otherwise the turn is over (§5 `watching`).
 
 ## 16. Header pane, instant sidebar toggle, restarts
 
@@ -736,8 +770,10 @@ The command and the user-facing names are described in §33.
 
 ## 32. Background commands
 - Claude reports status `shell` when its turn is over but a background command it started still runs (it
-  resumes when that ends). The session stays WORKING, and its activity reads "waiting for a command"
-  (`daemon.shown_activity`), not the phrase of the transcript's last record ("writing a reply").
+  resumes when that ends); while it runs a foreground command it reports `busy`. What the session then is depends
+  on that command (§5 `watching`): one that ends by itself makes it WORKING with `watching` and the activity
+  `waiting · <its description>`; a server or follower that runs until stopped does not, and the session is your
+  turn or idle as after any turn.
 
 ## 33. Name: Force
 - The command is `force`; `~/.local/bin/force` is the only launcher, and the units, tmux.conf bindings,

@@ -298,6 +298,7 @@ class SessionView:
     why: str | None = None       # why the card shows its state (SPEC §43.3)
     title: str | None = None     # cleaned pane title (SPEC §43.4)
     unread: bool = False         # WORKING with a finding you have not seen (SPEC §5)
+    watching: bool = False       # WORKING claude waiting on a background command (SPEC §5)
 
 
 @dataclass
@@ -365,6 +366,7 @@ class Snapshot:
                 "title": s.title,
                 "support": s.support,
                 "unread": s.unread,
+                "watching": s.watching,
             } for s in self.sessions],
         }
         if self.update:
@@ -400,6 +402,7 @@ class Snapshot:
                 why=s.get("why"),
                 title=s.get("title"),
                 unread=bool(s.get("unread")),
+                watching=bool(s.get("watching")),
             ))
         return Snapshot(generated_ms=d.get("generated_ms", 0),
                         latest_version=d.get("latest_version"),
