@@ -350,3 +350,35 @@ def test_step_auto_name(env, monkeypatch):
     e = load(env.paths.registry).get("new3")
     assert e.extra.get("auto_name") is True
     assert e.name == "new3"
+
+
+def test_create_session_without_remote_control(env, monkeypatch, capsys):
+    """SPEC §53: `force new --no-remote-control` keeps `remote_control: false` and the launch drops the flag."""
+    cockpit = env.make_cockpit()
+    monkeypatch.setattr(cockpit, "create", lambda entry: None)
+    monkeypatch.setattr(kinds.Claude, "available", lambda self, paths, cfg: True)
+    monkeypatch.delenv("FORCE_NO_REMOTE_CONTROL", raising=False)
+    assert cli.create_session(cockpit, "quiet", cwd=str(env.tmp), no_switch=True, remote_control=False) == 0
+    assert cli.create_session(cockpit, "loud", cwd=str(env.tmp), no_switch=True) == 0
+    reg = load(env.paths.registry)
+    assert reg.get("quiet").extra.get("remote_control") is False
+    assert "remote_control" not in reg.get("loud").extra, "on is the default: nothing stored"
+    quiet, _ = kinds.Claude().exec_argv(cockpit, reg.get("quiet"))
+    loud, _ = kinds.Claude().exec_argv(cockpit, reg.get("loud"))
+    assert "--remote-control" not in quiet and quiet[quiet.index("-n") + 1] == "quiet"
+    assert loud[loud.index("--remote-control") + 1] == "loud"
+
+
+def test_no_remote_control_is_for_claude_only(env, monkeypatch, capsys):
+    cockpit = env.make_cockpit()
+    monkeypatch.setattr(cockpit, "create", lambda entry: None)
+    assert cli.create_session(cockpit, "sh", cwd=str(env.tmp), no_switch=True, kind="shell",
+                              remote_control=False) == 1
+    assert "Claude Code sessions only" in capsys.readouterr().err
+    assert load(env.paths.registry).get("sh") is None
+
+
+def test_new_parser_no_remote_control():
+    args = cli.build_parser().parse_args(["new", "x", "--no-remote-control"])
+    assert args.remote_control is False
+    assert cli.build_parser().parse_args(["new", "x"]).remote_control is True

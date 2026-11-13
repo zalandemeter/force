@@ -163,7 +163,7 @@ def available_kinds(cockpit: Cockpit) -> list[str]:
 
 def create_session(cockpit: Cockpit, name: str | None, cwd: str | None = None,
                   no_switch: bool = False, shell: bool = False, kind: str | None = None,
-                  extra: dict | None = None) -> int:
+                  extra: dict | None = None, remote_control: bool = True) -> int:
     """Shared `force new` logic used by the CLI, attach and dialog new. Returns exit code.
     kind: "claude" (default), "opencode" (SPEC §36) or "shell" (registry extra kind; shell=True is the
     older spelling of kind="shell"). No name (SPEC §49.6): an agent session starts as `new`, `new-2`, … and is
@@ -186,6 +186,8 @@ def create_session(cockpit: Cockpit, name: str | None, cwd: str | None = None,
                     "curl -fsSL https://claude.ai/install.sh | bash")
     if kind != "shell" and kind not in available_kinds(cockpit):
         return _fail(f"force: {kind} is not installed on this server")
+    if not remote_control and kind != "claude":
+        return _fail(f"force: --no-remote-control is for Claude Code sessions only, not {kind}")
     if cwd is None:
         cwd = os.path.expanduser("~")
     cwd = os.path.abspath(os.path.expanduser(cwd))
@@ -205,6 +207,8 @@ def create_session(cockpit: Cockpit, name: str | None, cwd: str | None = None,
             entry.extra["kind"] = kind
         if auto and kind != "shell":
             entry.extra["auto_name"] = True
+        if not remote_control:
+            entry.extra["remote_control"] = False   # SPEC §53
         if extra:
             entry.extra.update(extra)       # e.g. role = support: Chuck's session (SPEC §50)
     if auto:
@@ -1122,8 +1126,8 @@ def _target_session(cockpit: Cockpit, name: str | None) -> str:
 
 
 def new_command(cockpit: Cockpit, name: str | None, cwd: str | None, no_switch: bool,
-              shell: bool = False, kind: str | None = None) -> int:
-    return create_session(cockpit, name, cwd, no_switch, shell=shell, kind=kind)
+              shell: bool = False, kind: str | None = None, remote_control: bool = True) -> int:
+    return create_session(cockpit, name, cwd, no_switch, shell=shell, kind=kind, remote_control=remote_control)
 
 
 def opencode_update_command(cockpit: Cockpit, version: str | None, check: bool) -> int:
@@ -2280,6 +2284,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--shell", action="store_true", help="create a managed shell session instead of an agent")
     p.add_argument("--kind", choices=["claude", "opencode", "shell"], default=None,
                    help="session kind: claude (default), opencode or shell")
+    p.add_argument("--no-remote-control", dest="remote_control", action="store_false",
+                   help="start a Claude Code session without Remote Control (not on your phone or claude.ai)")
 
     p = sub.add_parser("kinds", help="session kinds this server can run (claude, opencode, shell)")
     p.add_argument("--json", action="store_true")
@@ -2535,7 +2541,8 @@ def _dispatch(args) -> int:
                               getattr(args, "glyphs", "auto"), getattr(args, "cell_aspect", None),
                               getattr(args, "remote", None))
     if cmd == "new":
-        return new_command(cockpit, args.name, args.cwd, args.no_switch, args.shell, args.kind)
+        return new_command(cockpit, args.name, args.cwd, args.no_switch, args.shell, args.kind,
+                           remote_control=args.remote_control)
     if cmd == "kinds":
         return kinds_command(cockpit, args.json)
     if cmd == "dirs":

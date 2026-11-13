@@ -271,6 +271,7 @@ kept, because the rc runs after the scrub. **Stage 2**: load registry entry NAME
 (missing dir → error, exit 2). Build argv and `os.execvp`:
 - transcript exists for `session_id` → `[CLAUDE, "--resume", id, "-n", NAME, "--remote-control", NAME, "--settings", '{"disableAgentView":true}']`
 - otherwise → same with `"--session-id", id` instead of `"--resume", id`.
+- an entry with `remote_control: false` (§53) gets no `"--remote-control", NAME`.
 
 `CLAUDE` = `FORCE_CLAUDE_BIN`. Export `FORCE_SESSION=NAME`.
 
@@ -329,7 +330,7 @@ Exit 0 on success, 1 on user error with a one-line message on stderr, 2 on envir
 | command | behaviour |
 |---|---|
 | `force` / `force attach [NAME]` | ensure services: if `systemctl --user is-active force.service` is not active → `systemctl --user start force-tmux.service force.service`; wait ≤10 s for the tmux server. If `$TMUX` points at the force socket → error "already inside force". If no non-archived sessions → run `force new` interactively first. Then `os.execvp tmux -L S attach -t TARGET` where TARGET = NAME, else the session with the highest `last_seen_ms`, else lowest `order`. |
-| `force new [NAME] [--cwd DIR] [--no-switch]` | NAME omitted → prompt on the tty (`input()`); validate (§3), cwd must exist (default: `$HOME`), add registry entry with a fresh uuid4, create the tmux session (§7.1) immediately; if run inside force and not `--no-switch` → `switch-client -t NAME`. |
+| `force new [NAME] [--cwd DIR] [--no-switch] [--no-remote-control]` | `--no-remote-control`: §53. NAME omitted → prompt on the tty (`input()`); validate (§3), cwd must exist (default: `$HOME`), add registry entry with a fresh uuid4, create the tmux session (§7.1) immediately; if run inside force and not `--no-switch` → `switch-client -t NAME`. |
 | `force rename OLD NEW` | validate; down/archived → rename registry entry + tmux session + seen now; live → set `pending_name` (daemon applies, §6.6). |
 | `force archive NAME` | §7.4. Refuses if state is WORKING or NEEDS_YOU unless `--force`. Switches attached clients that view NAME to another live session first. |
 | `force unarchive NAME` | §7.5. |
@@ -1226,3 +1227,15 @@ HOST`); session names never contain `:`. Force's own ssh connection (§40) carri
 | log | every cross-host prompt and keys, sent, queued, delivered or refused, as one JSON line in `<state>/messages.log` on both hosts: time, direction, from, to, command, result, length (never the text) |
 | trust | this is consent, not authentication: whoever can ssh to a host can run anything there. `acceptPromptsFrom` stops agents from driving another host's sessions unless its owner opted in |
 | agents | `share/skill.md` documents `HOST:NAME`, the header and replying |
+
+## 53. Remote Control per session
+A Claude Code session starts with Remote Control (`--remote-control NAME`, §7.2) unless it was created without it.
+
+| Part | |
+|---|---|
+| New dialog | a checkbox `[x] Remote Control` under Folder, shown only while the Claude Code chip is selected, checked by default. Focus order Kind → Name → Folder → Remote Control; Space toggles it when focused, Ctrl+R toggles it from any field, a click on its row toggles it; Enter on it creates |
+| `force new --no-remote-control` | the dialog passes it only when unchecked (a checked box sends nothing, so an older remote Force still works). Refused for OpenCode and shell sessions (they have no Remote Control) |
+| registry | `extra.remote_control: false` on the entry; absent means on. Kept for the session's life: restarts, upgrades, renames, moves and unarchive start it the same way |
+| title sync (§47) | a session without Remote Control does not wait for a connection: `/rename NAME` is typed once it is idle with an empty input line, so Claude Code's own name follows renames and automatic names (§49.6) |
+| MCP `session_new` | optional boolean `remote_control` (false = `--no-remote-control`) |
+| `FORCE_NO_REMOTE_CONTROL` | still drops it for every session (`force smoke`, §37) |

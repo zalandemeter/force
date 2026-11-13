@@ -366,10 +366,13 @@ def test_mcp_tools_run_this_installs_force(env, tmp_path, monkeypatch):
     assert log.read_text().splitlines()[-1] == "settings set notifyCommand echo hi"
     mcp.call("session_new", {"name": "demo", "cwd": "/tmp", "kind": "shell"}, env.paths)
     assert log.read_text().splitlines()[-1] == "new demo --cwd /tmp --shell --no-switch"
+    mcp.call("session_new", {"name": "quiet", "remote_control": False}, env.paths)
+    assert log.read_text().splitlines()[-1] == "new quiet --no-remote-control --no-switch"
     mcp.call("status", {}, env.paths)
     assert log.read_text().splitlines()[-1] == "list --json"
     actions = [json.loads(x) for x in (env.paths.state / "support" / "actions.jsonl").read_text().splitlines()]
-    assert [a["tool"] for a in actions] == ["settings_set", "session_new"], "only changes are logged"
+    assert [a["tool"] for a in actions] == ["settings_set", "session_new", "session_new"], \
+        "only changes are logged"
 
 
 def test_mcp_failures_and_missing_arguments(env, tmp_path, monkeypatch):

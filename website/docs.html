@@ -174,7 +174,8 @@
       <p>Claude Code asks whether you trust a folder it hasn't worked in before. Answer "No, exit" on a new
         session and Force deletes it; a session moved there stays stopped instead, its conversation kept.</p>
       <p>Claude Code sessions also appear in the Claude app under their Force name (Remote Control), so the name
-        is the same in Force, in Claude and on your phone.</p>
+        is the same in Force, in Claude and on your phone. To keep a session off your phone and claude.ai, uncheck
+        "Remote Control" in the new session dialog (Ctrl+R), or use <code>force new --no-remote-control</code>.</p>
       <h3>Bringing in sessions you already have</h3>
       <p><code>force import</code> lists the Claude Code sessions Force doesn't manage yet: running ones in any
         terminal and older stopped ones. <code>force import ID</code> (or a prefix of six or more characters) takes

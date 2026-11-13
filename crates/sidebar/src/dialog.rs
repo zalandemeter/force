@@ -257,7 +257,12 @@ pub enum NewFocus {
     Kind,
     Name,
     Folder,
+    /// The Remote Control checkbox (Claude Code only, SPEC §53).
+    Remote,
 }
+
+/// The New dialog's Remote Control checkbox row (SPEC §53).
+const NEW_REMOTE_Y: usize = 12;
 
 /// A jump session: state from the snapshot (or IDLE from the registry fallback) plus its index for ordering.
 #[derive(Clone, Debug)]
@@ -297,6 +302,8 @@ pub struct Dialog {
     pub cwd_input: String,
     pub cwd_cursor: usize,
     pub new_focus: NewFocus,
+    /// Start a Claude Code session with Remote Control (the checkbox, checked by default; SPEC §53).
+    pub new_remote: bool,
 
     // rename
     pub rename_input: String,
@@ -402,6 +409,7 @@ impl Dialog {
             cwd_cursor: default_cwd.chars().count(),
             cwd_input: default_cwd,
             new_focus: NewFocus::Name,
+            new_remote: true,
             rename_input: String::new(),
             rename_cursor: 0,
             move_input: String::new(),
@@ -498,6 +506,11 @@ impl Dialog {
     /// The kind the New dialog has selected ("claude" when none is listed).
     fn new_kind_name(&self) -> &str {
         self.new_kinds.get(self.new_kind).map(String::as_str).unwrap_or("claude")
+    }
+
+    /// The Remote Control checkbox is offered (only for a Claude Code session).
+    fn remote_offered(&self) -> bool {
+        self.new_kind_name() == "claude"
     }
 
     pub fn validate_new(&mut self) {
@@ -666,7 +679,9 @@ impl Dialog {
     fn footer_sections(&self) -> Vec<(&'static str, &'static str)> {
         match self.kind {
             Kind::New => {
-                if self.new_focus == NewFocus::Folder {
+                if self.new_focus == NewFocus::Remote {
+                    vec![("enter", "create"), ("space", "toggle"), ("esc", "cancel")]
+                } else if self.new_focus == NewFocus::Folder {
                     vec![("enter", "create"), ("esc", "cancel")]
                 } else {
                     vec![("enter", "next"), ("ctrl+s", "create"), ("esc", "cancel")]
@@ -728,7 +743,7 @@ impl Dialog {
             Kind::New => match self.new_focus {
                 NewFocus::Name => self.input_cursor(7, &self.name_input, self.name_cursor),
                 NewFocus::Folder => self.input_cursor(10, &self.cwd_input, self.cwd_cursor),
-                NewFocus::Kind => None,
+                NewFocus::Kind | NewFocus::Remote => None,
             },
             Kind::Rename => self.input_cursor(4, &self.rename_input, self.rename_cursor),
             Kind::Move => self.input_cursor(4, &self.move_input, self.move_cursor),
@@ -823,7 +838,7 @@ impl Dialog {
 
     fn draw_new(&mut self, buf: &mut Buffer) {
         // rows: 1 title, 3 `Kind`, 4 chips, 6 `Name`, 7 name input, 9 `Folder`, 10 folder input,
-        //       12 status, last row footer (blank rows between the groups).
+        //       12 Remote Control checkbox (Claude Code only), 13 status, last row footer.
         self.draw_title(buf, '\u{F067}', "New session");
         put(buf, CONTENT_LEFT, 3, "Kind", FG_DIM);
         // the selected chip is raised; coral while the kind row has focus
@@ -837,7 +852,14 @@ impl Dialog {
         self.draw_input(buf, 7, &self.name_input, self.name_cursor, "empty: named for you", self.new_focus == NewFocus::Name);
         put(buf, CONTENT_LEFT, 9, "Folder", FG_DIM);
         self.draw_input(buf, 10, &self.cwd_input, self.cwd_cursor, "", self.new_focus == NewFocus::Folder);
-        self.status_text_y(buf, 12);
+        if self.remote_offered() {
+            let focused = self.new_focus == NewFocus::Remote;
+            let mark = if self.new_remote { "[x]" } else { "[ ]" };
+            let x = put(buf, CONTENT_LEFT, NEW_REMOTE_Y, mark, if focused { ACCENT } else { WHITE });
+            let x = put(buf, x + 1, NEW_REMOTE_Y, "Remote Control", if focused { ACCENT } else { WHITE });
+            put(buf, x + 2, NEW_REMOTE_Y, "phone and claude.ai", FG_DIM);
+        }
+        self.status_text_y(buf, NEW_REMOTE_Y + 1);
     }
 
     fn draw_rename(&mut self, buf: &mut Buffer) {
@@ -1105,6 +1127,9 @@ impl Dialog {
                     self.new_focus = NewFocus::Name;
                 } else if row == 10 {
                     self.new_focus = NewFocus::Folder;
+                } else if row == NEW_REMOTE_Y && self.remote_offered() {
+                    self.new_focus = NewFocus::Remote;
+                    self.new_remote = !self.new_remote;
                 }
             }
             Kind::Archived => {
@@ -1165,6 +1190,9 @@ impl Dialog {
     fn step_kind(&mut self, d: i64) {
         let n = self.new_kinds.len().max(1) as i64;
         self.new_kind = ((self.new_kind as i64 + d).rem_euclid(n)) as usize;
+        if self.new_focus == NewFocus::Remote && !self.remote_offered() {
+            self.new_focus = NewFocus::Folder;
+        }
     }
 
     fn key_new(&mut self, code: crossterm::event::KeyCode, shift: bool, ctrl: bool) {
@@ -1180,6 +1208,12 @@ impl Dialog {
             self.action_submit_new();
             return;
         }
+        if ctrl && code == crossterm::event::KeyCode::Char('r') {
+            if self.remote_offered() {
+                self.new_remote = !self.new_remote;
+            }
+            return;
+        }
         if ctrl && code == crossterm::event::KeyCode::Char('u') {
             match self.new_focus {
                 NewFocus::Name => {
@@ -1190,7 +1224,7 @@ impl Dialog {
                     self.cwd_input.clear();
                     self.cwd_cursor = 0;
                 }
-                NewFocus::Kind => {}
+                NewFocus::Kind | NewFocus::Remote => {}
             }
             self.validate_new();
             return;
@@ -1216,6 +1250,11 @@ impl Dialog {
         }
         match self.new_focus {
             NewFocus::Kind => {}
+            NewFocus::Remote => match code {
+                crossterm::event::KeyCode::Enter => self.action_submit_new(),
+                crossterm::event::KeyCode::Char(' ') => self.new_remote = !self.new_remote,
+                _ => {}
+            },
             NewFocus::Name => {
                 if code == crossterm::event::KeyCode::Enter {
                     let name = self.name_input.trim().to_string();
@@ -1240,20 +1279,23 @@ impl Dialog {
     }
 
     fn cycle_new_focus(&mut self, step: i32) {
-        let order = [NewFocus::Kind, NewFocus::Name, NewFocus::Folder];
+        let mut order = vec![NewFocus::Kind, NewFocus::Name, NewFocus::Folder];
+        if self.remote_offered() {
+            order.push(NewFocus::Remote);
+        }
         let cur = order.iter().position(|f| *f == self.new_focus).unwrap_or(0);
         let next = (cur as i32 + step).rem_euclid(order.len() as i32) as usize;
         self.new_focus = order[next];
         match self.new_focus {
             NewFocus::Folder => self.cwd_cursor = self.cwd_input.chars().count(),
             NewFocus::Name => self.name_cursor = self.name_input.chars().count(),
-            NewFocus::Kind => {}
+            NewFocus::Kind | NewFocus::Remote => {}
         }
     }
 
     /// Attempt Tab-completion of the Folder path. Returns `true` if the text
     /// was changed (focus stays in Folder), `false` if nothing completed
-    /// (caller should cycle focus to Kind).
+    /// (caller should cycle focus on).
     fn complete_folder(&mut self) -> bool {
         complete_folder_path(&mut self.cwd_input, &mut self.cwd_cursor, &self.home, self.remote_host,
                            &*self.runner)
@@ -1278,6 +1320,10 @@ impl Dialog {
             Some("shell") => argv.push("--shell".to_string()),
             Some("opencode") => argv.extend(["--kind".to_string(), "opencode".to_string()]),
             _ => {}
+        }
+        // only when unchecked, so an older Force (a remote host) still takes a checked box (SPEC §53)
+        if self.remote_offered() && !self.new_remote {
+            argv.push("--no-remote-control".to_string());
         }
         match self.runner.cockpit(&argv) {
             Err(e) => self.set_status(StatusKind::Error, e),
@@ -2149,6 +2195,96 @@ mod tests {
         assert_eq!(runner.logs.tmux.borrow()[0], vec!["switch-client", "-t", "=new-2"]);
     }
 
+    // ---- Remote Control checkbox (SPEC §53) ---------------------------------------------
+    fn rc_key(code: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, mods)
+    }
+
+    fn rc_row(buf: &Buffer) -> String {
+        (0..buf.area().width).map(|x| buf.cell((x, NEW_REMOTE_Y as u16)).map(|c| c.symbol().to_string()).unwrap_or_default()).collect()
+    }
+
+    #[test]
+    fn new_remote_control_checked_by_default_sends_nothing() {
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let runner = FakeRunner::new();
+        let mut d = Dialog::new(Kind::New, None, &reg, &snap, Box::new(runner.clone()), Tier::Plain, 64, 17);
+        assert!(d.new_remote, "checked by default");
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 64, 17));
+        d.draw(&mut buf);
+        assert!(rc_row(&buf).contains("[x] Remote Control"), "{:?}", rc_row(&buf));
+        d.name_input = "portal".into();
+        d.cwd_input = "/tmp".into();
+        d.action_submit_new();
+        assert_eq!(runner.logs.cockpit.borrow()[1], vec!["new", "portal", "--cwd", "/tmp", "--no-switch"]);
+    }
+
+    #[test]
+    fn new_remote_control_unchecked_argv() {
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let runner = FakeRunner::new();
+        let mut d = Dialog::new(Kind::New, None, &reg, &snap, Box::new(runner.clone()), Tier::Plain, 64, 17);
+        d.name_input = "portal".into();
+        d.cwd_input = "/tmp/".into();     // ends in "/": Tab completes nothing, focus moves on
+        // Tab from Name -> Folder -> Remote Control; Space unchecks it; Enter creates
+        d.handle_key(rc_key(KeyCode::Tab, KeyModifiers::NONE), 0);
+        assert_eq!(d.new_focus, NewFocus::Folder);
+        d.handle_key(rc_key(KeyCode::Tab, KeyModifiers::NONE), 0);
+        assert_eq!(d.new_focus, NewFocus::Remote);
+        assert_eq!(d.footer_sections()[1], ("space", "toggle"));
+        d.handle_key(rc_key(KeyCode::Char(' '), KeyModifiers::NONE), 0);
+        assert!(!d.new_remote);
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 64, 17));
+        d.draw(&mut buf);
+        assert!(rc_row(&buf).contains("[ ] Remote Control"));
+        d.handle_key(rc_key(KeyCode::Enter, KeyModifiers::NONE), 0);
+        assert!(d.done);
+        assert_eq!(runner.logs.cockpit.borrow()[1],
+                   vec!["new", "portal", "--cwd", "/tmp/", "--no-switch", "--no-remote-control"]);
+    }
+
+    #[test]
+    fn new_remote_control_ctrl_r_and_click_toggle() {
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let mut d = Dialog::new(Kind::New, None, &reg, &snap, Box::new(FakeRunner::new()), Tier::Plain, 64, 17);
+        d.handle_key(rc_key(KeyCode::Char('r'), KeyModifiers::CONTROL), 0);
+        assert!(!d.new_remote, "Ctrl+R from the Name field");
+        assert_eq!(d.new_focus, NewFocus::Name);
+        assert_eq!(d.name_input, "", "Ctrl+R types nothing");
+        d.handle_mouse(&crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4, row: NEW_REMOTE_Y as u16, modifiers: KeyModifiers::NONE });
+        assert!(d.new_remote, "a click on the row toggles it back");
+        assert_eq!(d.new_focus, NewFocus::Remote);
+    }
+
+    #[test]
+    fn new_remote_control_only_for_claude() {
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let runner = FakeRunner::new();
+        let mut d = Dialog::new(Kind::New, None, &reg, &snap, Box::new(runner.clone()), Tier::Plain, 64, 17);
+        d.new_remote = false;
+        d.new_focus = NewFocus::Remote;
+        // Ctrl+T to Shell: the checkbox goes away, focus falls back to Folder, nothing is sent for it
+        d.handle_key(rc_key(KeyCode::Char('t'), KeyModifiers::CONTROL), 0);
+        assert_eq!(d.new_kind_name(), "shell");
+        assert_eq!(d.new_focus, NewFocus::Folder);
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 64, 17));
+        d.draw(&mut buf);
+        assert!(!rc_row(&buf).contains("Remote Control"));
+        d.handle_key(rc_key(KeyCode::Tab, KeyModifiers::SHIFT), 0);
+        d.handle_key(rc_key(KeyCode::Tab, KeyModifiers::NONE), 0);
+        assert_ne!(d.new_focus, NewFocus::Remote, "Tab skips it");
+        d.name_input = "sh".into();
+        d.cwd_input = "/tmp".into();
+        d.action_submit_new();
+        assert_eq!(runner.logs.cockpit.borrow()[1], vec!["new", "sh", "--cwd", "/tmp", "--no-switch", "--shell"]);
+    }
+
     #[test]
     fn new_shell_argv() {
         let reg = tmp_file(r#"{"sessions":[]}"#);
@@ -2638,28 +2774,28 @@ mod layout_tests {
         assert_eq!(d.cwd_input, format!("{}/d2/target/", base_str), "single match + slash");
         assert_eq!(d.new_focus, NewFocus::Folder, "focus stays in Folder");
 
-        // No matches -> nothing completes -> focus cycles to Kind.
+        // No matches -> nothing completes -> focus cycles on.
         d.cwd_input = format!("{}/d1/zz", base_str);
         d.cwd_cursor = d.cwd_input.chars().count();
         d.handle_key(key(KeyCode::Tab), 0);
         assert_eq!(d.cwd_input, format!("{}/d1/zz", base_str), "no match leaves text");
-        assert_eq!(d.new_focus, NewFocus::Kind, "no match cycles focus");
+        assert_eq!(d.new_focus, NewFocus::Remote, "no match cycles focus (on to Remote Control, SPEC §53)");
 
-        // Path ending in '/' -> nothing completes -> focus cycles to Kind.
+        // Path ending in '/' -> nothing completes -> focus cycles on.
         d.new_focus = NewFocus::Folder;
         d.cwd_input = format!("{}/d1/", base_str);
         d.cwd_cursor = d.cwd_input.chars().count();
         let before = d.cwd_input.clone();
         d.handle_key(key(KeyCode::Tab), 0);
         assert_eq!(d.cwd_input, before, "trailing slash leaves text");
-        assert_eq!(d.new_focus, NewFocus::Kind, "trailing slash cycles focus");
+        assert_eq!(d.new_focus, NewFocus::Remote, "trailing slash cycles focus");
 
-        // Empty text -> nothing completes -> focus cycles to Kind.
+        // Empty text -> nothing completes -> focus cycles on.
         d.new_focus = NewFocus::Folder;
         d.cwd_input = String::new();
         d.cwd_cursor = 0;
         d.handle_key(key(KeyCode::Tab), 0);
-        assert_eq!(d.new_focus, NewFocus::Kind, "empty text cycles focus");
+        assert_eq!(d.new_focus, NewFocus::Remote, "empty text cycles focus");
 
         // ~ expansion matches, but what the user typed (~) is kept in the text.
         d.home = base_str.clone();
@@ -2849,7 +2985,7 @@ mod layout_tests {
         d.handle_key(key(KeyCode::Tab), 0);
         assert_eq!(d.move_input, "~/src/pr", "unchanged text on error");
 
-        // New: a failed `dirs` behaves like nothing completing -> focus moves on to Kind.
+        // New: a failed `dirs` behaves like nothing completing -> focus moves on (to Remote Control).
         let reg = tmp_file(r#"{"sessions":[]}"#);
         let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
         let force = ForceEnv { client: None, session: None, glyphs: None, host: Some("devbox") };
@@ -2861,7 +2997,7 @@ mod layout_tests {
         nd.cwd_cursor = nd.cwd_input.chars().count();
         nd.handle_key(key(KeyCode::Tab), 0);
         assert_eq!(nd.cwd_input, "~/src/pr", "unchanged text on error");
-        assert_eq!(nd.new_focus, NewFocus::Kind, "focus cycles on as when nothing completes");
+        assert_eq!(nd.new_focus, NewFocus::Remote, "focus cycles on as when nothing completes");
     }
 
     #[test]
