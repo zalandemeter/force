@@ -23,6 +23,7 @@ APP = "#{@force_app}/share"
 HELP_W, HELP_H = 72, 20          # the key help card (share/help.ansi fits inside, tests/test_keys.py checks)
 DIALOGS = {"jump": (64, 21), "new": (64, 18), "archived": (72, 21)}    # popup sizes (cli.overlay_close reopens them)
 CHUCK_W, CHUCK_H = 72, 17        # Chuck's card (force support --ui, SPEC §50)
+UPDATE_W, UPDATE_H = 72, 20       # the update card (force update --ui, SPEC §3)
 CHUCK_STYLE = CARD_STYLE = POPUP_STYLE    # the cards' popups: the bars' surface, a light grey border (force/cards.py)
 
 # (key, label, action, core). None = a separator. Keys are letters (Shift is fine on any layout), Tab and ?,
@@ -48,6 +49,7 @@ ITEMS = [
     None,
     ("b", "Sidebar on / off", "sidebar", False),
     ("H", "Health check…", "health", False),
+    ("U", "Update Force…", "update", False),
     ("?", "Ask Chuck…", "chuck", True),
     ("k", "Keys…", "help", True),
     ("q", "Quit (sessions keep running)", "quit", True),
@@ -75,6 +77,7 @@ def classic() -> tuple[str, dict[str, str]]:
 
     return s, {
         "chuck": f"display-popup {CHUCK_STYLE} -E -w {CHUCK_W} -h {CHUCK_H} \"{FORCE} support --ui\"",
+        "update": f"display-popup {CARD_STYLE} -E -w {UPDATE_W} -h {UPDATE_H} \"{FORCE} update --ui\"",
         "jump": pop(*DIALOGS["jump"], "jump"),
         "prev": "switch-client -l",
         "host": "display-message -d 4000 \" switching hosts needs the split layout: force ui split, then run force again \"",
@@ -118,6 +121,7 @@ def split() -> tuple[str, dict[str, str]]:
     return s, {
         "chuck": f"display-popup {env} -e \"FORCE_WINDOW=#{{window_id}}\" {CHUCK_STYLE} -E -w {CHUCK_W} -h {CHUCK_H} "
                  f"\"{FORCE} support --ui\"",
+        "update": f"display-popup {env} {CARD_STYLE} -E -w {UPDATE_W} -h {UPDATE_H} \"{FORCE} update --ui\"",
         "jump": host_first("jump", pop(*DIALOGS["jump"], "jump")),
         "prev": key("last"),
         "host": f"run-shell -b \"{FORCE} hosts-menu --client '#{{client_name}}' --window '#{{window_id}}'\"",
@@ -160,7 +164,7 @@ ICONS = {
     "jump": "\uf002", "prev": "\uf0ec", "host": "\uf233", "new": "\uf067", "newshell": "\uf120",
     "rename": "\uf040", "folder": "\uf07b", "up": "\uf062", "down": "\uf063", "restart": "\uf01e",
     "upgrade": "\uf0aa", "archive": "\uf187", "delete": "\uf1f8", "archived": "\uf07c", "restart-all": "\uf021",
-    "sidebar": "\uf0db", "health": "\uf21e", "chuck": "\uf118", "help": "\uf11c", "quit": "\uf011",
+    "sidebar": "\uf0db", "health": "\uf21e", "update": "\uf01b", "chuck": "\uf118", "help": "\uf11c", "quit": "\uf011",
 }
 CORAL, WHITE, GREY = "#d97757", "#ffffff", "#8a8a8a"
 RICH = "#{==:#{@force_glyphs},rich}"

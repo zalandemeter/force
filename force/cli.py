@@ -2294,6 +2294,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("update", help="update Force to the latest release (—check just says whether one exists)")
     p.add_argument("--check", action="store_true", help="only say whether a newer release exists")
+    p.add_argument("--ui", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("uninstall", help="remove Force from this machine (—purge also removes your data)")
     p.add_argument("--purge", action="store_true", help="also remove your registry, state and config")
@@ -2543,6 +2544,8 @@ def _dispatch(args) -> int:
         return opencode_update_command(cockpit, args.version, args.check)
     if cmd == "update":
         from . import updates
+        if args.ui:
+            return updates.ui_command()
         return updates.update_command(args.check)
     if cmd == "uninstall":
         return uninstall_command(cockpit, args.purge, args.yes)
