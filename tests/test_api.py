@@ -359,23 +359,43 @@ def test_vt_app_a_tmux_client_draws(env):
         c.close()
 
 
-def test_vt_app_hidden_marks_its_ui_window(env):
-    """Hidden, the app keeps running and its ui window says so (@force_hidden): the daemon then does not count the
-    session it shows as viewed."""
-    import base64
+def test_vt_app_hidden_marks_its_client_on_the_sessions_host(env):
+    """Hidden, the app keeps running, and the client its ui window shows a session through (@force_nested, on the
+    host @force_host_tmux reaches) is marked hidden there with its creation time; shown or closed, unmarked."""
     ui = env.socket + "-ui"
+    env.tmux.run("new-session", "-d", "-s", "a", "-x", "80", "-y", "24", "cat")
+    nested = subprocess.Popen(["tmux", "-L", env.socket, "-C", "attach", "-t", "=a"], stdin=subprocess.PIPE,
+                              stdout=subprocess.DEVNULL, text=True)
     c = ApiClient(env.make_cockpit(), app_argv=["tmux", "-L", ui, "-f", "/dev/null", "new-session", "-s", "app",
                                                 "sh", "-c", "echo UP; sleep 30"])
     c.call("hello", protocol=1)
     t = c.call("terminal.open", mode="vt", target="app", cols=80, rows=24)["ok"]["term"]
     try:
         _vt_text(c, "UP")
-        flag = lambda: subprocess.run(["tmux", "-L", ui, "show-options", "-wqv", "-t", "=app:", "@force_hidden"],
-                                      capture_output=True, text=True).stdout.strip()
+        name = next(cl.name for cl in env.tmux.clients(control=True) if cl.session == "a")
+        created = env.tmux.run("display", "-p", "-c", name, "#{client_created}")
+        subprocess.run(["tmux", "-L", ui, "set-option", "-w", "-t", "=app:", "@force_nested", name], check=True)
+        subprocess.run(["tmux", "-L", ui, "set-option", "-w", "-t", "=app:", "@force_host_tmux",
+                        f"tmux -L {env.socket}"], check=True)
+        mark = lambda: env.tmux.run("show-options", "-gqv", api.hidden_option(name))
         assert c.call("terminal.hidden", term=t, hidden=True)["ok"] == {}
-        assert flag() == "1"
+        assert mark() == created
         assert c.call("terminal.hidden", term=t, hidden=False)["ok"] == {}
-        assert flag() == ""
-    finally:
+        assert mark() == ""
+        c.call("terminal.hidden", term=t, hidden=True)
+        assert mark() == created
         c.call("terminal.close", term=t)
+        assert wait_for_value(mark, "")
+    finally:
+        nested.stdin.close()
+        nested.wait(timeout=5)
         c.close()
+
+
+def wait_for_value(fn, want, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if fn() == want:
+            return True
+        time.sleep(0.1)
+    return fn() == want

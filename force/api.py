@@ -466,6 +466,12 @@ class CellsTerminal:
 
 
 # --- the whole Force app in a pty (vt mode, SPEC §54) -----------------------------------------------------------
+def hidden_option(client: str) -> str:
+    """The host-server option that marks `client` (a tmux client name, e.g. /dev/pts/3) as a frontend's hidden app:
+    its value is the client's `client_created`, so a later client on the same tty is not taken for it."""
+    return "@force_hidden_" + re.sub(r"[^A-Za-z0-9]", "_", client)
+
+
 _CTTY_EXEC = ("import os, sys, fcntl, termios; os.setsid(); fcntl.ioctl(0, termios.TIOCSCTTY, 0); "
               "os.execvp(sys.argv[1], sys.argv[1:])")
 class AppTerminal:
@@ -477,6 +483,7 @@ class AppTerminal:
         self.api, self.term = api, term
         self.cols, self.rows = cols, rows
         self.closed = False
+        self.marks: list[tuple[list[str], str]] = []    # (host tmux argv, nested client) marked hidden
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
         master, slave = os.openpty()
         self.tty = os.ttyname(slave)                    # the app's tmux client is this tty on the ui server
@@ -527,25 +534,61 @@ class AppTerminal:
             pass
 
     def set_hidden(self, hidden: bool) -> None:
-        """Hidden, the app keeps running (shown again at once, as it was) but its ui window says so (@force_hidden),
-        and the daemon does not count the session it shows as viewed (SPEC §54)."""
-        ui = self.api.cockpit.ui_tmux
+        """Hidden, the app keeps running (shown again at once, as it was), and the client it shows a session through
+        is marked hidden on that session's own host, here or a remote (SPEC §54): that host's daemon does not count
+        the session as viewed, so a turn that ends meanwhile stays your turn."""
         try:
-            tty = self.tty
-            rc, out, _err = ui._run_rc(["list-clients", "-F", "#{client_tty}\t#{window_id}"])
-            for line in out.splitlines() if rc == 0 else []:
-                ctty, _, window = line.partition("\t")
-                if ctty == tty and window:
-                    if hidden:
-                        ui._run_rc(["set-option", "-w", "-t", window, "@force_hidden", "1"])
-                    else:
-                        ui._run_rc(["set-option", "-wu", "-t", window, "@force_hidden"])
-        except Exception as e:                          # pragma: no cover (the ui server went away)
+            if hidden:
+                self._mark()
+            else:
+                self._unmark()
+        except Exception as e:                          # pragma: no cover (a server went away)
             print(f"force api: hidden: {e}", file=sys.stderr)
+
+    def _window(self) -> tuple[str, list[str]] | None:
+        """(the nested client's name, the argv prefix of its host's tmux) of the ui window this app's client shows."""
+        ui = self.api.cockpit.ui_tmux
+        rc, out, _err = ui._run_rc(["list-clients", "-F", "#{client_tty}\t#{window_id}"])
+        window = next((w for t, _, w in (ln.partition("\t") for ln in out.splitlines()) if t == self.tty), None) \
+            if rc == 0 else None
+        if not window:
+            return None
+        opt = lambda k: ui._run_rc(["show-options", "-wqv", "-t", window, k])[1].strip()
+        nested = opt("@force_nested")
+        words = opt("@force_host_tmux").split() or ["tmux", "-L", self.api.cockpit.paths.tmux_socket]
+        return (nested, words) if nested else None
+
+    @staticmethod
+    def _host(words: list[str], *args: str) -> str:
+        argv = words + (remote_mod.quote_words(list(args)) if os.path.basename(words[0]) == "ssh" else list(args))
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        return p.stdout if p.returncode == 0 else ""
+
+    def _mark(self) -> None:
+        w = self._window()
+        if w is None:
+            return
+        nested, words = w
+        created = next((c for n, _, c in (ln.partition("\t") for ln in self._host(
+            words, "list-clients", "-F", "#{client_name}\t#{client_created}").splitlines()) if n == nested), None)
+        if not created:
+            return
+        self._unmark()
+        self._host(words, "set-option", "-g", hidden_option(nested), created)
+        self.marks.append((words, nested))
+
+    def _unmark(self) -> None:
+        for words, nested in self.marks:
+            self._host(words, "set-option", "-gu", hidden_option(nested))
+        self.marks.clear()
 
     def close(self) -> None:
         if self.closed and self.fd is None:
             return
+        try:
+            self._unmark()
+        except Exception:                               # pragma: no cover
+            pass
         self.closed = True
         try:
             os.killpg(self.pid, signal.SIGHUP)          # the app and its tmux client

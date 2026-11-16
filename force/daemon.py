@@ -1459,21 +1459,23 @@ class Daemon:
             print(f"force: removed {removed} duplicate sidebar/header pane(s)", file=sys.stderr)
 
     def _viewed_sessions(self) -> set[str]:
-        """The sessions a client shows: any terminal, a `force api` view (control mode), but not the nested client of
-        a ui window a frontend has hidden (`@force_hidden`, SPEC §54: its app keeps running, nobody looks at it)."""
-        hidden = set()
-        try:
-            if self.cockpit.ui_tmux.server_running():
-                rc, out, _err = self.cockpit.ui_tmux._run_rc(["list-windows", "-a", "-F",
-                                                              "#{@force_hidden}\t#{@force_nested}"])
-                if rc == 0:
-                    for line in out.splitlines():
-                        flag, _, nested = line.partition("\t")
-                        if flag and nested:
-                            hidden.add(nested)
-        except Exception:
-            pass
-        return {c.session for c in self.cockpit.tmux.clients(control=True) if c.name not in hidden}
+        """The sessions a client shows: any terminal, a `force api` view (control mode), but not a client a frontend
+        marked hidden on this host (`@force_hidden_<client>` = its `client_created`, SPEC §54: its app keeps running,
+        nobody looks at it). The mark is set here by the frontend's `force api`, also from another machine."""
+        clients = self.cockpit.tmux.clients(control=True)
+        hidden: dict[str, str] = {}
+        rc, out, _err = self.cockpit.tmux._run_rc(["show-options", "-g"])
+        for line in out.splitlines() if rc == 0 else []:
+            if line.startswith("@force_hidden_"):
+                key, _, val = line.partition(" ")
+                hidden[key] = val.strip().strip('"')
+        if not hidden:
+            return {c.session for c in clients}
+        rc, out, _err = self.cockpit.tmux._run_rc(["list-clients", "-F", "#{client_name}\t#{client_created}"])
+        created = dict(ln.split("\t", 1) for ln in out.splitlines() if "\t" in ln) if rc == 0 else {}
+        from .api import hidden_option
+        return {c.session for c in clients
+                if not (created.get(c.name) and hidden.get(hidden_option(c.name)) == created.get(c.name))}
 
     @staticmethod
     def _server_id(t) -> str:

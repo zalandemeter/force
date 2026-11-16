@@ -97,6 +97,11 @@ def ssh_opts(paths) -> list[str]:
             "-o", "ConnectTimeout=10"]
 
 
+def quote_words(words: list[str]) -> list[str]:
+    """Words as they must follow `ssh … HOST`: the remote shell re-splits the command line."""
+    return [shlex.quote(w) for w in words]
+
+
 def _remote_word(a: str) -> str:
     if a.startswith("~/"):
         return "~/" + (shlex.quote(a[2:]) if a[2:] else "")
