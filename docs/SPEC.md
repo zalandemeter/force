@@ -192,7 +192,10 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
     `input.run_in_background` true (Bash, Agent) or named `Monitor`, with its `description` (Bash/Agent/Monitor
     all carry one) and, for Bash, its `command`. It has ended when a later user record's text holds
     `<tool-use-id>ID</tool-use-id>` with a `<status>` of completed, failed, killed, stopped or expired (a Monitor's
-    event notices carry other words and do not end it). A task launched before this Claude process started (the
+    event notices carry other words and do not end it), or when the agent stopped it (`TaskStop`, the older
+    `KillShell`/`KillBash`: its `input.task_id` or `shell_id`, matched to the launch through the task id the launch's
+    tool result named, `toolUseResult.backgroundTaskId`, `taskId` or `agentId`; a stopped task gets no notice). A
+    Monitor also ends when its own `timeout_ms` has passed since it started. A task launched before this Claude process started (the
     pane's start) or more than 24 h ago does not count (it died with an earlier process, or its notice was lost).
     A Bash task counts as running only while the status is `shell` (Claude's own word that a shell runs).
   - **Endless commands** (`activity.is_endless(command)`, a pattern list) never make a session watching: servers

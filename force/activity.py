@@ -218,6 +218,7 @@ class Background(NamedTuple):
     description: str
     command: str         # "" unless Bash
     started_ms: int | None   # the record's timestamp
+    timeout_ms: int | None = None   # a Monitor's own `timeout_ms`: it has ended once that has passed
 
 
 class Scan(NamedTuple):
@@ -245,7 +246,8 @@ def waiting_tasks(status_word: str, background, process_start_ms: int | None, no
     """The counting tasks of a watching session (SPEC §5): the launched, not-ended background tasks that make the
     session watching. Tasks with a `started_ms` older than the process it runs in (they died with an earlier process)
     or older than 24 h stay (see below) never count; a Bash task counts as running only while the status is `shell`;
-    endless commands (`is_endless`) never count. Agent and Monitor always count."""
+    endless commands (`is_endless`) never count; a Monitor past its own `timeout_ms` has ended. Agent and Monitor
+    count otherwise."""
     out = []
     for t in background:
         if t.started_ms is not None:
@@ -255,6 +257,9 @@ def waiting_tasks(status_word: str, background, process_start_ms: int | None, no
                 continue
         if t.tool == "Bash" and (status_word != "shell" or is_endless(t.command)):
             continue
+        if (t.timeout_ms is not None and t.started_ms is not None and now_ms is not None
+                and now_ms >= t.started_ms + t.timeout_ms):
+            continue                    # a Monitor past its own timeout has ended, notice or not
         out.append(t)
     return out
 
@@ -305,13 +310,47 @@ def _launched_tasks(record: dict) -> list[Background]:
         if not (inp.get("run_in_background") or name == "Monitor"):
             continue
         command = str(inp.get("command") or "") if name == "Bash" else ""
+        timeout = inp.get("timeout_ms") if name == "Monitor" else None
         out.append(Background(
             tool_use_id=str(b.get("id") or ""),
             tool=name,
             description=str(inp.get("description") or "").strip(),
             command=command,
             started_ms=ts,
+            timeout_ms=timeout if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0 else None,
         ))
+    return out
+
+
+# --- stopped tasks (SPEC §5): the agent's TaskStop writes no notice, only its own tool call and result ----------
+_STOP_TOOLS = ("TaskStop", "KillShell", "KillBash")
+_TASK_ID_KEYS = ("backgroundTaskId", "taskId", "agentId")    # the task id a launch's tool result names
+
+
+def _task_ids(record: dict) -> dict[str, str]:
+    """task id -> tool_use id, from a user record's tool results that name the background task they started."""
+    result = record.get("toolUseResult")
+    message = record.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(result, dict) or not isinstance(blocks, list):
+        return {}
+    use_ids = [str(b.get("tool_use_id")) for b in blocks
+               if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id")]
+    task = next((result[k] for k in _TASK_ID_KEYS if isinstance(result.get(k), str) and result.get(k)), None)
+    return {task: use_ids[0]} if task and len(use_ids) == 1 else {}
+
+
+def _stopped_task_ids(record: dict) -> set[str]:
+    """The task ids an assistant record stops (TaskStop / KillShell / KillBash)."""
+    message = record.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else None
+    out = set()
+    for b in blocks if isinstance(blocks, list) else ():
+        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in _STOP_TOOLS:
+            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+            for k in ("task_id", "shell_id", "bash_id"):
+                if isinstance(inp.get(k), str) and inp[k]:
+                    out.add(inp[k])
     return out
 
 
@@ -383,6 +422,8 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
     desc = None
     launched: list[Background] = []
     ended: set[str] = set()
+    task_use: dict[str, str] = {}       # task id -> the tool_use id that launched it
+    stopped: set[str] = set()           # task ids the agent stopped
     for line in reversed(lines):
         if not line.strip():
             continue
@@ -397,6 +438,7 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
             end_turn = False            # walking back past a prompt: the records seen belong to an older turn
         if record.get("type") == "user":
             ended.update(_ended_ids(record))
+            task_use.update(_task_ids(record))
             continue
         if record.get("type") != "assistant":
             continue
@@ -407,6 +449,7 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
                 isinstance(message, dict) and str(message.get("model", "")).startswith("<")):
             continue
         launched.extend(_launched_tasks(record))
+        stopped.update(_stopped_task_ids(record))
         if not newest:
             newest = True
             if isinstance(message, dict):
@@ -432,7 +475,8 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
             if end_turn and end_reply_ms is None and b.get("type") == "text" \
                     and is_finding(str(b.get("text") or "")):
                 end_reply_ms = _timestamp_ms(record.get("timestamp"))
-    # oldest first (we walked backwards); drop the launched tasks a later notice reported ended
+    # oldest first (we walked backwards); drop the launched tasks a later notice reported ended, or the agent stopped
+    ended.update(task_use[t] for t in stopped if t in task_use)
     background = tuple(t for t in reversed(launched) if t.tool_use_id not in ended)
     return Scan(desc, model, effort, reply_ms, end_reply_ms, background, bool(launched))
 

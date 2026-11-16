@@ -552,3 +552,70 @@ def test_waiting_tasks_cutoffs():
     # older than 24 h -> dropped; a task with no started_ms is kept
     assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=1)], None, _ms(90000))] == []
     assert [t.tool_use_id for t in waiting_tasks("shell", [_bg("b1", started=None)], None, now)] == ["b1"]
+
+
+# --- stopped tasks (SPEC §5): TaskStop writes no notice ------------------------------------------------------
+
+def _launch(tool, tid, ts, **inp):
+    return {"type": "assistant", "timestamp": f"2026-11-11T10:00:{ts:02d}.000Z",
+            "message": {"content": [{"type": "tool_use", "id": tid, "name": tool,
+                                     "input": {"description": "d", **inp}}]}}
+
+
+def _started(tid, key, task):
+    """The launch's tool result, naming its task id (backgroundTaskId for Bash, taskId for Monitor, agentId)."""
+    return {"type": "user", "toolUseResult": {key: task},
+            "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": "started"}]}}
+
+
+def _stop(sid, ts, tool="TaskStop", key="task_id", task="t1"):
+    return [{"type": "assistant", "timestamp": f"2026-11-11T10:00:{ts:02d}.000Z",
+             "message": {"content": [{"type": "tool_use", "id": sid, "name": tool, "input": {key: task}}]}},
+            {"type": "user", "toolUseResult": {"message": f"Successfully stopped task: {task}", "task_id": task},
+             "message": {"content": [{"type": "tool_result", "tool_use_id": sid, "content": "stopped"}]}}]
+
+
+@pytest.mark.parametrize("tool, key, extra", [
+    ("Monitor", "taskId", {}),
+    ("Bash", "backgroundTaskId", {"run_in_background": True, "command": "sleep 900"}),
+    ("Agent", "agentId", {"run_in_background": True}),
+])
+def test_scan_task_stopped_by_the_agent_has_ended(tmp_path, tool, key, extra):
+    p = write(tmp_path / "t.jsonl", [_launch(tool, "u1", 1, **extra), _started("u1", key, "t1"), *_stop("s1", 2)])
+    s = scan(p)
+    assert s.background == () and s.launched_any is True
+
+
+def test_scan_older_kill_tools_and_shell_id(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        _launch("Bash", "u1", 1, run_in_background=True), _started("u1", "backgroundTaskId", "sh1"),
+        *_stop("s1", 2, tool="KillShell", key="shell_id", task="sh1"),
+        _launch("Bash", "u2", 3, run_in_background=True), _started("u2", "backgroundTaskId", "sh2"),
+        *_stop("s2", 4, tool="KillBash", key="shell_id", task="sh2"),
+    ])
+    assert scan(p).background == ()
+
+
+def test_scan_stopping_another_task_leaves_this_one(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        _launch("Monitor", "u1", 1), _started("u1", "taskId", "t1"),
+        _launch("Monitor", "u2", 2), _started("u2", "taskId", "t2"),
+        *_stop("s1", 3, task="t2"),
+        *_stop("s2", 4, task="unknown"),            # a task id no launch here named: nothing
+    ])
+    assert [t.tool_use_id for t in scan(p).background] == ["u1"]
+
+
+def test_monitor_past_its_own_timeout_has_ended(tmp_path):
+    p = write(tmp_path / "t.jsonl", [_launch("Monitor", "m1", 1, timeout_ms=60_000),
+                                     _launch("Monitor", "m2", 2)])
+    bg = scan(p).background
+    assert [t.timeout_ms for t in bg] == [60_000, None]
+    assert [t.tool_use_id for t in waiting_tasks("idle", bg, None, _ms(30))] == ["m1", "m2"]
+    assert [t.tool_use_id for t in waiting_tasks("idle", bg, None, _ms(61))] == ["m2"], "m1 timed out at 61 s"
+
+
+@pytest.mark.parametrize("bad", [0, -5, True, "60000", None])
+def test_monitor_timeout_must_be_a_positive_number(tmp_path, bad):
+    p = write(tmp_path / "t.jsonl", [_launch("Monitor", "m1", 1, timeout_ms=bad)])
+    assert scan(p).background[0].timeout_ms is None
