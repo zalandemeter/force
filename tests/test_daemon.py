@@ -380,6 +380,24 @@ def test_switch_targets(env):
     assert nxt_a == "b"
 
 
+def test_switch_targets_reach_a_ui_server_started_later(env):
+    """Alt+N in a ui window reads @force_idx_N from the ui server: one started after the daemon published them (no
+    change in the list since) gets them on the next tick."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "a")
+    add_live(cockpit, "b")
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    ui = cockpit.ui_tmux
+    assert not ui.server_running()
+    ui.run("new-session", "-d", "-s", "ui-x", "-x", "80", "-y", "24", "cat")
+    try:
+        d.tick()
+        assert ui.get_option("@force_idx_1") == "a" and ui.get_option("@force_idx_2") == "b"
+    finally:
+        ui.run("kill-server", check=False)
+
+
 def test_read_status_once_per_session_per_tick(env, monkeypatch):
     import force.claude as cmod
     cockpit = env.make_cockpit()
