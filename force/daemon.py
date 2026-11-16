@@ -1401,11 +1401,14 @@ class Daemon:
                 live[(i + 1) % n].name if n > 1 else None,
                 live[(i - 1) % n].name if n > 1 else None,
             )
-        key = (tuple(sorted(idx.items())), tuple(per.items()))
+        servers = self._servers()
+        # which servers (and which run of each: its pid) got them: a ui server started or restarted after the last
+        # change gets them too, or Alt+N does nothing there until the list changes
+        key = (tuple(sorted(idx.items())), tuple(per.items()), tuple(self._server_id(t) for t in servers))
         if key == self._last_switch:
             return
         self._last_switch = key
-        for t in self._servers():
+        for t in servers:
             for k, v in idx.items():
                 if v:
                     t.set_option(k, v)
@@ -1455,6 +1458,11 @@ class Daemon:
         removed = self.cockpit.dedupe_sidebars()
         if removed:
             print(f"force: removed {removed} duplicate sidebar/header pane(s)", file=sys.stderr)
+
+    @staticmethod
+    def _server_id(t) -> str:
+        rc, out, _err = t._run_rc(["display-message", "-p", "#{pid}"])
+        return f"{t.socket}:{out.strip() if rc == 0 else ''}"
 
     def _servers(self) -> list:
         """The host tmux, plus the ui tmux when it runs (split mode)."""
