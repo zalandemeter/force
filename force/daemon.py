@@ -1080,7 +1080,7 @@ class Daemon:
         now_ms = int(now * 1000)
         clients = self.cockpit.tmux.clients()
         self._note_clients(clients)
-        viewed = {c.session for c in self.cockpit.tmux.clients(control=True)}
+        viewed = self._viewed_sessions()
         names = {e.name for e in self._registry}
         for entry in self._registry:
             name = entry.name
@@ -1109,8 +1109,7 @@ class Daemon:
         seen = self._seen
         now = self.clock()
         now_ms = int(now * 1000)
-        clients = self.cockpit.tmux.clients(control=True)   # a `force api` terminal view counts (SPEC §54)
-        viewed = {c.session for c in clients}
+        viewed = self._viewed_sessions()
         lv = claude_mod.latest_version(self.paths.claude_bin)
         live = self._live()
         # the list's numbers (Alt+N, jump): Chuck (SPEC §50) is not in the list and has none
@@ -1458,6 +1457,23 @@ class Daemon:
         removed = self.cockpit.dedupe_sidebars()
         if removed:
             print(f"force: removed {removed} duplicate sidebar/header pane(s)", file=sys.stderr)
+
+    def _viewed_sessions(self) -> set[str]:
+        """The sessions a client shows: any terminal, a `force api` view (control mode), but not the nested client of
+        a ui window a frontend has hidden (`@force_hidden`, SPEC §54: its app keeps running, nobody looks at it)."""
+        hidden = set()
+        try:
+            if self.cockpit.ui_tmux.server_running():
+                rc, out, _err = self.cockpit.ui_tmux._run_rc(["list-windows", "-a", "-F",
+                                                              "#{@force_hidden}\t#{@force_nested}"])
+                if rc == 0:
+                    for line in out.splitlines():
+                        flag, _, nested = line.partition("\t")
+                        if flag and nested:
+                            hidden.add(nested)
+        except Exception:
+            pass
+        return {c.session for c in self.cockpit.tmux.clients(control=True) if c.name not in hidden}
 
     @staticmethod
     def _server_id(t) -> str:

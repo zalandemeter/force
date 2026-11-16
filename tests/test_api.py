@@ -331,7 +331,7 @@ def test_vt_app_end_is_reported_and_cells_ops_refused(env):
     t2 = _vt_client(env, "cat")
     term = t2.call("terminal.open", mode="vt", target="app")["ok"]["term"]
     for op, extra in (("terminal.scroll", {"lines": 1}), ("terminal.switch", {"session": "x"}),
-                      ("terminal.hidden", {"hidden": True})):
+                      ("terminal.hidden", {"hidden": "yes"})):
         assert t2.call(op, term=term, **extra)["error"]["code"] == "bad_request", op
     assert t2.call("terminal.open", mode="vt", target="app", cols=5, rows=5)["error"]["code"] == "bad_request"
     t2.close()
@@ -356,4 +356,26 @@ def test_vt_app_a_tmux_client_draws(env):
     finally:
         c.call("terminal.close", term=t)
         subprocess.run(["tmux", "-L", env.socket + "-vt", "kill-server"], capture_output=True)
+        c.close()
+
+
+def test_vt_app_hidden_marks_its_ui_window(env):
+    """Hidden, the app keeps running and its ui window says so (@force_hidden): the daemon then does not count the
+    session it shows as viewed."""
+    import base64
+    ui = env.socket + "-ui"
+    c = ApiClient(env.make_cockpit(), app_argv=["tmux", "-L", ui, "-f", "/dev/null", "new-session", "-s", "app",
+                                                "sh", "-c", "echo UP; sleep 30"])
+    c.call("hello", protocol=1)
+    t = c.call("terminal.open", mode="vt", target="app", cols=80, rows=24)["ok"]["term"]
+    try:
+        _vt_text(c, "UP")
+        flag = lambda: subprocess.run(["tmux", "-L", ui, "show-options", "-wqv", "-t", "=app:", "@force_hidden"],
+                                      capture_output=True, text=True).stdout.strip()
+        assert c.call("terminal.hidden", term=t, hidden=True)["ok"] == {}
+        assert flag() == "1"
+        assert c.call("terminal.hidden", term=t, hidden=False)["ok"] == {}
+        assert flag() == ""
+    finally:
+        c.call("terminal.close", term=t)
         c.close()

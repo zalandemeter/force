@@ -398,6 +398,30 @@ def test_switch_targets_reach_a_ui_server_started_later(env):
         ui.run("kill-server", check=False)
 
 
+def test_a_hidden_ui_window_does_not_view(env):
+    """A frontend's hidden app (SPEC §54): its ui window has @force_hidden and names its nested client; that
+    client's session is not viewed. Any other client still is."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "a")
+    d = Daemon(cockpit, FakeClock())
+    nested = subprocess.Popen(["tmux", "-L", env.socket, "-C", "attach", "-t", "=a"], stdin=subprocess.PIPE,
+                              stdout=subprocess.DEVNULL, text=True)
+    ui = cockpit.ui_tmux
+    try:
+        assert wait_for(lambda: any(c.session == "a" for c in cockpit.tmux.clients(control=True)))
+        name = next(c.name for c in cockpit.tmux.clients(control=True) if c.session == "a")
+        assert d._viewed_sessions() == {"a"}
+        ui.run("new-session", "-d", "-s", "ui-x", "-x", "80", "-y", "24", "cat")
+        ui.run("set-option", "-w", "-t", "=ui-x:", "@force_nested", name)
+        assert d._viewed_sessions() == {"a"}, "shown"
+        ui.run("set-option", "-w", "-t", "=ui-x:", "@force_hidden", "1")
+        assert d._viewed_sessions() == set(), "hidden: nobody looks"
+    finally:
+        nested.stdin.close()
+        nested.wait(timeout=5)
+        ui.run("kill-server", check=False)
+
+
 def test_read_status_once_per_session_per_tick(env, monkeypatch):
     import force.claude as cmod
     cockpit = env.make_cockpit()

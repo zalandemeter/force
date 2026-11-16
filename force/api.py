@@ -479,6 +479,7 @@ class AppTerminal:
         self.closed = False
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
         master, slave = os.openpty()
+        self.tty = os.ttyname(slave)                    # the app's tmux client is this tty on the ui server
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         env.update(TERM="xterm-256color", COLORTERM="truecolor")
         # a fresh helper (single-threaded: no fork of this multi-threaded process by hand) makes a new session and the
@@ -524,6 +525,23 @@ class AppTerminal:
             fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         except OSError:
             pass
+
+    def set_hidden(self, hidden: bool) -> None:
+        """Hidden, the app keeps running (shown again at once, as it was) but its ui window says so (@force_hidden),
+        and the daemon does not count the session it shows as viewed (SPEC §54)."""
+        ui = self.api.cockpit.ui_tmux
+        try:
+            tty = self.tty
+            rc, out, _err = ui._run_rc(["list-clients", "-F", "#{client_tty}\t#{window_id}"])
+            for line in out.splitlines() if rc == 0 else []:
+                ctty, _, window = line.partition("\t")
+                if ctty == tty and window:
+                    if hidden:
+                        ui._run_rc(["set-option", "-w", "-t", window, "@force_hidden", "1"])
+                    else:
+                        ui._run_rc(["set-option", "-wu", "-t", window, "@force_hidden"])
+        except Exception as e:                          # pragma: no cover (the ui server went away)
+            print(f"force api: hidden: {e}", file=sys.stderr)
 
     def close(self) -> None:
         if self.closed and self.fd is None:
@@ -803,7 +821,12 @@ class Api:
     def op_term_hidden(self, rid, msg) -> None:
         t = self._term(msg)
         if isinstance(t, AppTerminal):
-            raise ApiError("bad_request", "vt mode: close the app instead (it is a client: open, it views)")
+            hidden = msg.get("hidden")
+            if not isinstance(hidden, bool):
+                raise ApiError("bad_request", "hidden: true or false")
+            t.set_hidden(hidden)
+            self.reply(rid, {})
+            return
         hidden = msg.get("hidden")
         if not isinstance(hidden, bool):
             raise ApiError("bad_request", "hidden: true or false")
