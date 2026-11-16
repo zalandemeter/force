@@ -185,15 +185,57 @@ def update_remote(paths, r, check: bool = False, timeout: int = _REMOTE_TIMEOUT,
     return p.returncode == 0, _summary(p.returncode, (p.stdout or "") + "\n" + (p.stderr or ""))
 
 
+# a remote's answer when its Force cannot update itself: built without a download address, or older than `update`
+_CANNOT_SELF = ("no download address", "invalid choice: 'update'")
+_TOO_OLD = "too old to update itself"
+
+
+def cannot_update_itself(summary: str) -> bool:
+    return any(s in summary for s in _CANNOT_SELF)
+
+
+def copy_release(paths, r, run=None) -> tuple[bool, str]:
+    """This machine's live release onto remote `r` (`force host upgrade NAME`, SPEC §46), for a remote whose Force is
+    too old to update itself. Only between machines of one platform: a release holds compiled programs."""
+    from . import config, remote
+    run = run or subprocess.run
+    here = f"{os.uname().sysname} {os.uname().machine}"
+    try:
+        p = run(remote.ssh_argv(paths, r, "uname", "-sm"), capture_output=True, text=True, timeout=30,
+                stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError):
+        return False, "unreachable (ssh failed)"
+    there = (p.stdout or "").strip()
+    if p.returncode != 0 or not there:
+        return False, "unreachable (ssh failed)"
+    if there != here:
+        return False, f"{_TOO_OLD}, and it is {there} (this machine: {here}): install it there again"
+    if current_version() is None:
+        return False, f"{_TOO_OLD}, and this machine runs a development build: force host upgrade {r.name}"
+    try:
+        p = run([config.launcher_path(), "host", "upgrade", r.name], capture_output=True, text=True,
+                timeout=_REMOTE_TIMEOUT, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return False, f"copying: no answer within {_REMOTE_TIMEOUT // 60} min"
+    except OSError as e:
+        return False, f"copying: {e}"
+    if p.returncode == 0:
+        m = re.search(r"copying release (\S+) to", p.stdout or "")
+        return True, f"{m.group(1) if m else 'the release'} copied from this machine"
+    return False, "copying: " + _summary(p.returncode, (p.stdout or "") + "\n" + (p.stderr or ""))
+
+
 def _remotes(paths, host: str | None):
     from . import remote
     rs = [r for r in remote.load(paths) if r.enabled]
     return [r for r in rs if r.name == host] if host else rs
 
 
-def update_remotes(paths, rs, check: bool, on_done, run=None) -> bool:
+def update_remotes(paths, rs, check: bool, on_done, run=None, too_old: list | None = None) -> bool:
     """Update remotes `rs` in parallel; `on_done(name, ok, summary)` as each finishes (from worker threads, one at a
-    time). -> True when all of them were fine."""
+    time; ok None: pending). A remote too old to update itself goes into `too_old` (when given) instead of failing: the caller copies
+    this machine's release there after this machine's own update (copy_release); a check only says so.
+    -> True when all of them were fine."""
     import threading
     from concurrent.futures import ThreadPoolExecutor
     lock = threading.Lock()
@@ -203,11 +245,29 @@ def update_remotes(paths, rs, check: bool, on_done, run=None) -> bool:
         nonlocal ok_all
         ok, summary = update_remote(paths, r, check=check, run=run)
         with lock:
+            if not ok and cannot_update_itself(summary):
+                if check:
+                    summary = f"{_TOO_OLD}: force update copies this machine's release there"
+                elif too_old is not None:
+                    too_old.append(r)
+                    on_done(r.name, None, f"{_TOO_OLD}: this machine's release goes there next")   # pending
+                    return
             ok_all = ok_all and ok
             on_done(r.name, ok, summary)
     if rs:
         with ThreadPoolExecutor(max_workers=min(8, len(rs))) as pool:
             list(pool.map(one, rs))
+    return ok_all
+
+
+def copy_to_old(paths, rs, on_done, run=None) -> bool:
+    """copy_release to each remote in `rs` (one at a time: each sends a whole release), `on_done` as in
+    update_remotes. -> True when all of them were fine."""
+    ok_all = True
+    for r in rs:
+        ok, summary = copy_release(paths, r, run=run)
+        ok_all = ok_all and ok
+        on_done(r.name, ok, summary)
     return ok_all
 
 
@@ -225,11 +285,12 @@ def update_command(check: bool = False, here: bool = False, host: str | None = N
         return 1
 
     def report(name, ok, summary):
-        print(f"{'✓' if ok else '✗'} {name}: {summary}", flush=True)
-    remotes_ok = update_remotes(paths, rs, check, report)
-    if host:
-        return 0 if remotes_ok else 1
-    code = _update_here(check)
+        print(f"{'…' if ok is None else '✓' if ok else '✗'} {name}: {summary}", flush=True)
+    old: list = []
+    remotes_ok = update_remotes(paths, rs, check, report, too_old=old)
+    code = 0 if host else _update_here(check)
+    # a remote too old to update itself gets this machine's release, now updated itself
+    remotes_ok = copy_to_old(paths, old, report) and remotes_ok
     return code or (0 if remotes_ok else 1)
 
 
@@ -299,10 +360,12 @@ def _ui_local() -> int:
     print("\x1b[1A\r\x1b[K" + "  " + c("Updating…", "grey"), flush=True)     # in place of the keys row
 
     def report(name, ok, summary):
-        print("  " + c("✓" if ok else "✗", "ok" if ok else "bad", bold=True) + " "
+        mark = c("…", "grey") if ok is None else c("✓" if ok else "✗", "ok" if ok else "bad", bold=True)
+        print("  " + mark + " "
               + c(f"{name[:name_w - 2]:<{name_w}}", "name") + c(summary[:CARD_W - name_w - 4], "grey"), flush=True)
+    old: list = []
     remotes_ok = update_remotes(paths, [r for r in _remotes(paths, None) if any(h[0] == r.name for h in behind)],
-                                False, report)
+                                False, report, too_old=old)
     code = 0
     if here_behind:
         tmp = None
@@ -326,6 +389,7 @@ def _ui_local() -> int:
                 except OSError:
                     pass
         report(hosts[0][0], code == 0, f"{cur} → {latest}" + ("" if code == 0 else f" failed (exit {code})"))
+    remotes_ok = copy_to_old(paths, old, report) and remotes_ok
     if code == 0 and remotes_ok:
         rows = doctor_line(f"✓ Force {latest} installed. Sessions keep running.")
     else:

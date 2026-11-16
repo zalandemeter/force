@@ -455,3 +455,103 @@ def test_card_says_every_host_is_current(monkeypatch, capsys):
     monkeypatch.setattr(remote, "read_status", lambda paths, name: {"state": "connected", "version": "1.4.2"})
     assert updates.ui_command() == 0
     assert "Every host runs Force 1.4.2" in capsys.readouterr().out
+
+
+# --- a remote too old to update itself gets this machine's release (SPEC §46) --------------------------------
+_NO_BASE = "force: this Force build has no download address (built without FORCE_DOWNLOAD_BASE); update it the way it was installed"
+
+
+class _OldRun:
+    """ssh answers for a remote `old` too old to update itself, its `uname -sm`, and `force host upgrade old`."""
+    def __init__(self, uname="Linux x86_64", upgrade=(0, "force: copying release 1.5.2 to old…\nforce: Force 1.5.2 installed\n")):
+        self.uname, self.upgrade, self.calls = uname, upgrade, []
+
+    def __call__(self, argv, **kw):
+        self.calls.append(argv)
+        if argv[-3:] == ["host", "upgrade", "old"]:
+            return SimpleNamespace(returncode=self.upgrade[0], stdout=self.upgrade[1], stderr="")
+        if argv[-1] == "uname -sm":
+            return SimpleNamespace(returncode=0, stdout=self.uname + "\n", stderr="")
+        if argv[-1].endswith("update --here") or argv[-1].endswith("update --check --here"):
+            return SimpleNamespace(returncode=1, stdout="", stderr=_NO_BASE)
+        return SimpleNamespace(returncode=255, stdout="", stderr="ssh: no route")
+
+
+def _here(monkeypatch, sysname="Linux", machine="x86_64", version="1.5.2"):
+    monkeypatch.setattr(updates.os, "uname", lambda: SimpleNamespace(sysname=sysname, machine=machine))
+    monkeypatch.setattr(updates, "current_version", lambda: version)
+
+
+@pytest.mark.parametrize("summary, old", [
+    ("this Force build has no download address (built without FORCE_DOWNLOAD_BASE); update it the way it was installed", True),
+    ("error: argument command: invalid choice: 'update' (choose from 'new', 'list')", True),
+    ("unreachable (ssh failed)", False),
+    ("cannot fetch https://useforce.cc/install.sh: timed out", False),
+])
+def test_cannot_update_itself(summary, old):
+    assert updates.cannot_update_itself(summary) is old
+
+
+def test_update_copies_this_machines_release_to_a_remote_too_old_to_update_itself(monkeypatch, capsys):
+    run = _OldRun()
+    _here(monkeypatch)
+    monkeypatch.setattr(updates, "_remotes", lambda paths, host: [_remote("old")])
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    order = []
+    monkeypatch.setattr(updates, "_update_here", lambda check: order.append("here") or 0)
+    real_copy = updates.copy_release
+    monkeypatch.setattr(updates, "copy_release", lambda paths, r, run=None: (order.append("copy"), real_copy(paths, r, run))[1])
+    assert updates.update_command() == 0
+    out = capsys.readouterr().out
+    assert "… old: too old to update itself: this machine's release goes there next" in out
+    assert "✓ old: 1.5.2 copied from this machine" in out
+    assert order == ["here", "copy"], "this machine first: the release it copies is the updated one"
+    assert any(c[-3:] == ["host", "upgrade", "old"] for c in run.calls)
+
+
+def test_check_only_says_so(monkeypatch, capsys):
+    run = _OldRun()
+    _here(monkeypatch)
+    monkeypatch.setattr(updates, "_remotes", lambda paths, host: [_remote("old")])
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    monkeypatch.setattr(updates, "_update_here", lambda check: 0)
+    assert updates.update_command(check=True) == 1
+    assert "✗ old: too old to update itself: force update copies this machine's release there" in capsys.readouterr().out
+    assert not any(c[-3:] == ["host", "upgrade", "old"] for c in run.calls)
+
+
+def test_never_copies_to_another_platform(monkeypatch):
+    from force import config
+    run = _OldRun(uname="Darwin arm64")
+    _here(monkeypatch)
+    ok, summary = updates.copy_release(config.get_paths(), _remote("old"), run=run)
+    assert not ok and "it is Darwin arm64 (this machine: Linux x86_64)" in summary
+    assert not any(c[-3:] == ["host", "upgrade", "old"] for c in run.calls)
+
+
+def test_never_copies_a_development_build(monkeypatch):
+    from force import config
+    run = _OldRun()
+    _here(monkeypatch, version=None)
+    ok, summary = updates.copy_release(config.get_paths(), _remote("old"), run=run)
+    assert not ok and "development build: force host upgrade old" in summary
+
+
+def test_a_failed_copy_fails_the_update(monkeypatch, capsys):
+    run = _OldRun(upgrade=(1, "force: copying to old failed\n"))
+    _here(monkeypatch)
+    monkeypatch.setattr(updates, "_remotes", lambda paths, host: [_remote("old")])
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    monkeypatch.setattr(updates, "_update_here", lambda check: 0)
+    assert updates.update_command() == 1
+    assert "✗ old: copying: copying to old failed" in capsys.readouterr().out
+
+
+def test_host_option_copies_too(monkeypatch, capsys):
+    run = _OldRun()
+    _here(monkeypatch)
+    monkeypatch.setattr(updates, "_remotes", lambda paths, host: [_remote("old")] if host in (None, "old") else [])
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    monkeypatch.setattr(updates, "_update_here", lambda check: pytest.fail("--host: not this machine"))
+    assert updates.update_command(host="old") == 0
+    assert "✓ old: 1.5.2 copied from this machine" in capsys.readouterr().out

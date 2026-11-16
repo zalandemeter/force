@@ -283,8 +283,11 @@
 
     <section id="updates">
       <h2>Updates and uninstall</h2>
-      <p>A daily check shows a new release in the sidebar footer. <code>force update</code> installs it
-        (<code>--check</code> only looks); your sessions keep running.</p>
+      <p>An hourly check shows a new release in the sidebar footer, and Force installs it by itself once you have
+        been away for 10 minutes (<code>autoUpdate false</code> turns that off). <code>force update</code> installs it
+        now on every machine you added and then on this one (<code>--check</code> only looks, <code>--here</code>
+        does this machine only); your sessions keep running. A machine whose Force is too old to update itself gets
+        this machine's release copied over, when both are the same platform.</p>
       <p><code>force uninstall</code> asks first (<code>--yes</code> answers for you). It keeps your
         conversations, the session list and your settings; <code>--purge</code> removes everything, the icon font
         included.</p>
