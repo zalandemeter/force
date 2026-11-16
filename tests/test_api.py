@@ -195,6 +195,19 @@ def test_terminal_open_input_and_frames(env, client):
     assert "1 demo" not in env.tmux.run("list-clients", "-F", "#{client_control_mode} #{client_session}")
 
 
+def test_a_resized_view_gives_the_size_back(env, client):
+    _demo(env)
+    env.tmux.run("set-option", "-g", "window-size", "smallest")
+    t = client.call("terminal.open", session="demo")["ok"]["term"]
+    client.event("terminal.screen")
+    client.call("terminal.resize", term=t, cols=30, rows=5)
+    client.event("terminal.screen", where=lambda e: e["cols"] == 30)
+    client.call("terminal.close", term=t)
+    time.sleep(0.4)
+    # no other client: tmux keeps the last size; with one, `smallest` gives it that client's (tested by tmux)
+    assert "1 demo" not in env.tmux.run("list-clients", "-F", "#{client_control_mode} #{client_session}")
+
+
 def test_terminal_paste_keeps_newlines_as_one_paste(env, client):
     _demo(env)
     t = client.call("terminal.open", session="demo")["ok"]["term"]
@@ -222,7 +235,11 @@ def test_terminal_switch_hidden_and_scroll(env, client):
     client.call("terminal.hidden", term=t, hidden=False)
     client.event("terminal.screen")
     assert client.call("terminal.scroll", term=t, lines=-5)["ok"] == {}
-    assert client.call("terminal.resize", term=t, cols=100, rows=40)["ok"] == {"fixed": True}
+    assert client.call("terminal.resize", term=t, cols=40, rows=6)["ok"] == {"cols": 40, "rows": 6}
+    e = client.event("terminal.screen", where=lambda e: (e["cols"], e["rows"]) == (40, 6))
+    assert len(e["lines"]) == 6, "a new size sends the whole screen"
+    assert env.tmux.run("display", "-p", "-t", "=b:", "#{window_width}x#{window_height}") == "40x6"
+    assert client.call("terminal.resize", term=t, cols=5, rows=6)["error"]["code"] == "bad_request"
     client.call("terminal.close", term=t)
 
 

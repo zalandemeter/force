@@ -230,6 +230,7 @@ class CellsTerminal:
         self.closed = False
         self.seq = itertools.count(1)
         self.size = (0, 0)
+        self.want: tuple[int, int] | None = None     # the view's own size (terminal.resize), re-applied on attach
 
     # the tmux argv on the session's host
     def _argv(self) -> list[str]:
@@ -270,6 +271,20 @@ class CellsTerminal:
         if not self.pane:
             self._stop_proc()
             raise ApiError("no_session", f"{self.host}:{self.name}: no pane")
+        if self.want:
+            self._apply_size()
+        self.full = self.dirty = True
+
+    def _apply_size(self) -> None:
+        """The control client takes the view's size: the window follows it as it follows any client (Force's
+        `window-size smallest`), until the view is hidden or closed (SPEC §54)."""
+        cols, rows = self.want
+        self.command(f"refresh-client -C {cols}x{rows}")
+
+    def resize(self, cols: int, rows: int) -> None:
+        self.want = (cols, rows)
+        if self.proc is not None and self.ready.is_set():
+            self._apply_size()
         self.full = self.dirty = True
 
     def _stop_proc(self) -> None:
@@ -670,8 +685,13 @@ class Api:
         self.reply(rid, {})
 
     def op_term_resize(self, rid, msg) -> None:
-        self._term(msg)
-        self.reply(rid, {"fixed": True})        # cells mode: the pane's own size (SPEC §54)
+        t = self._term(msg)
+        cols, rows = msg.get("cols"), msg.get("rows")
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (cols, rows)) \
+                or not (20 <= cols <= 500 and 5 <= rows <= 200):
+            raise ApiError("bad_request", "cols 20..500, rows 5..200")
+        t.resize(cols, rows)
+        self.reply(rid, {"cols": cols, "rows": rows})
 
     def op_term_hidden(self, rid, msg) -> None:
         t = self._term(msg)
