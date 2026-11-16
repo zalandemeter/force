@@ -22,6 +22,7 @@ python3 -m http.server -d /tmp/site 8080      # and look at it
 | `repo/` | files copied to the site root as they are: `CNAME`, `robots.txt`, `auth.md` |
 | `worker/markdown.js` | the Cloudflare Worker on useforce.cc that answers `Accept: text/markdown` with the Markdown versions |
 | `tools/build.py OUT` | builds the site into OUT: inlines the screens, versions the assets, writes the Markdown versions, `llms.txt`, `sitemap.xml`, `security.txt`, the agent skill index, and `LICENSE.txt` |
+| docs versions | `build.py` reads the release tags (`vX.Y.Z`): `docs.html` is the newest release line, and each older line gets `docs-X.Y.html` (and `.md`), its `website/docs.html` as that line's newest release had it, with the current stylesheet and script. A version menu at the top of each docs page lists them; the older pages carry a note pointing at the newest docs, `noindex` and a canonical link to `docs.html`, and stay out of the sitemap. Without git or tags (a source tarball) there is no menu. CI checks out the full history for this (`fetch-depth: 0`) |
 
 ## Remaking the screens
 

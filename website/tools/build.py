@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 from datetime import datetime, timedelta, timezone
 import sys
 from pathlib import Path
@@ -43,6 +44,69 @@ def repo_links(html: str) -> str:
     return html
 
 
+def doc_versions(repo: Path) -> list[tuple[str, list[str]]]:
+    """The release lines of the docs, newest first: [("1.4", ["v1.4.0", "v1.4.1", "v1.4.2"]), ...] from the
+    repository's vX.Y.Z tags. Empty without git or tags (a build from a source tarball): no version menu then."""
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "tag", "--list", "v*"], capture_output=True, text=True,
+                             check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    lines: dict[tuple[int, int], list[tuple[int, str]]] = {}
+    for tag in out.split():
+        m = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+        if m:
+            lines.setdefault((int(m[1]), int(m[2])), []).append((int(m[3]), tag))
+    return [(f"{x}.{y}", [t for _, t in sorted(lines[(x, y)])]) for x, y in sorted(lines, reverse=True)]
+
+
+def version_menu(versions: list[tuple[str, list[str]]], shown: str) -> str:
+    """The docs' version menu (a <details>: it works without JavaScript): the newest line is docs.html, each older
+    one docs-X.Y.html, with the releases it covers."""
+    def span(tags: list[str]) -> str:
+        return tags[0][1:] if len(tags) == 1 else f"{tags[0][1:]} – {tags[-1][1:]}"
+    items = []
+    for i, (line, tags) in enumerate(versions):
+        href = "docs.html" if i == 0 else f"docs-{line}.html"
+        cur = ' aria-current="page"' if line == shown else ""
+        note = "latest" if i == 0 else span(tags)
+        items.append(f'<li><a href="{href}"{cur}><span class="ver-n">{line}</span>'
+                     f'<span class="ver-r">{note}</span></a></li>')
+    latest = " (latest)" if shown == versions[0][0] else ""
+    return (f'<details class="ver"><summary aria-label="Documentation version: {shown}{latest}">'
+            f'<span class="ver-k">Version</span> {shown}<svg viewBox="0 0 16 16" aria-hidden="true">'
+            f'<path d="M4 6l4 4 4-4"/></svg></summary><ul>{"".join(items)}</ul></details>\n      ')
+
+
+def with_versions(page: str, versions: list[tuple[str, list[str]]], shown: str) -> str:
+    """`page` (docs.html of any release) with the version menu at the top of its head; an older line also gets a
+    note pointing at the newest docs, and stays out of search results (canonical: docs.html)."""
+    head = '<div class="doc-head">'
+    if head not in page:
+        raise SystemExit("build: a docs page without <div class=\"doc-head\">")
+    page = page.replace(head, head + "\n      " + version_menu(versions, shown), 1)
+    if shown != versions[0][0]:
+        start = page.index(head)
+        end = page.index("</div>", start)
+        tags = dict(versions)[shown]
+        note = (f'\n      <p class="ver-note">These are the docs for Force {shown} (up to {tags[-1][1:]}). '
+                f'<a href="docs.html">Read the docs for {versions[0][0]}</a>, the newest release.</p>\n    ')
+        page = page[:end] + note + page[end:]
+        page = page.replace("</title>", f" · {shown}</title>", 1)
+        page = page.replace("</head>", f'<meta name="robots" content="noindex">\n'
+                                       f'<link rel="canonical" href="{BASE}/docs.html">\n</head>', 1)
+        page = page.replace('href="docs.md"', f'href="docs-{shown}.md"')
+    return page
+
+
+def versioned(page: str) -> str:
+    """Asset links with their content hash, so a browser never pairs a new page with an old cached file."""
+    for f in FILES:
+        v = hashlib.sha1((SITE / f).read_bytes()).hexdigest()[:10]
+        page = page.replace(f'"{f}"', f'"{f}?v={v}"')
+    return page
+
+
 def main(out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     page = (SITE / "index.html").read_text(encoding="utf-8")
@@ -58,12 +122,24 @@ def main(out: Path) -> None:
     # the film and its posters too: a new cut must not meet a cached old one (it has to match the window pixel for pixel)
     page = re.sub(r'"media/([^"?]+)"', lambda m: f'"media/{m.group(1)}?v={hashlib.sha1((SITE / "media" / m.group(1)).read_bytes()).hexdigest()[:10]}"', page)
     (out / "index.html").write_text(repo_links(page), encoding="utf-8")
+    # the docs of every older release line, as its newest release had them; a line without a docs page is left out
+    versions, older = doc_versions(SITE.parent), {}
+    for line, tags in versions[1:]:
+        try:
+            older[line] = subprocess.run(["git", "-C", str(SITE.parent), "show", f"{tags[-1]}:website/docs.html"],
+                                         capture_output=True, text=True, check=True).stdout
+        except subprocess.CalledProcessError:
+            pass
+    versions = versions[:1] + [v for v in versions[1:] if v[0] in older]
     for name in PAGES:
         other = (SITE / name).read_text(encoding="utf-8")
-        for f in FILES:
-            v = hashlib.sha1((SITE / f).read_bytes()).hexdigest()[:10]
-            other = other.replace(f'"{f}"', f'"{f}?v={v}"')
-        (out / name).write_text(repo_links(other), encoding="utf-8")
+        if name == "docs.html" and versions:
+            other = with_versions(other, versions, versions[0][0])
+        (out / name).write_text(repo_links(versioned(other)), encoding="utf-8")
+    for line, old in older.items():
+        (out / f"docs-{line}.html").write_text(repo_links(versioned(with_versions(old, versions, line))),
+                                               encoding="utf-8")
+        (out / f"docs-{line}.md").write_text(html_to_md(repo_links(old), f"docs-{line}.html"), encoding="utf-8")
     for f in FILES:
         shutil.copy2(SITE / f, out / f)
     for d in DIRS:

@@ -25,6 +25,15 @@
   window.addEventListener("resize", edges);
   edges();
 
+  // the version menu closes on Escape and on a click elsewhere (it is a <details>: it opens without JavaScript)
+  var ver = document.querySelector(".ver");
+  if (ver) {
+    document.addEventListener("click", function (e) { if (ver.open && !ver.contains(e.target)) ver.open = false; });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && ver.open) { ver.open = false; ver.querySelector("summary").focus(); }
+    });
+  }
+
   var links = Array.prototype.slice.call(document.querySelectorAll(".toc a"));
   var sections = links.map(function (a) { return document.querySelector(a.getAttribute("href")); });
   function mark() {

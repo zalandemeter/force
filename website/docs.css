@@ -89,3 +89,30 @@
 .doc ul { margin: 0 0 16px; padding-left: 1.2em; max-width: 60ch; color: #b0b0b0; line-height: 1.7; }
 .doc li { margin: 0 0 8px; }
 .doc li::marker { color: #5a5a5a; }
+
+/* the version menu (build.py): the newest release line is docs.html, each older one docs-X.Y.html */
+.ver { position: relative; display: inline-block; margin: 0 0 22px; }
+.ver summary { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px 6px 12px; border-radius: 8px;
+               list-style: none; cursor: pointer; color: var(--soft); font: 500 .85rem/1.2 var(--sans);
+               background: #1d1d1d; box-shadow: 0 0 0 1px var(--line-strong); transition: background .15s; }
+.ver summary::-webkit-details-marker { display: none; }
+.ver summary:hover { background: var(--raised); }
+.ver summary:focus-visible { outline: 2px solid var(--coral); outline-offset: 2px; }
+.ver-k { color: var(--muted); font-weight: 400; }
+.ver svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 1.6; stroke-linecap: round;
+           stroke-linejoin: round; transition: transform .15s var(--ease); }
+.ver[open] svg { transform: rotate(180deg); }
+.ver ul { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; min-width: 220px; margin: 0; padding: 6px;
+          list-style: none; border-radius: 10px; background: #1d1d1d;
+          box-shadow: 0 0 0 1px var(--line-strong), 0 12px 32px rgba(0, 0, 0, .45); }
+.ver li { margin: 0; padding: 0; }
+.ver li a { display: flex; justify-content: space-between; gap: 18px; padding: 7px 10px; border-radius: 6px;
+            color: var(--soft); font-size: .88rem; text-decoration: none; }
+.ver li a:hover, .ver li a:focus-visible { background: var(--raised); color: var(--text); outline: none; }
+.ver li a[aria-current] { color: var(--text); box-shadow: inset 2px 0 0 var(--coral); }
+.ver-n { font-weight: 500; font-variant-numeric: tabular-nums; }
+.ver-r { color: var(--muted); font-size: .82rem; font-variant-numeric: tabular-nums; }
+.doc .ver-note { margin: 22px 0 0; padding: 12px 16px; max-width: none; border-radius: 10px; color: var(--soft);
+                 background: rgba(217, 119, 87, .08); box-shadow: inset 2px 0 0 var(--coral); }
+.doc .ver-note a { color: var(--text); }
+@media (prefers-reduced-motion: reduce) { .ver svg { transition: none; } }
