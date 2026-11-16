@@ -1,6 +1,7 @@
 """`force api` (SPEC §54): the protocol, the view model, notices, run, and live terminal views on the test's own
 tmux server (never the live sockets)."""
 import json
+import os
 import subprocess
 import time
 from types import SimpleNamespace
@@ -38,7 +39,8 @@ def test_hello_first_and_protocol(env):
     c = ApiClient(env.make_cockpit())
     assert c.call("subscribe", to=["state"])["error"]["code"] == "bad_request", "hello first"
     ok = c.call("hello", protocol=1, client="test/1")["ok"]
-    assert ok["features"] == ["state", "notices", "run", "terminal.cells"] and ok["host"] == api.short_host()
+    assert ok["features"] == ["state", "notices", "run", "terminal.cells", "terminal.vt.app"]
+    assert ok["host"] == api.short_host()
     assert c.call("nope")["error"]["code"] == "unknown_op"
     c.close()
     c2 = ApiClient(env.make_cockpit())
@@ -280,3 +282,62 @@ def test_force_api_command_end_to_end(env):
 ])
 def test_key_names(key, ok):
     assert bool(api._KEY.match(key)) is ok
+
+
+# --- the whole app in a pty (vt mode) -----------------------------------------------------------------------------
+def _vt_client(env, script):
+    c = ApiClient(env.make_cockpit(), app_argv=["sh", "-c", script])
+    c.call("hello", protocol=1)
+    return c
+
+
+def _vt_text(c, want, timeout=10):
+    import base64
+    got = b""
+    end = time.monotonic() + timeout
+    while want.encode() not in got:
+        e = c.event("terminal.data", timeout=max(0.1, end - time.monotonic()))
+        got += base64.b64decode(e["data"])
+    return got
+
+
+def test_vt_app_runs_in_a_pty_of_the_asked_size(env):
+    import base64
+    c = _vt_client(env, 'stty size; tty >/dev/null && echo TTY; stty -echo; cat')
+    r = c.call("terminal.open", mode="vt", target="app", cols=90, rows=33)["ok"]
+    assert (r["mode"], r["target"], r["cols"], r["rows"]) == ("vt", "app", 90, 33)
+    assert b"33 90" in _vt_text(c, "TTY")
+    # input is bytes as a terminal sends them; the app's echo comes back
+    assert c.call("terminal.input", term=r["term"], data=base64.b64encode(b"hello\r").decode())["ok"] == {}
+    assert b"hello" in _vt_text(c, "hello")
+    assert c.call("terminal.input", term=r["term"], data="not base64!")["error"]["code"] == "bad_request"
+    c.close()
+
+
+def test_vt_app_resize_reaches_the_app(env):
+    c = _vt_client(env, 'trap "stty size" WINCH; echo READY; while :; do sleep 0.1; done')
+    t = c.call("terminal.open", mode="vt", target="app", cols=80, rows=24)["ok"]["term"]
+    _vt_text(c, "READY")
+    assert c.call("terminal.resize", term=t, cols=132, rows=50)["ok"] == {"cols": 132, "rows": 50}
+    assert b"50 132" in _vt_text(c, "50 132")
+    assert c.call("terminal.close", term=t)["ok"] == {}
+    c.close()
+
+
+def test_vt_app_end_is_reported_and_cells_ops_refused(env):
+    c = _vt_client(env, 'echo BYE')
+    t = c.call("terminal.open", mode="vt", target="app", cols=80, rows=24)["ok"]["term"]
+    assert c.event("terminal.closed")["term"] == t
+    t2 = _vt_client(env, "cat")
+    term = t2.call("terminal.open", mode="vt", target="app")["ok"]["term"]
+    for op, extra in (("terminal.scroll", {"lines": 1}), ("terminal.switch", {"session": "x"}),
+                      ("terminal.hidden", {"hidden": True})):
+        assert t2.call(op, term=term, **extra)["error"]["code"] == "bad_request", op
+    assert t2.call("terminal.open", mode="vt", target="app", cols=5, rows=5)["error"]["code"] == "bad_request"
+    t2.close()
+    c.close()
+
+
+def test_vt_app_default_is_this_installs_force_ui(env):
+    a = api.Api(env.make_cockpit(), inp=iter(()), out=open(os.devnull, "w"))
+    assert a.app_argv[1:] == ["--no-intro", "--glyphs", "rich"]

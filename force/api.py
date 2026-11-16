@@ -7,11 +7,16 @@ reader (its tmux control-mode client) and a framer. Every write to stdout goes t
 """
 from __future__ import annotations
 
+import base64
+import fcntl
 import itertools
 import json
 import os
 import re
+import signal
 import socket
+import struct
+import termios
 import subprocess
 import sys
 import threading
@@ -22,7 +27,7 @@ from . import config, notices as notices_mod, remote as remote_mod, updates
 from .state import STATE_WORDS, Snapshot, State, read_snapshot
 
 PROTOCOL = 1
-FEATURES = ["state", "notices", "run", "terminal.cells"]
+FEATURES = ["state", "notices", "run", "terminal.cells", "terminal.vt.app"]
 # the commands a cockpit runs (SPEC §54 `run`); never uninstall, update, host, install-to
 RUN_ALLOWED = frozenset("prompt keys read wait new rename move archive unarchive delete restart upgrade "
                         "remote-control explain list settings".split())
@@ -460,10 +465,95 @@ class CellsTerminal:
         self._stop_proc()
 
 
+# --- the whole Force app in a pty (vt mode, SPEC §54) -----------------------------------------------------------
+class AppTerminal:
+    """Force's own ui (`force --no-intro --glyphs rich`, the same program as in any terminal) in a pseudo-terminal of
+    this process: its output goes to the frontend as `terminal.data` (base64), the frontend's emulator draws it and
+    sends keys back as bytes. Every key, menu, dialog and host works as in a terminal, because it is that program."""
+
+    def __init__(self, api: "Api", term: int, cols: int, rows: int, argv: list[str]):
+        self.api, self.term = api, term
+        self.cols, self.rows = cols, rows
+        self.closed = False
+        env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+        master, slave = os.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        env.update(TERM="xterm-256color", COLORTERM="truecolor", FORCE_API_TTY=os.ttyname(slave))
+        # a new session whose leader opens the pty by name: it becomes its controlling terminal (SIGWINCH on a
+        # resize), without forking this multi-threaded process by hand (forkpty can deadlock the child here)
+        try:
+            self.proc = subprocess.Popen(["sh", "-c", 'exec "$@" <"$FORCE_API_TTY" >"$FORCE_API_TTY" 2>&1', "sh",
+                                          *argv], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            os.close(slave)
+            os.close(master)
+            raise
+        self.pid, self.fd = self.proc.pid, master
+
+        # this end of the pty stays open until the app ends (a read before the app opened it would see no one);
+        # then it closes, and the reader sees the end
+        def wait():
+            self.proc.wait()
+            os.close(slave)
+        threading.Thread(target=wait, daemon=True).start()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        while True:
+            try:
+                data = os.read(self.fd, 65536)
+            except OSError:                             # EIO: the app ended and the pty is gone
+                break
+            if not data:
+                break
+            self.api.send({"event": "terminal.data", "term": self.term,
+                           "data": base64.b64encode(data).decode("ascii")})
+        if not self.closed:
+            self.closed = True
+            self.api.send({"event": "terminal.closed", "term": self.term, "reason": "Force ended"})
+        self._reap()
+
+    def write(self, data: bytes) -> None:
+        if self.closed:
+            raise ApiError("bad_request", "the app has ended")
+        try:
+            os.write(self.fd, data)
+        except OSError as e:
+            raise ApiError("bad_request", str(e))
+
+    def resize(self, cols: int, rows: int) -> None:
+        """The pty's size: the kernel tells the app (SIGWINCH), and tmux redraws for it."""
+        self.cols, self.rows = cols, rows
+        try:
+            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        if self.closed and self.fd is None:
+            return
+        self.closed = True
+        try:
+            os.killpg(self.pid, signal.SIGHUP)          # the app and its tmux client
+        except OSError:
+            pass
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+        self._reap()
+
+    def _reap(self) -> None:
+        self.proc.poll()
+
+
 # --- the server ------------------------------------------------------------------------------------------------
 class Api:
-    def __init__(self, cockpit, inp=None, out=None, run=None):
+    def __init__(self, cockpit, inp=None, out=None, run=None, app_argv: list[str] | None = None):
         self.cockpit = cockpit
+        # the app a vt view runs: this install's own Force ui (tests give another program)
+        self.app_argv = app_argv or [config.launcher_path(), "--no-intro", "--glyphs", "rich"]
         self.inp = inp if inp is not None else sys.stdin
         self.out = out if out is not None else sys.stdout
         self.run = run or subprocess.run
@@ -626,7 +716,7 @@ class Api:
             return {"code": p.returncode, "stdout": p.stdout or "", "stderr": p.stderr or ""}
         self._later(rid, go)
 
-    def _term(self, msg) -> CellsTerminal:
+    def _term(self, msg):
         t = self.terms.get(msg.get("term"))
         if t is None:
             raise ApiError("bad_request", "no such term")
@@ -641,11 +731,21 @@ class Api:
         while not self.stop.is_set():
             now = time.monotonic()
             for t in list(self.terms.values()):
-                t.maybe_frame(now)
+                if isinstance(t, CellsTerminal):
+                    t.maybe_frame(now)
             self.stop.wait(FRAME_EVERY / 2)
 
     def op_term_open(self, rid, msg) -> None:
         mode = msg.get("mode", "cells")
+        if mode == "vt" and msg.get("target") == "app":
+            cols, rows = msg.get("cols", 120), msg.get("rows", 40)
+            if not all(isinstance(v, int) and not isinstance(v, bool) for v in (cols, rows)) \
+                    or not (20 <= cols <= 500 and 5 <= rows <= 200):
+                raise ApiError("bad_request", "cols 20..500, rows 5..200")
+            term = next(self.next_term)
+            self.terms[term] = AppTerminal(self, term, cols, rows, self.app_argv)
+            self.reply(rid, {"term": term, "mode": "vt", "target": "app", "cols": cols, "rows": rows})
+            return
         if mode != "cells":
             raise ApiError("bad_request", f"mode {mode!r} is not served (features)")
         host, name = self.address(msg.get("session"))
@@ -661,6 +761,8 @@ class Api:
 
     def op_term_switch(self, rid, msg) -> None:
         t = self._term(msg)
+        if isinstance(t, AppTerminal):
+            raise ApiError("bad_request", "vt mode: the app switches itself")
         host, name = self.address(msg.get("session"))
 
         def go():
@@ -670,6 +772,14 @@ class Api:
 
     def op_term_input(self, rid, msg) -> None:
         t = self._term(msg)
+        if isinstance(t, AppTerminal):
+            try:
+                data = base64.b64decode(msg.get("data") or "", validate=True)
+            except (ValueError, TypeError):
+                raise ApiError("bad_request", "data: base64 bytes")
+            t.write(data)
+            self.reply(rid, {})
+            return
         keys = msg.get("keys")
         if not isinstance(keys, list):
             raise ApiError("bad_request", "keys: a list")
@@ -678,6 +788,8 @@ class Api:
 
     def op_term_scroll(self, rid, msg) -> None:
         t = self._term(msg)
+        if isinstance(t, AppTerminal):
+            raise ApiError("bad_request", "vt mode: the app scrolls itself")
         lines = msg.get("lines")
         if not isinstance(lines, int) or isinstance(lines, bool):
             raise ApiError("bad_request", "lines: a whole number")
@@ -695,6 +807,8 @@ class Api:
 
     def op_term_hidden(self, rid, msg) -> None:
         t = self._term(msg)
+        if isinstance(t, AppTerminal):
+            raise ApiError("bad_request", "vt mode: close the app instead (it is a client: open, it views)")
         hidden = msg.get("hidden")
         if not isinstance(hidden, bool):
             raise ApiError("bad_request", "hidden: true or false")

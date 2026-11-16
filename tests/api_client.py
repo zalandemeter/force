@@ -13,7 +13,7 @@ import time
 
 
 class ApiClient:
-    def __init__(self, cockpit=None, argv=None, run=None):
+    def __init__(self, cockpit=None, argv=None, run=None, app_argv=None):
         self.ids = itertools.count(1)
         self.replies: dict[int, dict] = {}
         self.events: "queue.Queue[dict]" = queue.Queue()
@@ -28,7 +28,7 @@ class ApiClient:
             r_out, w_out = os.pipe()
             self.w = os.fdopen(w_in, "w", buffering=1)
             server_in, server_out = os.fdopen(r_in, "r"), os.fdopen(w_out, "w", buffering=1)
-            self.server = Api(cockpit, server_in, server_out, run=run)
+            self.server = Api(cockpit, server_in, server_out, run=run, app_argv=app_argv)
             threading.Thread(target=self._serve, args=(server_out,), daemon=True).start()
             r = os.fdopen(r_out, "r")
         threading.Thread(target=self._read, args=(r,), daemon=True).start()
