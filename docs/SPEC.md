@@ -1300,3 +1300,45 @@ A Claude Code session starts with Remote Control (`--remote-control NAME`, §7.2
 | menu | `R` "Remote Control on/off": `force remote-control <the shown session> toggle`, its line shown as a tmux message (split: through `ui-key.sh rc`) |
 | follow Claude | `/remote-control` inside a session turns it on, and its panel's Disconnect turns it off; Claude's status file then has, or loses, `bridgeSessionId`. The daemon follows so a restart keeps it: connected while the choice is off -> on at once; not connected for 60 s in the same process after this process was seen connected, while the choice is on -> off (a short drop is not a choice; a session that never connected is left alone). A new process starts the watch afresh. Each change goes into the session's `why`; it never restarts anything |
 | shown | `force list --json`: `"remote_control"` (the choice) and `"rc_connected"` (live) for Claude Code sessions. The sidebar shows nothing for it |
+
+## 54. Frontend API (`force api`)
+Force's engine (daemon, registry, state, CLI) is drawn by frontends: the terminal cockpit (sidebar, header, the
+nested client) and others outside a terminal, the first a Minecraft mod (a separate project). `force api` is how
+any other frontend talks to the engine: one versioned protocol, so a frontend never reads Force's files or runs
+tmux itself, and Force can change inside without breaking it. It is not a plugin system: nothing runs inside Force.
+
+Principles:
+
+1. **Force decides, frontends draw.** States, order, folders, unread, watching, attention counts, which event is
+   worth a notice: all come from the engine, as the cockpit's sidebar gets them. A frontend computes nothing a
+   second frontend would have to compute the same way.
+2. **One engine.** Every change goes through the CLI (`run`), the same commands the sidebar and menus run, so a
+   new CLI feature reaches every frontend without a protocol change.
+3. **Layout and interaction are the frontend's.** Which session is selected, where the session list sits (a
+   panel, a HUD, inside the terminal view or not at all), how one moves between sessions (keys, clicks, a wheel):
+   none of it is in the protocol. A frontend can move its list out of its terminal view, or change how it
+   switches, without a change here.
+4. **The terminal is one channel with modes.** `cells` (Force renders the screen, the frontend draws cells) and
+   `vt` (Force streams a real terminal's bytes, the frontend runs its own emulator) share one envelope: going from
+   one to the other changes one backend on each side, nothing else.
+
+| Part | |
+|---|---|
+| transport | `force api`: JSON lines on stdin/stdout, one object per line, UTF-8. The frontend starts it and owns it; it ends when stdin closes. Logs on stderr. No socket, no port, no listener: whatever carries a process's stdio carries it (local now; `ssh HOST force api`, `wsl.exe -e force api` later) |
+| messages | request `{"id": N, "op": "…", …}` -> one reply `{"id": N, "ok": {…}}` or `{"id": N, "error": {"code": "…", "message": "…"}}`; events `{"event": "…", …}` (no id) at any time. Unknown fields are ignored on both sides; unknown `op` = error `unknown_op` |
+| `hello` | first request: `{"op": "hello", "protocol": 1, "client": "force-minecraft/0.1.0"}` -> `{"protocol": 1, "force": "X.Y.Z", "host": SHORTNAME, "features": [...]}`. `features` names what this Force serves (`state`, `notices`, `run`, `terminal.cells`, later `terminal.vt`); a frontend uses only what is listed. A protocol it does not speak = error `protocol` and the process ends. Within one protocol number changes are additive only; a breaking change is a new number, and Force serves the newest and the one before |
+| `subscribe` | `{"op": "subscribe", "to": ["state", "notices"]}`: `state` sends a `state` event at once and again whenever it changes (at most every 250 ms); `notices` sends `notice` events |
+| `state` event | the view model of every host this machine shows: `{"generated_ms", "hosts": [{"name", "local": bool, "status": "connected"\|"offline"\|"version", "version"}], "sessions": [{"host", "name", "index", "order", "folder", "kind", "state", "since_ms", "activity", "title", "unread", "watching", "viewed", "model", "effort", "archived", "remote_control", "rc_connected"}], "attention": {"needs_you", "unread"}, "limits": […], "update": "X.Y.Z"\|null}`. This machine's snapshot plus each remote's (§40), sessions addressed `HOST:NAME` (§52); the whole document each time (small; diffing is the frontend's choice) |
+| `notice` event | `{"kind": "needs_you"\|"turn_done", "host", "session", "at_ms", "text"}`: when the daemon would notify (§49.4: a session newly needs you, a turn finished unviewed), whatever `notifyCommand` says. A frontend shows it as it likes (a toast, a sound) |
+| `run` | `{"op": "run", "argv": ["prompt", "devbox:api", "…"]}` -> `{"code", "stdout", "stderr"}`: a Force command, as the CLI runs it (the `force` of this install, §2.1), `HOST:NAME` / `--host` reaching other hosts (§52). Only the commands a cockpit uses: `prompt keys read wait new rename move archive unarchive delete restart upgrade remote-control explain list settings`; anything else = error `not_allowed` (no `uninstall`, `update`, `host`, `install-to`) |
+| `terminal.open` | `{"op": "terminal.open", "session": "HOST:NAME", "mode": "cells"}` -> `{"term": ID, "cols", "rows"}`: one live view of that session's agent pane (only the agent: never a sidebar or header). Then `terminal.screen` events (cells) or `terminal.data` events (vt) until closed. While it is open its session counts as viewed (§5) unless `terminal.hidden` says otherwise |
+| `terminal.switch` | `{"term", "session"}`: the same view shows another session (one call for any "go to session" gesture) |
+| `terminal.input` | `{"term", "keys": [...]}`: cells mode: tmux key names (`Escape`, `C-c`, `Up`, `BTab`, …) and `{"text": "…"}` items for literal text and pastes; vt mode: `{"term", "data": BASE64}` raw bytes |
+| `terminal.scroll` | cells mode: `{"term", "lines": -N\|+N\|0}`: the view moves into the pane's history and back (0 = live) |
+| `terminal.resize` | vt mode: the nested client's size. Cells mode: the view has the pane's own size (the session's window, shared with any cockpit showing it); the reply says `fixed` and the frontend scales to fit |
+| `terminal.hidden` | `{"term", "hidden": bool}`: the frontend is not showing it (window unfocused, console closed but kept): no viewed, frames paused |
+| `terminal.close` | `{"term"}` |
+| cells mode | `terminal.screen` `{"term", "seq", "cols", "rows", "cursor": {"x", "y", "visible"}, "lines": [{"y", "runs": [{"text", "fg", "bg", "bold", "italic", "underline", "reverse", "dim"}]}]}`: changed rows only (all rows on open, switch, scroll and resize), colours as `#rrggbb` or null (the default). Changes come from a tmux control-mode client (`tmux -C`) on the session's host, which never sizes a window; on each change Force re-reads the pane (`capture-pane -e -p`) and sends the rows that differ, at most 30 frames/s: a frontend that falls behind gets the newest frame, never a queue |
+| vt mode (later) | Force runs a nested client of the session's host (`tmux attach -t =NAME` in a pty; for a remote over Force's ssh, as the ui main pane does, §39/§40) and streams its output as `terminal.data`. Mouse and resize then work as in any terminal; the frontend brings the emulator. `terminal.switch` is `switch-client` of that nested client |
+| errors | `no_session`, `no_route` (host), `not_allowed`, `bad_request`, `unknown_op`, `protocol`, `daemon_not_running` (snapshot older than 10 s, §43.1) |
+| frontends | the reference client is `tests/api_client.py` (the tests drive Force through it). Frontends live in their own repositories and releases; the docs page lists them ("Works with Force") |
