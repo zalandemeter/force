@@ -254,3 +254,12 @@ def test_force_api_command_end_to_end(env):
     c.call("subscribe", to=["state"])
     assert c.event("state")["sessions"][0]["name"] == "a"
     c.close()
+
+
+@pytest.mark.parametrize("key, ok", [
+    ("Enter", True), ("BTab", True), ("F5", True), ("C-Up", True), ("S-Up", True), ("M-x", True), ("C-[", True),
+    ("C-\\", True), ("M-/", True), ("a", True), ("~", True), ("C-M-S-x", True),
+    ("rm -rf /", False), ("", False), ("Enter;kill", False), ("C-", False), ("x" * 40, False),
+])
+def test_key_names(key, ok):
+    assert bool(api._KEY.match(key)) is ok

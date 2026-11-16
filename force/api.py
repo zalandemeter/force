@@ -31,7 +31,8 @@ STATE_EVERY = 0.25          # the poller's period; a `state` event only when the
 STALE_MS = 10_000           # a local snapshot older than this: the daemon is not running (SPEC §43.1)
 FRAME_EVERY = 1 / 30        # at most 30 frames/s per view
 REFRESH_EVERY = 2.0         # a frame at least this often while shown, even without output (cursor, history)
-_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_+\-]{0,31}$|^[!-~]$")   # a tmux key name, or one printable character
+# a tmux key name (Enter, BTab, F5, C-Up, M-x, C-[, C-\\, S-Up), or one printable character
+_KEY = re.compile(r"^(?:[CMS]-){0,3}(?:[A-Za-z][A-Za-z0-9]{0,15}|[!-~])$")
 
 
 def short_host() -> str:
