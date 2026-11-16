@@ -567,12 +567,7 @@ def nested_command(cockpit: Cockpit, target: str, remote_name: str | None = None
     if remote_name:
         return _nested_remote(cockpit, target, remote_name)
     if report:
-        d = cockpit.paths.state / "nested"
-        d.mkdir(parents=True, exist_ok=True)
-        try:
-            (d / report).write_text(os.ttyname(0))
-        except OSError:
-            pass
+        _report_tty(cockpit.paths.state / "nested" / report)
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
     waiting = False
     while True:
@@ -590,6 +585,21 @@ def nested_command(cockpit: Cockpit, target: str, remote_name: str | None = None
         time.sleep(1)
 
 
+def _report_tty(path: Path, ttyname=os.ttyname, wait: float = 3.0) -> bool:
+    """The remote side of `force nested --report` (SPEC §40): write this terminal's tty to `path`, then wait until
+    the other side has read and removed it (at most `wait` s): it draws "connecting to HOST" on this terminal
+    until then, so attaching after that keeps the animation off the session. False when the tty is unknown."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(ttyname(0))
+    except OSError:
+        return False
+    deadline = time.monotonic() + wait
+    while path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return True
+
+
 def _nested_remote(cockpit: Cockpit, target: str, remote_name: str) -> int:
     r = remote_mod.get(cockpit.paths, remote_name)
     if r is None:
@@ -599,11 +609,15 @@ def _nested_remote(cockpit: Cockpit, target: str, remote_name: str) -> int:
     pane = os.environ.get("TMUX_PANE", "")
     rid = f"{socket.gethostname()}-{os.getpid()}"
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX_PANE",)}
+    again = False
     while True:
+        spinner = Connecting(r.name, again)
         child = subprocess.Popen(remote_mod.ssh_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, "nested", target,
                                                      "--report", rid, tty=True), env=env)
-        _name_remote_client(cockpit, r, rid, pane, child)
+        _name_remote_client(cockpit, r, rid, pane, child, spinner)
         child.wait()
+        spinner.stop()
+        again = True
         print(f"\x1b[2J\x1b[Hconnection to {r.name} ended; reconnecting…", flush=True)
         time.sleep(2)
         try:                        # back to the session this window showed last, not the first one
@@ -612,21 +626,92 @@ def _nested_remote(cockpit: Cockpit, target: str, remote_name: str) -> int:
             pass
 
 
-def _name_remote_client(cockpit: Cockpit, r, rid: str, pane: str, child) -> None:
-    """Wait (in the background) until the remote side reported its tty, then name the nested client in this
-    ui window and tell its sidebar and header."""
+class Connecting:
+    """The ui main pane while a remote is connecting (SPEC §40): a spinner and "connecting to HOST" in the middle
+    of the pane, redrawn every 100 ms (the size may change) until stop(). The remote side attaches only after
+    stop(), so it never draws over the session."""
+    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, host: str, again: bool = False, out=None, start: bool = True):
+        self.text = f"{'reconnecting' if again else 'connecting'} to {host}"
+        self.out = out or sys.stdout
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._t0 = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        if start:
+            self._thread.start()
+
+    def frame(self, i: int, cols: int, rows: int, elapsed: float) -> str:
+        """One frame: the spinner in Force's coral, the text dim; after 10 s, how long it has been."""
+        text = self.text + (f" · {int(elapsed)} s" if elapsed >= 10 else "")
+        width = len(text) + 2
+        x = max(1, (cols - width) // 2 + 1)
+        y = max(1, rows // 2)
+        return (f"\x1b[?25l\x1b[2J\x1b[{y};{x}H\x1b[38;2;217;119;87m{self.FRAMES[i % len(self.FRAMES)]}"
+                f"\x1b[38;2;138;138;138m {text}\x1b[0m")
+
+    def _run(self) -> None:
+        i = 0
+        while not self._stop.is_set():
+            try:
+                cols, rows = os.get_terminal_size(self.out.fileno())
+            except (OSError, ValueError, AttributeError):
+                cols, rows = 80, 24
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                try:
+                    self.out.write(self.frame(i, cols, rows, time.monotonic() - self._t0))
+                    self.out.flush()
+                except (OSError, ValueError):
+                    return
+            i += 1
+            self._stop.wait(0.1)
+
+    def stop(self) -> None:
+        """Stop drawing and leave a clear pane with the cursor shown (idempotent)."""
+        with self._lock:
+            if self._stop.is_set():
+                return
+            self._stop.set()
+            try:
+                self.out.write("\x1b[2J\x1b[H\x1b[?25h")
+                self.out.flush()
+            except (OSError, ValueError):
+                pass
+
+
+def _name_remote_client(cockpit: Cockpit, r, rid: str, pane: str, child, spinner: Connecting | None = None) -> None:
+    """Wait (in the background) until the remote side reported its tty, then stop the spinner, remove the
+    report (the remote attaches then), name the nested client in this ui window and tell its sidebar and
+    header."""
     def run():
-        for _ in range(60):
+        try:
+            _run()
+        finally:
+            if spinner is not None:
+                spinner.stop()
+
+    def _run():
+        f = f"$HOME/.local/state/force/nested/{rid}"
+        for _ in range(150):
             if child.poll() is not None:
                 return
-            f = f"$HOME/.local/state/force/nested/{rid}"
             try:
-                p = subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, "sh", "-c", f'cat "{f}" && rm -f "{f}"'),
+                p = subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, "sh", "-c", f'cat "{f}"'),
                                    capture_output=True, text=True, timeout=20)
             except subprocess.TimeoutExpired:
                 continue
             tty = p.stdout.strip()
             if p.returncode == 0 and tty:
+                if spinner is not None:
+                    spinner.stop()
+                try:
+                    subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, "sh", "-c", f'rm -f "{f}"'),
+                                   capture_output=True, timeout=20)
+                except subprocess.TimeoutExpired:
+                    pass
                 ui = cockpit.ui_tmux
                 try:
                     ui.run("set-option", "-w", "-t", pane, "@force_nested", tty)
@@ -637,8 +722,15 @@ def _name_remote_client(cockpit: Cockpit, r, rid: str, pane: str, child) -> None
                             os.kill(int(pid), signal.SIGUSR1)
                 except (TmuxError, OSError):
                     pass
+                # a remote on an older Force attached at once, under the spinner: repaint its client
+                try:
+                    subprocess.run([*remote_mod.ssh_argv(cockpit.paths, r, remote_mod.remote_tmux(cockpit.paths, r),
+                                                         "-L", remote_mod.REMOTE_TMUX_SOCKET, "refresh-client",
+                                                         "-c", tty)], capture_output=True, timeout=20)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
                 return
-            time.sleep(0.5)
+            time.sleep(0.2)
     threading.Thread(target=run, daemon=True).start()
 
 
