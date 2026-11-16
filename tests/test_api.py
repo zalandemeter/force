@@ -341,3 +341,19 @@ def test_vt_app_end_is_reported_and_cells_ops_refused(env):
 def test_vt_app_default_is_this_installs_force_ui(env):
     a = api.Api(env.make_cockpit(), inp=iter(()), out=open(os.devnull, "w"))
     assert a.app_argv[1:] == ["--no-intro", "--glyphs", "rich"]
+
+
+def test_vt_app_a_tmux_client_draws(env):
+    """tmux's client needs the pty as its controlling terminal (a shell that only opens it by name is not enough:
+    the client then draws nothing)."""
+    import base64
+    c = ApiClient(env.make_cockpit(), app_argv=["tmux", "-L", env.socket + "-vt", "-f", "/dev/null", "new-session",
+                                                "sh", "-c", "echo HELLO-FROM-PANE; sleep 5"])
+    c.call("hello", protocol=1)
+    t = c.call("terminal.open", mode="vt", target="app", cols=80, rows=24)["ok"]["term"]
+    try:
+        assert b"HELLO-FROM-PANE" in _vt_text(c, "HELLO-FROM-PANE")
+    finally:
+        c.call("terminal.close", term=t)
+        subprocess.run(["tmux", "-L", env.socket + "-vt", "kill-server"], capture_output=True)
+        c.close()

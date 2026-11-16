@@ -466,6 +466,8 @@ class CellsTerminal:
 
 
 # --- the whole Force app in a pty (vt mode, SPEC §54) -----------------------------------------------------------
+_CTTY_EXEC = ("import os, sys, fcntl, termios; os.setsid(); fcntl.ioctl(0, termios.TIOCSCTTY, 0); "
+              "os.execvp(sys.argv[1], sys.argv[1:])")
 class AppTerminal:
     """Force's own ui (`force --no-intro --glyphs rich`, the same program as in any terminal) in a pseudo-terminal of
     this process: its output goes to the frontend as `terminal.data` (base64), the frontend's emulator draws it and
@@ -478,25 +480,18 @@ class AppTerminal:
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
         master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-        env.update(TERM="xterm-256color", COLORTERM="truecolor", FORCE_API_TTY=os.ttyname(slave))
-        # a new session whose leader opens the pty by name: it becomes its controlling terminal (SIGWINCH on a
-        # resize), without forking this multi-threaded process by hand (forkpty can deadlock the child here)
+        env.update(TERM="xterm-256color", COLORTERM="truecolor")
+        # a fresh helper (single-threaded: no fork of this multi-threaded process by hand) makes a new session and the
+        # pty its controlling terminal, then becomes the app: tmux's client needs that terminal (and SIGWINCH)
         try:
-            self.proc = subprocess.Popen(["sh", "-c", 'exec "$@" <"$FORCE_API_TTY" >"$FORCE_API_TTY" 2>&1', "sh",
-                                          *argv], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL, start_new_session=True)
+            self.proc = subprocess.Popen([sys.executable, "-I", "-c", _CTTY_EXEC, *argv], env=env, stdin=slave,
+                                         stdout=slave, stderr=slave, close_fds=True)
         except OSError:
-            os.close(slave)
             os.close(master)
             raise
+        finally:
+            os.close(slave)                             # the app holds it now: its end is our read's end
         self.pid, self.fd = self.proc.pid, master
-
-        # this end of the pty stays open until the app ends (a read before the app opened it would see no one);
-        # then it closes, and the reader sees the end
-        def wait():
-            self.proc.wait()
-            os.close(slave)
-        threading.Thread(target=wait, daemon=True).start()
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self) -> None:
