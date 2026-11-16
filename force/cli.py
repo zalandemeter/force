@@ -2632,6 +2632,7 @@ def build_parser() -> argparse.ArgumentParser:
     from . import support as support_mod
     support_mod.add_parser(sub)
     sub.add_parser("mcp", help="Force's local MCP server on stdin/stdout, for Chuck's session (SPEC §50)")
+    sub.add_parser("api", help="the frontend API on stdin/stdout, JSON lines (SPEC §54)")
 
     p = sub.add_parser("explain", help="why a card shows its state (SPEC §43.3)")
     p.add_argument("name")
@@ -2791,6 +2792,9 @@ def _dispatch(args) -> int:
     if cmd == "mcp":
         from . import mcp as mcp_mod
         return mcp_mod.serve()
+    if cmd == "api":
+        from . import api as api_mod
+        return api_mod.serve(cockpit)
     if cmd == "explain":
         return automation.explain_command(cockpit, args)
     if cmd == "import":

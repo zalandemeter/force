@@ -15,13 +15,14 @@ from pathlib import Path
 
 from . import activity, kinds, report as report_mod, claude as claude_mod, opencode as opencode_mod, procinfo, remote as remote_mod, services, share as share_mod, updates, usage as usage_mod
 from . import config
+from . import notices as notices_mod
 from . import registry as registry_mod
 from .config import Config, Paths, ensure_dirs
 from .lifecycle import Cockpit
 from .tmux import LEGACY_AGENT_ROLE, TmuxError
 from .registry import (RegistryError, is_support, is_claude, is_opencode, is_shell, kind as kind_of, locked, slugify, valid_name,
                      slugify, valid_name, remote_control)
-from .state import (PaneInfo, Seen, SessionView, Snapshot, State, compute_state, compute_state_why, clean_title,
+from .state import (STATE_WORDS, PaneInfo, Seen, SessionView, Snapshot, State, compute_state, compute_state_why, clean_title,
                    glyph, load_seen, save_seen, unread, write_snapshot)
 
 _UPGRADE_INTERVAL = 30.0
@@ -169,26 +170,18 @@ def restart_note(state: State, ago: float | None, same_process: bool, up_for: fl
     return None
 
 
-_STATE_WORDS = {State.NEEDS_YOU: "needs-you", State.WORKING: "working", State.YOUR_TURN: "your-turn",
-                State.IDLE: "idle", State.STALE: "stale", State.DOWN: "down", State.STARTING: "starting",
-                State.SHELL: "shell", State.UNKNOWN: "unknown", State.ARCHIVED: "archived"}
+_STATE_WORDS = STATE_WORDS
 
 
 def notify_env(view, event: str) -> dict[str, str]:
     """The environment of the notify command for one event (SPEC §49.4)."""
-    if event == "needs-you":
-        what = view.activity or ("needs permission" if view.kind != "shell" else "needs you")
-    elif event == "finished":
-        what = "finished"
-    else:
-        what = "stopped"
     return {
         "FORCE_EVENT": event,
         "FORCE_SESSION": view.name,
         "FORCE_KIND": view.kind,
         "FORCE_HOST": socket.gethostname().split(".")[0],
         "FORCE_STATE": _STATE_WORDS.get(view.state, "unknown"),
-        "FORCE_MESSAGE": f"{view.name}: {what}",
+        "FORCE_MESSAGE": notices_mod.message(view, event),
         "FORCE_VIEWED": "1" if view.viewed else "0",
     }
 
@@ -284,8 +277,9 @@ class Daemon:
         self._auto_name_last: dict[str, float] = {}   # name -> clock of the last first-prompt look (§49.6)
         # notifications (SPEC §49.4)
         self._views: list = []                    # the last snapshot's sessions
-        self._note_state: dict[str, State] = {}   # name -> state at the last notify step
-        self._note_down: dict[str, tuple] = {}    # name -> (clock since down, state before) while down
+        self._notices = notices_mod.Transitions(self._NOTE_DOWN_AFTER)   # SPEC §49.4: which changes are events
+        self._note_state = self._notices.state    # name -> state at the last notify step (renamed with the session)
+        self._note_down = self._notices.down      # name -> (clock since down, state before) while down
         self._note_last: dict[tuple, float] = {}  # (name, event) -> clock of the last notification
         self._note_procs: list = []               # (Popen, clock started)
         # autoUpdate (SPEC §46): the last look, the version tried and when, the running `force update --here`
@@ -1086,7 +1080,7 @@ class Daemon:
         now_ms = int(now * 1000)
         clients = self.cockpit.tmux.clients()
         self._note_clients(clients)
-        viewed = {c.session for c in clients}
+        viewed = {c.session for c in self.cockpit.tmux.clients(control=True)}
         names = {e.name for e in self._registry}
         for entry in self._registry:
             name = entry.name
@@ -1115,7 +1109,7 @@ class Daemon:
         seen = self._seen
         now = self.clock()
         now_ms = int(now * 1000)
-        clients = self.cockpit.tmux.clients()
+        clients = self.cockpit.tmux.clients(control=True)   # a `force api` terminal view counts (SPEC §54)
         viewed = {c.session for c in clients}
         lv = claude_mod.latest_version(self.paths.claude_bin)
         live = self._live()
@@ -1265,32 +1259,10 @@ class Daemon:
         now = self.clock()
         self._reap_notify(now)
         cmd = (self.cfg.notify_command or "").strip()
-        up = (State.WORKING, State.NEEDS_YOU, State.YOUR_TURN, State.IDLE, State.STALE, State.SHELL)
-        names = set()
-        for v in self._views:
-            if v.archived:
-                continue
-            names.add(v.name)
-            prev = self._note_state.get(v.name)
-            self._note_state[v.name] = v.state
-            event = None
-            if v.state is State.DOWN:
-                if prev in up and v.note is None:
-                    self._note_down[v.name] = (now, prev)
-                down = self._note_down.get(v.name)
-                if down is not None and now - down[0] >= self._NOTE_DOWN_AFTER:
-                    self._note_down.pop(v.name, None)
-                    if not self.cockpit.recently_killed_by_cockpit(v.name, within=120.0):
-                        event = "down"
-            else:
-                self._note_down.pop(v.name, None)
-                if prev is None or prev == v.state:
-                    continue            # first sight after a start, or no change
-                if v.state is State.NEEDS_YOU:
-                    event = "needs-you"
-                elif v.state is State.YOUR_TURN and prev in (State.WORKING, State.NEEDS_YOU):
-                    event = "finished"
-            if event is None or not cmd:
+        events = self._notices.step(self._views, now,
+                                    killed=lambda n: self.cockpit.recently_killed_by_cockpit(n, within=120.0))
+        for v, event in events:
+            if not cmd:
                 continue
             if v.viewed and not self.cfg.notify_when_viewed:
                 continue
@@ -1299,10 +1271,6 @@ class Daemon:
                 continue
             self._note_last[(v.name, event)] = now
             self._run_notify(cmd, notify_env(v, event))
-        for n in list(self._note_state):
-            if n not in names:
-                self._note_state.pop(n, None)
-                self._note_down.pop(n, None)
 
     def _run_notify(self, cmd: str, env: dict[str, str]) -> None:
         try:

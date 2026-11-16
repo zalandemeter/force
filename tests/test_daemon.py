@@ -281,7 +281,7 @@ def test_auto_upgrade_idle_after_grace_and_client(env, monkeypatch):
     d.tick()
     assert current_pid(cockpit, "portal") == before
     # no client -> upgrade restarts
-    monkeypatch.setattr(env.tmux, "clients", lambda: [])
+    monkeypatch.setattr(env.tmux, "clients", lambda control=False: [])
     clk.advance(31)
     d.tick()
     assert wait_for(lambda: current_pid(cockpit, "portal") != before)
@@ -870,7 +870,7 @@ def test_tiers_step_reruns_tier_for_viewed_sessions(env, monkeypatch):
             calls.append(argv[3:])
             return subprocess.CompletedProcess(argv, 0, "", "")
         return real_run(argv, *a, **kw)
-    monkeypatch.setattr(cockpit.tmux, "clients", lambda: [Client("/dev/pts/9", "portal", 100, 40, 1)])
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda control=False: [Client("/dev/pts/9", "portal", 100, 40, 1)])
     monkeypatch.setattr("force.daemon.subprocess.run", fake_run)
     d._step_tiers()
     assert calls == [["portal", "--signal"]]
@@ -1409,7 +1409,7 @@ def test_unread_reply_while_working(env, monkeypatch):
     add_live(cockpit, "portal")
     clk = FakeClock(start=1_800_000_000.0)
     d = Daemon(cockpit, clk)
-    monkeypatch.setattr(cockpit.tmux, "clients", lambda: [])
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda control=False: [])
     ctl(cockpit, "portal", status="busy")
     assert wait_for(lambda: (current_status(cockpit, "portal") or {}).get("status") == "busy")
     reply = {"ms": None}
@@ -1428,11 +1428,11 @@ def test_unread_reply_while_working(env, monkeypatch):
     assert v.state is State.WORKING and v.unread is True
     assert "unread" in v.why
     # you open the session: cleared, and it stays cleared once you leave again
-    monkeypatch.setattr(cockpit.tmux, "clients", lambda: [Client("/dev/pts/9", "portal", 100, 40, 1)])
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda control=False: [Client("/dev/pts/9", "portal", 100, 40, 1)])
     clk.advance(1)
     d.tick()
     assert view().unread is False
-    monkeypatch.setattr(cockpit.tmux, "clients", lambda: [])
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda control=False: [])
     clk.advance(1)
     d.tick()
     assert view().unread is False
@@ -1454,7 +1454,7 @@ def test_unread_forgotten_with_the_session(env, monkeypatch):
     add_live(cockpit, "portal")
     clk = FakeClock(start=1_800_000_000.0)
     d = Daemon(cockpit, clk)
-    monkeypatch.setattr(cockpit.tmux, "clients", lambda: [])
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda control=False: [])
     monkeypatch.setattr("force.daemon.activity.scan",
                         lambda path, max_len=60: Scan(None, None, None, int(clk() * 1000) - 500, None, (), False))
     ctl(cockpit, "portal", status="busy")
@@ -1543,8 +1543,8 @@ def _auto(env, monkeypatch, latest="1.4.2", cur="1.4.1", clients=(), ui_clients=
     monkeypatch.setattr(updates, "current_version", lambda: cur)
     monkeypatch.setattr(updates, "latest_known", lambda state: latest)
     monkeypatch.setattr(updates, "download_base", lambda: "https://useforce.cc")
-    monkeypatch.setattr(cockpit.tmux, "clients", lambda: list(clients))
-    monkeypatch.setattr(cockpit.ui_tmux, "clients", lambda: list(ui_clients))
+    monkeypatch.setattr(cockpit.tmux, "clients", lambda control=False: list(clients))
+    monkeypatch.setattr(cockpit.ui_tmux, "clients", lambda control=False: list(ui_clients))
     started = []
 
     class P:

@@ -29,6 +29,12 @@ class State(str, enum.Enum):
     UNKNOWN = "UNKNOWN"
 
 
+# the state names on the command line and in `force api` (SPEC §43.1, §54)
+STATE_WORDS = {State.NEEDS_YOU: "needs-you", State.WORKING: "working", State.YOUR_TURN: "your-turn",
+               State.IDLE: "idle", State.STALE: "stale", State.DOWN: "down", State.STARTING: "starting",
+               State.SHELL: "shell", State.UNKNOWN: "unknown", State.ARCHIVED: "archived"}
+
+
 @dataclass(frozen=True)
 class PaneInfo:
     session_exists: bool

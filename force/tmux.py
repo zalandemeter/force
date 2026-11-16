@@ -46,6 +46,7 @@ class Client:
     width: int
     height: int
     activity: int           # #{client_activity} epoch seconds
+    control: bool = False   # a control-mode client (`force api`'s terminal views, SPEC §54): it views, never sizes
 
 
 _PANE_FMT = "\t".join([
@@ -54,7 +55,7 @@ _PANE_FMT = "\t".join([
 ])
 _CLIENT_FMT = "\t".join([
     "#{client_name}", "#{client_session}", "#{client_width}",
-    "#{client_height}", "#{client_activity}",
+    "#{client_height}", "#{client_activity}", "#{client_control_mode}",
 ])
 
 
@@ -190,23 +191,25 @@ class Tmux:
         tail = [l for l in out.splitlines() if l.strip()]
         return "\n".join(tail[-lines:])
 
-    def clients(self) -> list[Client]:
+    def clients(self, control: bool = False) -> list[Client]:
+        """The attached clients; control-mode ones (SPEC §54) only with `control`: they count as viewing a session
+        but are never a terminal to switch, size or show a message on."""
         if self._cache_on and self._clients_cache is not None:
-            return self._clients_cache
-        rc, out, _err = self._run_rc(["list-clients", "-F", _CLIENT_FMT])
-        if rc != 0:
-            result: list[Client] = []
+            result = self._clients_cache
         else:
+            rc, out, _err = self._run_rc(["list-clients", "-F", _CLIENT_FMT])
             result = []
-            for line in out.splitlines():
-                parts = line.split("\t")
-                if len(parts) < 5:
-                    continue
-                name, session, w, h, act = parts[:5]
-                result.append(Client(name, session, _int(w) or 0, _int(h) or 0, _int(act) or 0))
-        if self._cache_on:
-            self._clients_cache = result
-        return result
+            if rc == 0:
+                for line in out.splitlines():
+                    parts = line.split("\t")
+                    if len(parts) < 5:
+                        continue
+                    name, session, w, h, act = parts[:5]
+                    ctl = len(parts) > 5 and parts[5] == "1"
+                    result.append(Client(name, session, _int(w) or 0, _int(h) or 0, _int(act) or 0, ctl))
+            if self._cache_on:
+                self._clients_cache = result
+        return result if control else [c for c in result if not c.control]
 
     def sessions(self) -> list[str]:
         """Session names, derived from cached panes() (exact session names)."""

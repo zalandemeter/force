@@ -169,7 +169,7 @@ def test_tiers_are_recomputed_on_the_ui_server(env, monkeypatch):
         return real(argv, *a, **k)
     monkeypatch.setattr(dm.subprocess, "run", spy)
     ui = cockpit.ui_tmux
-    monkeypatch.setattr(ui, "clients", lambda: [type("C", (), {"session": "ui-tier"})()])
+    monkeypatch.setattr(ui, "clients", lambda control=False: [type("C", (), {"session": "ui-tier"})()])
     d = Daemon(cockpit)
     d._TIER_EVERY = 0
     d._step_tiers()

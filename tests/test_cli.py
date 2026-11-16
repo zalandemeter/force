@@ -31,7 +31,7 @@ class FakeTmux:
     def has_session(self, name):
         return name in self.sessions_out
 
-    def clients(self):
+    def clients(self, control=False):
         return self.clients_out
 
     def panes(self, strict=False):
