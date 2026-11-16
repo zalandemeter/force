@@ -198,6 +198,9 @@ pub struct App {
     /// card at once and the main loop sends the switch after that frame (`run_pending`): on a ui on another
     /// computer the switch is an ssh round trip (~150-250 ms) the highlight must not wait for.
     pending_switch: Option<(String, String)>,
+    /// a click's target while the shown remote is still connecting (no nested client yet, SPEC §40): becomes
+    /// `pending_switch` once the client has reported
+    queued_switch: Option<String>,
     /// (target, ms) of the last click switch: the switch hook's SIGUSR1 that follows it does not re-run the
     /// arrival fade on the card that is already shown as current.
     clicked: Option<(String, i64)>,
@@ -346,6 +349,7 @@ impl App {
             seen_viewed: false,
             current_fade_start: None,
             pending_switch: None,
+            queued_switch: None,
             clicked: None,
             logo_shine_start: None,
             anims: AnimMode::Full,
@@ -614,7 +618,11 @@ impl App {
             .as_ref()
             .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_nested}"));
         let prev = self.host_own.clone();
-        if nested.as_deref().map_or(false, |s| !s.is_empty()) {
+        let nested = nested.filter(|s| !s.is_empty());
+        // a window showing a remote is a ui window before its nested client has reported (SPEC §40, connecting):
+        // never the classic path, whose switch went to this ui server ("can't find session")
+        let connecting = nested.is_none() && !self.remote_host.is_empty();
+        if nested.is_some() || connecting {
             self.ui_mode = true;
             self.nested = nested;
             // the host handle from @force_host_tmux words, rebuilt when they change (Chuck's overlay points them at
@@ -636,11 +644,30 @@ impl App {
                 if let Some(c) = tmux::clients(h.as_ref()).into_iter().find(|c| &c.name == nest) {
                     self.host_own = Some(c.session);
                 }
+            } else if self.host_own.is_none() {
+                // connecting: the session the window is opening
+                self.host_own = self
+                    .tmux_pane
+                    .as_ref()
+                    .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_session}"))
+                    .filter(|s| !s.is_empty());
+            }
+            // a click held while connecting goes out now (after the next frame, as any click's switch)
+            if let Some(nest) = self.nested.clone() {
+                if let Some(target) = self.queued_switch.take() {
+                    if self.host_own.as_deref() != Some(target.as_str()) {
+                        self.host_own = Some(target.clone());
+                        if self.host_tmux.is_some() {
+                            self.pending_switch = Some((nest, target));
+                        }
+                    }
+                }
             }
         } else {
             self.ui_mode = false;
             self.nested = None;
             self.host_tmux = None;
+            self.queued_switch = None;
             self.host_own = self.own.clone();
         }
         if self.host_own != prev {
@@ -981,11 +1008,10 @@ impl App {
             return;
         }
         if self.ui_mode {
-            // split mode: switch on the HOST (the nested client), then focus the main pane of my ui window.
-            let client = match &self.nested {
-                Some(c) => c.clone(),
-                None => return,
-            };
+            // split mode: switch on the HOST (the nested client), then focus the main pane of my ui window. A
+            // remote still connecting has no nested client yet: the click is held (queued_switch) and sent when
+            // it reports; its card is shown current at once all the same.
+            let client = self.nested.clone();
             if let Some(p) = tmux::agent_pane(self.tmux.as_ref(), &own) {
                 if let Err(e) = tmux::select_pane(self.tmux.as_ref(), &p) {
                     self.show_error(format!("select: {}", e));
@@ -1005,8 +1031,10 @@ impl App {
             self.clicked = Some((target.to_string(), self.now_ms));
             // no host re-read before that frame either (it is another round trip)
             self.own_cached_at = Some(std::time::Instant::now());
-            if self.host_tmux.is_some() {
-                self.pending_switch = Some((client, target.to_string()));
+            match client {
+                Some(c) if self.host_tmux.is_some() => self.pending_switch = Some((c, target.to_string())),
+                Some(_) => {}
+                None => self.queued_switch = Some(target.to_string()),
             }
             return;
         }
@@ -2381,6 +2409,8 @@ mod tests {
                         Ok(self.glyph.lock().unwrap().clone().unwrap_or_default())
                     } else if args.iter().any(|a| a == "#{@force_nested}") {
                         Ok(self.nested.clone().unwrap_or_default())
+                    } else if args.iter().any(|a| a == "#{@force_overlay}") {
+                        Ok(String::new())   // no Chuck overlay in these fakes
                     } else if args.iter().any(|a| a == "#{@force_host_tmux}") {
                         Ok(self.host_opt.clone().unwrap_or_default())
                     } else {
@@ -3173,6 +3203,55 @@ mod tests {
         assert!(!a.run_pending(), "nothing left to send");
         let n = hlog.lock().unwrap().iter().filter(|e| e.first().map(|s| s.as_str()) == Some("switch-client")).count();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn remote_connecting_click_is_held_until_the_client_reports() {
+        // a window opening a remote (FORCE_HOST set): @force_nested is empty until the remote reports its tty
+        let (mut tmux, log) = FakeTmux::new();
+        tmux.session = Some("s0".into());           // @force_session (the fake answers other formats with it)
+        tmux.agent = Some("%99".into());
+        let (mut host, hlog) = FakeTmux::new();
+        host.clients_ = vec![Client { name: "/dev/pts/42".into(), session: "s0".into(), activity: 5 }];
+        let mut a = app_with(tmux);
+        a.tmux_pane = Some("%10".into());
+        a.own = Some("ui-sess".into());
+        a.now_ms = NOW;
+        a.set_remote(None, "neumann");
+        a.host_tmux = Some(host);
+        a.refresh_ui_mode();
+        assert!(a.ui_mode, "a remote window is a ui window while connecting");
+        assert!(a.nested.is_none());
+        assert_eq!(a.display_own(), Some("s0"), "the session it is opening");
+        a.activate("s1");
+        assert_eq!(a.display_own(), Some("s1"), "the clicked card is current at once");
+        assert!(!a.run_pending());
+        assert!(a.error.is_none(), "no \"can't find session\" from the ui server");
+        let switches = |l: &Log| l.lock().unwrap().iter().filter(|e| e.contains(&"switch-client".to_string())).cloned()
+            .collect::<Vec<_>>();
+        assert!(switches(&log).is_empty(), "never switched on the ui server");
+        assert!(switches(&hlog).is_empty(), "no client to switch yet");
+        // the remote reports its client: the held click goes out after the next frame
+        let (mut tmux2, _log2) = FakeTmux::new();
+        tmux2.session = Some("s1".into());
+        tmux2.nested = Some("/dev/pts/42".into());
+        a.tmux = tmux2;
+        a.refresh_ui_mode();
+        assert_eq!(a.display_own(), Some("s1"));
+        assert!(!a.run_pending());
+        assert_eq!(switches(&hlog), vec![vec!["switch-client", "-c", "/dev/pts/42", "-t", "=s1"]]);
+        assert!(!a.run_pending(), "sent once");
+    }
+
+    #[test]
+    fn without_a_remote_an_empty_nested_is_still_classic() {
+        let (mut tmux, _log) = FakeTmux::new();
+        tmux.session = Some("own".into());
+        let mut a = app_with(tmux);
+        a.tmux_pane = Some("%10".into());
+        a.own = Some("own".into());
+        a.refresh_ui_mode();
+        assert!(!a.ui_mode);
     }
 
     #[test]

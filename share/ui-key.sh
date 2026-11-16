@@ -24,6 +24,17 @@ case "$A" in
       [ -n "$htmux" ] || htmux="tmux -L force"
     fi ;;
 esac
+# A remote still connecting (SPEC §40): its nested client is named once the remote has reported; wait for it
+# (at most 10 s) instead of acting on no client
+if [ -z "$nested" ] && [ -n "$host" ]; then
+  i=0
+  while [ -z "$nested" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1; i=$((i + 1))
+    nested=$(t display -p -t "$W" '#{@force_nested}')
+  done
+  [ -n "$nested" ] || exit 0
+  sess=$(t display -p -t "$W" '#{@force_session}')
+fi
 # The session the nested client shows now, asked from its host (@force_session can lag a switch by a
 # sidebar poll); published to the window, and the sidebar and header poked to redraw. A remote's shell
 # reads the format, so it is quoted for it.

@@ -299,6 +299,8 @@ pub struct Header {
     host_tmux_prefix: Option<String>,
     /// `@force_overlay` set: the main pane shows Chuck from this machine over a remote (SPEC §50)
     overlay: bool,
+    /// a pill's target while the shown remote is still connecting (no nested client yet, SPEC §40)
+    queued_switch: Option<String>,
 
     prev_pills: Vec<String>,
     fade_start: HashMap<String, f64>,
@@ -384,6 +386,7 @@ impl Header {
             host_tmux: None,
             host_tmux_prefix: None,
             overlay: false,
+            queued_switch: None,
             prev_pills: Vec::new(),
             fade_start: HashMap::new(),
             anims: AnimMode::Full,
@@ -608,7 +611,10 @@ impl Header {
             .as_ref()
             .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_nested}"));
         let prev = self.host_own.clone();
-        if nested.as_deref().map_or(false, |s| !s.is_empty()) {
+        let nested = nested.filter(|s| !s.is_empty());
+        // a remote still connecting (no nested client yet) is a ui window all the same (SPEC §40, connecting)
+        let connecting = nested.is_none() && !self.shown_host.is_empty();
+        if nested.is_some() || connecting {
             self.ui_mode = true;
             self.nested = nested;
             // rebuilt when the words change (Chuck's overlay, SPEC §50); a handle a test injected is kept
@@ -629,10 +635,29 @@ impl Header {
                 if let Some(c) = tmux::clients(h.as_ref()).into_iter().find(|c| &c.name == nest) {
                     self.host_own = Some(c.session);
                 }
+            } else if self.host_own.is_none() {
+                // connecting: the session the window is opening
+                self.host_own = self
+                    .tmux_pane
+                    .as_ref()
+                    .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_session}"))
+                    .filter(|s| !s.is_empty());
+            }
+            // a pill clicked while connecting: switched now that the client has reported
+            if let (Some(nest), Some(h)) = (self.nested.clone(), &self.host_tmux) {
+                if let Some(target) = self.queued_switch.take() {
+                    if self.host_own.as_deref() != Some(target.as_str()) {
+                        match tmux::switch_client(h.as_ref(), &nest, &target) {
+                            Ok(()) => self.host_own = Some(target),
+                            Err(e) => self.log_error(&format!("switch:{}", target), &e),
+                        }
+                    }
+                }
             }
         } else {
             self.ui_mode = false;
             self.nested = None;
+            self.queued_switch = None;
             self.host_tmux = None;
             self.host_own = self.own.clone();
         }
@@ -833,7 +858,12 @@ impl Header {
             let client = match &self.nested {
                 Some(c) => c.clone(),
                 None => {
-                    self.log_error(&format!("switch:{}", name), "no nested client");
+                    // a remote still connecting: held until its nested client reports (refresh_ui_mode)
+                    self.queued_switch = Some(name.to_string());
+                    if self.host_own.as_deref() != Some(name) {
+                        self.host_own = Some(name.to_string());
+                        self.publish_force_session();
+                    }
                     return;
                 }
             };
@@ -1266,6 +1296,8 @@ mod tests {
                         Ok(self.win.clone().unwrap_or_default())
                     } else if args.iter().any(|a| a == "#{@force_nested}") {
                         Ok(self.nested.clone().unwrap_or_default())
+                    } else if args.iter().any(|a| a == "#{@force_overlay}") {
+                        Ok(String::new())   // no Chuck overlay in these fakes
                     } else if args.iter().any(|a| a == "#{@force_host_tmux}") {
                         Ok(self.host_opt.clone().unwrap_or_default())
                     } else {
@@ -1683,6 +1715,34 @@ mod tests {
         assert!(hlog.lock().unwrap().iter().any(|e| *e == ["ssh", "-S", "/tmp/x", "h", "tmux", "-L", "force", "switch-client", "-c", "/dev/pts/42", "-t", "=demo"]), "host switch argv");
         // ui select-pane of the main pane, and optimistic host own published when no sidebar is present
         assert!(log.lock().unwrap().iter().any(|e| *e == ["select-pane", "-t", "%12"]), "ui select-pane");
+        assert_eq!(h.host_own.as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn remote_connecting_pill_is_held_until_the_client_reports() {
+        let (mut tmux, log) = FakeTmux::new();
+        tmux.session = Some("s0".into());           // @force_session while connecting
+        tmux.agent = Some("%12".into());
+        let (mut host, hlog) = FakeTmux::new();
+        host.clients_ = vec![Client { name: "/dev/pts/42".into(), session: "s0".into(), activity: 11 }];
+        let spawner: Box<dyn Spawner> = Box::new(FakeSpawner::default());
+        let mut h = Header::new(tmux, spawner, PathBuf::from("/nonexistent/snapshot.json"), PathBuf::from("/share"), Some("%10".into()), GlyphArg::Fixed(Tier::Plain), 80);
+        h.own = Some("ui-sess".into());
+        h.set_hosts(None, "neumann", "here");
+        h.host_tmux = Some(host);
+        h.refresh_ui_mode();
+        assert!(h.ui_mode && h.nested.is_none(), "connecting: a ui window without a client");
+        h.run_action(&Action::Switch("demo".into()));
+        assert_eq!(h.host_own.as_deref(), Some("demo"));
+        let switches = |l: &Log| l.lock().unwrap().iter().filter(|e| e.contains(&"switch-client".to_string())).cloned()
+            .collect::<Vec<_>>();
+        assert!(switches(&log).is_empty(), "never switched on the ui server");
+        assert!(switches(&hlog).is_empty());
+        let (mut tmux2, _) = FakeTmux::new();
+        tmux2.nested = Some("/dev/pts/42".into());
+        h.tmux = tmux2;
+        h.refresh_ui_mode();
+        assert_eq!(switches(&hlog), vec![vec!["switch-client", "-c", "/dev/pts/42", "-t", "=demo"]]);
         assert_eq!(h.host_own.as_deref(), Some("demo"));
     }
 
