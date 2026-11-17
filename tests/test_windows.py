@@ -31,3 +31,13 @@ def test_a_missing_launcher_fails(tmp_path):
     r = subprocess.run([str(RUN), "list"], env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
                        capture_output=True, text=True, timeout=20)
     assert r.returncode in (126, 127)            # 127 from bash 4+ (WSL's); macOS's bash 3.2 says 126
+
+
+def test_install_ps1_gives_the_previous_distro_its_profile_back():
+    # the "Force" profile follows force.cmd (share/fonts.sh); moving it to another distro rewrites the previous
+    # distro's "Force (<distro>)" with that distro's own `force fonts` (SPEC §45)
+    ps1 = (RUN.parent.parent.parent / "website" / "root" / "install.ps1").read_text()
+    read, write, restore = (ps1.index("$previous = "), ps1.index("Set-Content -Encoding Ascii -Path $shim"),
+                            ps1.index("& wsl.exe -d $previous --exec sh -lc"))
+    assert read < write < restore, "read before force.cmd is rewritten, restored after the install"
+    assert "exec ~/.local/bin/force fonts" in ps1[restore:restore + 120]

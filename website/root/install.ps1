@@ -78,6 +78,9 @@ function Install-Force {
 
     # 3. the force command for PowerShell and cmd: runs Force inside WSL, from the folder you are in. Written
     #    before the Linux installer runs, so its Windows Terminal profile (SPEC section 45) is "Force", running it
+    # the distro the command ran before (an earlier install.ps1): it gets its own profile back afterwards
+    $previous = if (Test-Path $shim) { ((Get-Content -Raw $shim) | Select-String 'wsl\.exe -d (\S+) ').Matches |
+                                       ForEach-Object { $_.Groups[1].Value } | Select-Object -First 1 }
     $home_ = Wsl @('-d', $Distro, '--exec', 'sh', '-c', 'printf %s $HOME')
     $run = "$home_/.local/share/force/app/share/windows/force-wsl"
     New-Item -ItemType Directory -Force $bin | Out-Null
@@ -100,6 +103,11 @@ function Install-Force {
         throw "force: $run is missing: the installed Force is too old for Windows"
     }
     Set-UserPath $bin ''
+    if ($previous -and $previous -ne $Distro) {
+        # the "Force" profile is this distro's now: the other one's Force writes its "Force (<distro>)" again
+        & wsl.exe -d $previous --exec sh -lc 'test -x ~/.local/bin/force && exec ~/.local/bin/force fonts' *> $null
+        Say "force now runs Force in $Distro; Force in $previous keeps its Windows Terminal profile, ""Force ($previous)"""
+    }
 
     Say "done. Type force in PowerShell, cmd or Windows Terminal (a new window or tab finds it)."
 }
