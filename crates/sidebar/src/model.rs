@@ -70,6 +70,9 @@ pub const BADGE_OC_BUILD: Color = Color::Rgb(0x5c, 0x9c, 0xf5); // OpenCode buil
 pub const BADGE_OC_PLAN: Color = Color::Rgb(0x9d, 0x7c, 0xd8); // OpenCode plan: accent #9d7cd8
 pub const SHARED_RW: Color = Color::Rgb(0xd7, 0x5f, 0x5f);
 pub const SHARED_RO: Color = Color::Rgb(0xd7, 0xaf, 0x5f);
+/// The shared-session mark (SPEC §28): ⇄ is not in Cascadia Mono (Windows Terminal's default font), ↔ is.
+pub const SHARED_PLAIN: char = '↔';
+pub const SHARED_RICH: char = '⇄';
 
 pub const USAGE_LABEL: Color = Color::Rgb(0x8a, 0x8a, 0x8a);
 pub const USAGE_PCT: Color = Color::Rgb(0xc6, 0xc6, 0xc6);
@@ -92,9 +95,28 @@ pub const MODE_BADGES: [(&str, char, Color); 7] = [
 ];
 
 /// The kind mark in front of the model on a card's line 3, under the state icon (SPEC §36): Claude
-/// Code's ✻ and OpenCode's ▣, so mixed sessions are told apart. Plain Unicode, in every font.
+/// Code's ✻ and OpenCode's ▣, so mixed sessions are told apart. PLAIN draws Claude's as `*`: Cascadia Mono
+/// (Windows Terminal's default font) has no ✻, and Windows' wider stand-in spills into the next cell, which
+/// Windows Terminal paints in that cell's colour (SPEC §28). Where RICH draws ✻ (the Windows Terminal profile has
+/// no ✻ either), the cell after it takes the mark's colour too: [`kind_mark_after`].
 pub const KIND_CLAUDE: (char, Color) = ('✻', ACCENT);
+pub const KIND_CLAUDE_PLAIN: char = '*';
 pub const KIND_OPENCODE: (char, Color) = ('▣', Color::Rgb(0xc8, 0xc8, 0xc8));
+
+/// An agent kind's mark in a tier: claude and opencode, else none.
+pub fn kind_mark(tier: Tier, kind: &str) -> Option<(char, Color)> {
+    match kind {
+        "claude" => Some((glyphs::state(tier, KIND_CLAUDE_PLAIN, KIND_CLAUDE.0), KIND_CLAUDE.1)),
+        "opencode" => Some(KIND_OPENCODE),
+        _ => None,
+    }
+}
+
+/// The blank cell after a mark: in the mark's colour, so a glyph from a fallback font that spills into it keeps
+/// its colour in Windows Terminal; nothing else draws there.
+pub fn kind_mark_after(color: Color) -> Glyph {
+    space(color)
+}
 
 pub const SPINNER: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -631,12 +653,14 @@ pub fn line3(s: &Session, c: usize, tier: Tier) -> Vec<Glyph> {
     push_str(&mut out, &plain, GREY, false);
     // the kind mark in the state-icon column (3), only where there is a model to label
     let mark = match s.kind.as_str() {
-        "opencode" => Some(KIND_OPENCODE),
-        "claude" if !text.is_empty() => Some(KIND_CLAUDE),
-        _ => None,
+        "claude" if text.is_empty() => None,
+        k => kind_mark(tier, k),
     };
     if let (Some((ch, color)), Some(cell)) = (mark, out.get_mut(3)) {
         *cell = Glyph { ch, color, bold: false };
+        if let Some(next) = out.get_mut(4).filter(|g| g.ch == ' ') {
+            *next = kind_mark_after(color);
+        }
     }
     let pad = (body_w as i64 - width(&plain) as i64).max(0) as usize;
     for _ in 0..pad {
@@ -644,12 +668,11 @@ pub fn line3(s: &Session, c: usize, tier: Tier) -> Vec<Glyph> {
     }
     if let Some(obj) = shared {
         let rw = obj.iter().any(|(_, v)| v == "w");
-        out.push(Glyph { ch: '⇄', color: if rw { SHARED_RW } else { SHARED_RO }, bold: rw });
+        let color = if rw { SHARED_RW } else { SHARED_RO };
+        out.push(Glyph { ch: glyphs::state(tier, SHARED_PLAIN, SHARED_RICH), color, bold: rw });
+        out.push(kind_mark_after(color));
         if let Some((bc, bcol)) = badge {
-            out.push(space(GREY));
             out.push(Glyph { ch: bc, color: bcol, bold: true });
-        } else {
-            out.push(space(GREY));
         }
     } else if let Some((bc, bcol)) = badge {
         out.push(space(GREY));
@@ -744,12 +767,8 @@ pub fn usage_lines(usage: &Usage, now: i64, w: usize, tz_offset: i32, tier: Tier
 pub type LimitsLabel = (char, Color, String);
 
 /// The kind mark of a provider's limits: the cards' kind mark (✻ Claude, ▣ OpenCode), else a dot.
-pub fn limits_mark(kind: &str) -> (char, Color) {
-    match kind {
-        "claude" => KIND_CLAUDE,
-        "opencode" => KIND_OPENCODE,
-        _ => ('·', USAGE_LABEL),
-    }
+pub fn limits_mark(kind: &str, tier: Tier) -> (char, Color) {
+    kind_mark(tier, kind).unwrap_or(('·', USAGE_LABEL))
 }
 
 /// The dock's limits (SPEC §49.2): per block a label row (the kind mark in the cards' icon column, the name where
@@ -783,7 +802,7 @@ fn limits_label_line(mark: char, color: Color, text: &str, w: usize) -> Vec<Glyp
     out.push(space(BG));
     out.push(space(BG));
     out.push(Glyph { ch: mark, color, bold: false });
-    out.push(space(BG));
+    out.push(kind_mark_after(color));
     push_str(&mut out, text, USAGE_LABEL, false);
     pad_to(&mut out, w);
     out.truncate(w);
@@ -1250,20 +1269,22 @@ mod tests {
         m.insert("alice".into(), serde_json::json!("r"));
         s.shared = Some(m);
         let g = line3(&s, 26, Tier::Plain);
-        assert!(glyphs_to_string(&g).contains('⇄'));
-        assert_eq!(g.iter().find(|x| x.ch == '⇄').unwrap().color, SHARED_RO);
+        assert!(glyphs_to_string(&g).contains('↔'));
+        assert_eq!(g.iter().find(|x| x.ch == '↔').unwrap().color, SHARED_RO);
 
         let mut m = serde_json::Map::new();
         m.insert("bob".into(), serde_json::json!("w"));
         s.shared = Some(m);
         let g = line3(&s, 26, Tier::Plain);
-        assert_eq!(g.iter().find(|x| x.ch == '⇄').unwrap().color, SHARED_RW);
+        assert_eq!(g.iter().find(|x| x.ch == '↔').unwrap().color, SHARED_RW);
 
         s.mode = Some("edits".into());
         let g = line3(&s, 26, Tier::Plain);
         let t = glyphs_to_string(&g);
-        assert!(t.contains('⇄') && t.contains('E'));
+        assert!(t.contains('↔') && t.contains('E'));
         assert_eq!(width(&t), 26);
+        let r = line3(&s, 26, Tier::Rich);
+        assert!(glyphs_to_string(&r).contains('⇄'), "RICH keeps ⇄");
     }
 
     #[test]
@@ -1302,7 +1323,9 @@ mod tests {
         s.effort = Some("high".into());
         s.mode = Some("auto".into());
         let g = line3(&s, 26, Tier::Plain);
-        assert_eq!(g[3].ch, '✻', "the claude kind's mark under the state icon");
+        assert_eq!(g[3].ch, '*', "the claude kind's mark under the state icon (Cascadia Mono has no ✻)");
+        let r = line3(&s, 26, Tier::Rich);
+        assert_eq!((r[3].ch, r[4].ch, r[4].color), ('✻', ' ', ACCENT), "RICH: ✻, the cell after it in its colour");
         assert!(glyphs_to_string(&g).contains("opus 5.5 · high"));
         s.kind = "opencode".into();
         s.model = Some("deepseek v4 flash".into());
@@ -1448,11 +1471,13 @@ mod tests {
             five_hour: Some(Window { used_percentage: 28.0, resets_at: 51600 }),
             seven_day: Some(Window { used_percentage: 13.0, resets_at: 51720 }),
         };
-        let (mark, color) = limits_mark("claude");
+        let (mark, color) = limits_mark("claude", Tier::Rich);
         let lines = limits_lines(&[(Some((mark, color, "Claude".into())), usage.clone())], 1000, 29, 0, Tier::Plain);
         assert_eq!(lines.len(), 4, "label, 5h, wk, blank: as high as the unlabelled panel");
         let t: Vec<String> = lines.iter().map(|l| glyphs_to_string(l)).collect();
         assert_eq!(t[0].trim_end(), "   ✻ Claude");
+        assert_eq!(lines[0][4].color, ACCENT, "the cell after the mark in its colour");
+        assert_eq!(limits_mark("claude", Tier::Plain).0, '*');
         assert_eq!(lines[0][3].color, ACCENT, "the Claude mark in its colour, in the cards' icon column");
         assert_eq!(lines[0][5].color, USAGE_LABEL);
         assert!(t[1].starts_with("   5h "));

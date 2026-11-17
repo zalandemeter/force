@@ -162,21 +162,34 @@ def _variants() -> list[tuple[int, list]]:
     return out
 
 
-# The menu in the cards' style (force/cards.py): a coral icon before each item in the rich tier (Nerd Font
-# symbols; the plain tier has none, it may lack them), the title with Force's bolt. tmux expands the formats.
+# The menu in the cards' style (force/cards.py): a coral icon before each item, the title with Force's bolt
+# (rich tier). The rich tier draws Nerd Font symbols, the plain tier characters that Cascadia Mono (Windows
+# Terminal's default font) has, so no Windows stand-in spills over (SPEC §28). tmux expands the formats.
 ICONS = {
     "jump": "\uf002", "prev": "\uf0ec", "host": "\uf233", "new": "\uf067", "newshell": "\uf120",
     "rename": "\uf040", "folder": "\uf07b", "up": "\uf062", "down": "\uf063", "restart": "\uf01e",
     "upgrade": "\uf0aa", "rc": "\uf10b", "archive": "\uf187", "delete": "\uf1f8", "archived": "\uf07c", "restart-all": "\uf021",
     "sidebar": "\uf0db", "health": "\uf21e", "update": "\uf01b", "chuck": "\uf118", "help": "\uf11c", "quit": "\uf011",
 }
+PLAIN_ICONS = {
+    "jump": "❯", "prev": "↔", "host": "⌂", "new": "+", "newshell": "$", "rename": "▭", "folder": "▢", "up": "↑",
+    "down": "↓", "restart": "◔", "upgrade": "⇡", "rc": "▯", "archive": "▤", "delete": "×", "archived": "≡",
+    "restart-all": "◕", "sidebar": "◧", "health": "♥", "update": "⇣", "chuck": "?", "help": "▦", "quit": "◁",
+}
 CORAL, WHITE, GREY = "#d97757", "#ffffff", "#8a8a8a"
 RICH = "#{==:#{@force_glyphs},rich}"
 
 
 def _label(action: str, text: str) -> str:
-    """An item: its icon in coral and two spaces (rich tier only), then the text in the menu's colour."""
-    return f"#{{?{RICH},#[fg={CORAL}]{ICONS[action]}#[default]  ,}}{text}"
+    """An item: its icon in coral (rich: a Nerd Font symbol and two spaces, plain: a Cascadia character and one),
+    then the text in the menu's colour."""
+    return (f"#{{?{RICH},#[fg={CORAL}]{ICONS[action]}#[default]  ,"
+            f"#[fg={CORAL}]{_fmt(PLAIN_ICONS[action])}#[default] }}{text}")
+
+
+def _fmt(ch: str) -> str:
+    """A character inside a tmux #{?…} branch: , and } end the branch, # starts a format."""
+    return {",": "#,", "}": "#}", "#": "##"}.get(ch, ch)
 
 
 def render(mode: str) -> str:

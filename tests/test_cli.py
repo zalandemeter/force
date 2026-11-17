@@ -1552,6 +1552,21 @@ def test_uninstall_purge_removes_everything(fakes, monkeypatch):
     assert not conf.exists()
 
 
+def test_uninstall_on_wsl_removes_the_windows_terminal_profile_without_purge(fakes, monkeypatch):
+    # its profile would run a removed Force (SPEC §45); off WSL, the font stays unless --purge
+    cockpit, fake, tmp = fakes
+    monkeypatch.setenv("HOME", str(tmp))
+    calls = []
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: False)
+    monkeypatch.setattr(cli.subprocess, "call", lambda argv, **k: calls.append(argv) or 0)
+    monkeypatch.setattr(cli, "_stop_daemon", lambda c: None)
+    for wsl, expect in ((False, False), (True, True)):
+        calls.clear()
+        monkeypatch.setattr(cli.config, "is_wsl", lambda wsl=wsl: wsl)
+        assert cli.uninstall_command(cockpit, False, True) == 0
+        assert any(a[-1] == "--uninstall" and a[-2].endswith("fonts.sh") for a in calls) == expect, calls
+
+
 def test_uninstall_keeps_foreign_launcher(fakes, monkeypatch):
     cockpit, fake, tmp = fakes
     monkeypatch.setenv("HOME", str(tmp))

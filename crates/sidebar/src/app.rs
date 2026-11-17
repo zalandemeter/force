@@ -1288,7 +1288,7 @@ impl App {
         snap.limits
             .iter()
             .map(|l| {
-                let (mark, color) = m::limits_mark(&l.kind);
+                let (mark, color) = m::limits_mark(&l.kind, self.tier);
                 (Some((mark, color, l.label.clone())), l.usage.clone())
             })
             .collect()
@@ -1307,7 +1307,7 @@ impl App {
         // the last `force smoke` failed (SPEC §37), with its reason: an agent CLI logged out, or changed in a way
         // Force mishandles
         if let Some(reason) = self.snapshot.as_ref().and_then(|s| s.smoke_failed.as_deref()) {
-            return Some(format!("{} {reason}", crate::glyphs::state(self.tier, '×', '✖')));   // × where ✖ would be an emoji
+            return Some(format!("{}{}{reason}", crate::glyphs::state(self.tier, '×', '\u{F057}'), crate::glyphs::gap(self.tier)));
         }
         // a newer Force release is available (SPEC §3): a footer note, lower priority than any error/smoke
         if let Some(v) = self.snapshot.as_ref().and_then(|s| s.update.as_deref()) {

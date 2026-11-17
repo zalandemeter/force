@@ -798,13 +798,12 @@ impl Dialog {
         }
     }
 
-    /// The title row and its rule, as on Force's cards: the icon in coral (rich tier), the title in white bold.
+    /// The title row and its rule, as on Force's cards: the icon in coral (the plain tier's stand-in from
+    /// [`plain_title_icon`]), the title in white bold.
     fn draw_title(&self, buf: &mut Buffer, icon: char, text: &str) {
         let mut x = CONTENT_LEFT;
-        if self.tier == Tier::Rich {
-            x = set_cell(buf, x, 1, icon, ACCENT, BG, false);
-            x += crate::glyphs::gap(self.tier).chars().count();
-        }
+        x = set_cell(buf, x, 1, crate::glyphs::state(self.tier, plain_title_icon(icon), icon), ACCENT, BG, false);
+        x += crate::glyphs::gap(self.tier).chars().count();
         for ch in text.chars() {
             if x >= self.w.saturating_sub(CONTENT_LEFT) {
                 break;
@@ -1505,7 +1504,7 @@ impl Dialog {
         match self.runner.cockpit(&argv) {
             Err(e) => {
                 self.warn_kind = StatusKind::Warning;
-                self.warn_text = format!("{} {}", crate::glyphs::state(self.tier, '!', '⚠'), e);
+                self.warn_text = format!("{}{}{}", crate::glyphs::state(self.tier, '!', '\u{F071}'), crate::glyphs::gap(self.tier), e);
             }
             Ok(_) => self.finish(0),
         }
@@ -1923,6 +1922,20 @@ fn scroll_top(cursor: usize, visible: usize, len: usize) -> usize {
     top.min(max_top)
 }
 
+/// A dialog title's icon in the plain tier: the Force menu's characters for the same actions (force/menus.py
+/// PLAIN_ICONS), all in Cascadia Mono, Windows Terminal's default font (SPEC §28).
+fn plain_title_icon(rich: char) -> char {
+    match rich {
+        '\u{F067}' => '+',     // new session
+        '\u{F040}' => '▭',     // rename
+        '\u{F07B}' => '▢',     // move to a folder
+        '\u{F187}' => '▤',     // archive, archived sessions
+        '\u{F1F8}' => '×',     // delete
+        '\u{F002}' => '❯',     // jump
+        _ => '·',
+    }
+}
+
 fn status_parts(tier: Tier, kind: StatusKind) -> (Option<char>, Color) {
     match kind {
         StatusKind::Error => (Some(crate::glyphs::state(tier, '×', '\u{F057}')), ERROR),
@@ -2114,7 +2127,7 @@ mod tests {
 
     #[test]
     fn rich_dialog_title_icon_and_status_glyphs() {
-        // the cards' title: the icon in coral (RICH), the title in white bold, a rule under it; PLAIN: no icon
+        // the cards' title: the icon in coral, the title in white bold, a rule under it; PLAIN: a Cascadia icon
         let reg = std::path::PathBuf::from("/nonexistent/registry.json");
         let snap = std::path::PathBuf::from("/nonexistent/snapshot.json");
         let mut d = Dialog::new(Kind::Rename, Some("x".into()), &reg, &snap, Box::new(FakeRunner::new()), Tier::Rich, 64, 11);
@@ -2133,6 +2146,11 @@ mod tests {
         assert_eq!(buf[(ex, 9u16)].bg, ACCENT);
         let last: String = (0..64u16).map(|x| buf[(x, 10u16)].symbol().to_string()).collect();
         assert!(last.trim().is_empty());
+        let mut p = Dialog::new(Kind::Rename, Some("x".into()), &reg, &snap, Box::new(FakeRunner::new()), Tier::Plain, 64, 11);
+        let mut pbuf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 64, 11));
+        p.draw(&mut pbuf);
+        assert_eq!((pbuf[(2u16, 1u16)].symbol(), pbuf[(2u16, 1u16)].fg), ("▭", ACCENT));
+        assert_eq!(pbuf[(4u16, 1u16)].symbol(), "R");
         // status ✓/× swap to font icons in RICH
         assert_eq!(status_parts(Tier::Plain, StatusKind::Ok).0, Some('✓'));
         assert_eq!(status_parts(Tier::Rich, StatusKind::Ok).0, Some('\u{F058}'));

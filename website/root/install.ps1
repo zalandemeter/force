@@ -76,22 +76,29 @@ function Install-Force {
     & wsl.exe -d $Distro --exec sh -c 'command -v curl >/dev/null'
     if ($LASTEXITCODE -ne 0) { throw "force: $Distro has no curl: wsl -d $Distro -u root apt-get install -y curl" }
 
-    # 3. Force itself, with its Linux installer (as on Linux; it pins the release's SHA-256)
-    $env_ = if ($env:FORCE_DOWNLOAD_BASE) { "FORCE_DOWNLOAD_BASE='$base' " } else { '' }
-    & wsl.exe -d $Distro --cd '~' --exec sh -c "curl -fsSL '$base/install.sh' | ${env_}sh"
-    if ($LASTEXITCODE -ne 0) { throw "force: installing Force inside $Distro failed (above)" }
-
-    # 4. the force command for PowerShell and cmd: runs Force inside WSL, from the folder you are in
+    # 3. the force command for PowerShell and cmd: runs Force inside WSL, from the folder you are in. Written
+    #    before the Linux installer runs, so its Windows Terminal profile (SPEC section 45) is "Force", running it
     $home_ = Wsl @('-d', $Distro, '--exec', 'sh', '-c', 'printf %s $HOME')
     $run = "$home_/.local/share/force/app/share/windows/force-wsl"
-    & wsl.exe -d $Distro --exec test -x $run
-    if ($LASTEXITCODE -ne 0) { throw "force: $run is missing: the installed Force is too old for Windows" }
     New-Item -ItemType Directory -Force $bin | Out-Null
     # %CD%\. : a folder ending in a backslash (C:\) would otherwise escape the closing quote
     Set-Content -Encoding Ascii -Path $shim -Value @(
         '@echo off',
         "rem Force (useforce.cc): runs Force inside WSL ($Distro), from the folder you are in. install.ps1 wrote it.",
         "wsl.exe -d $Distro --cd ""%CD%\."" --exec $run %*")
+
+    # 4. Force itself, with its Linux installer (as on Linux; it pins the release's SHA-256)
+    $env_ = if ($env:FORCE_DOWNLOAD_BASE) { "FORCE_DOWNLOAD_BASE='$base' " } else { '' }
+    & wsl.exe -d $Distro --cd '~' --exec sh -c "curl -fsSL '$base/install.sh' | ${env_}sh"
+    if ($LASTEXITCODE -ne 0) {
+        Remove-Item -Force $shim -ErrorAction SilentlyContinue
+        throw "force: installing Force inside $Distro failed (above)"
+    }
+    & wsl.exe -d $Distro --exec test -x $run
+    if ($LASTEXITCODE -ne 0) {
+        Remove-Item -Force $shim -ErrorAction SilentlyContinue
+        throw "force: $run is missing: the installed Force is too old for Windows"
+    }
     Set-UserPath $bin ''
 
     Say "done. Type force in PowerShell, cmd or Windows Terminal (a new window or tab finds it)."

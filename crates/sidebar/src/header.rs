@@ -1041,17 +1041,14 @@ impl Header {
             if width(&name) <= room {
                 let mut after = self.inlay(&mut row1, left_end, &name, TITLE_FG, true, None, &mut clicks);
                 // which agent runs it: its mark in its colour, then its name
-                let kind = match sess.map(|s| s.kind.as_str()) {
-                    Some("claude") => Some((model::KIND_CLAUDE, "claude")),
-                    Some("opencode") => Some((model::KIND_OPENCODE, "opencode")),
-                    _ => None,
-                };
+                let kind = sess.and_then(|s| model::kind_mark(self.tier, &s.kind).map(|m| (m, s.kind.clone())));
                 let kinded = kind.is_some();
                 if let Some(((mark, color), word)) = kind {
                     let k = format!("{mark} {word} ");
                     if after + width(&k) <= left_end + room {
-                        self.inlay(&mut row1, after, &mark.to_string(), color, true, None, &mut clicks);
-                        after = self.inlay(&mut row1, after + 1, &format!(" {word} "), BUTTON_FG, false, None, &mut clicks);
+                        // the mark and the blank after it in its colour (model::kind_mark_after)
+                        after = self.inlay(&mut row1, after, &format!("{mark} "), color, true, None, &mut clicks);
+                        after = self.inlay(&mut row1, after, &format!("{word} "), BUTTON_FG, false, None, &mut clicks);
                     }
                 }
                 let meta: Vec<String> = sess
@@ -1520,10 +1517,14 @@ mod tests {
         me.mode = Some("bypass".into());
         let h = header_with(Some(snap(vec![me.clone()])), Some("me"), 150);
         let r = h.build_layout().row1;
-        let t = find_text(&r, " me ✻ claude · opus 5.5 · high · bypass ");
+        let t = find_text(&r, " me * claude · opus 5.5 · high · bypass ");
         assert_eq!(t, 6, "right after the toggle and its `─`");
         assert!(r[t + 1].bold && r[t + 1].fg == TITLE_FG, "session name bold, bright");
         assert_eq!(r[t + 4].fg, crate::model::KIND_CLAUDE.1, "the agent mark in its colour");
+        assert_eq!(r[t + 5].fg, crate::model::KIND_CLAUDE.1, "the blank after it too (a spilling fallback glyph)");
+        let mut rich = header_with(Some(snap(vec![me.clone()])), Some("me"), 150);
+        rich.set_tier(Tier::Rich);
+        assert!(find_sub(&rich.build_layout().row1, " me ✻ claude · opus 5.5 · high · bypass ").is_some(), "RICH: ✻");
         let mode_at = find_text(&r, "bypass");
         assert_eq!(r[mode_at].fg, crate::model::BADGE_B, "mode word in its badge colour");
         for (mode, word) in [("auto", "auto"), ("edits", "accept edits"), ("plan", "plan"), ("manual", "manual"), ("oc-build", "build"), ("oc-plan", "plan")] {

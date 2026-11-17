@@ -87,6 +87,16 @@ jobs:
             throw "force.cmd's folder is not on the user's PATH"
           }
           $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: The Windows Terminal profile "Force", with the icon font (SPEC §45)
+        run: |
+          $frags = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\Force'
+          Get-ChildItem $frags | Select-Object -ExpandProperty Name
+          $prof = (Get-Content -Raw (Join-Path $frags 'force.json') | ConvertFrom-Json).profiles[0]
+          $prof | ConvertTo-Json
+          if ($prof.name -ne 'Force') { throw "the profile is $($prof.name), not Force" }
+          if ($prof.commandline -notmatch 'Programs\\Force\\force\.cmd --glyphs rich') { throw "the profile does not run force.cmd" }
+          if (Test-Path (Join-Path $frags 'force-Ubuntu-24.04.json')) { throw "the distro's profile is still there" }
+          if (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts\SymbolsNerdFontMono-Regular.ttf'))) { throw "no icon font" }
       - name: force from PowerShell
         run: |
           force --version
@@ -119,6 +129,7 @@ jobs:
           & ./website/root/install.ps1 -Uninstall
           if ($LASTEXITCODE) { throw "uninstall failed" }
           if (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\Force\force.cmd')) { throw "force.cmd is still there" }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\Force')) { throw "the Force profile is still there" }
           wsl.exe -d Ubuntu-24.04 --exec sh -c 'test ! -e ~/.local/bin/force'
           if ($LASTEXITCODE) { throw "Force is still installed in WSL" }
       - name: Force's logs

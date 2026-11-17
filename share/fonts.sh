@@ -175,7 +175,7 @@ install_font() {
 
 # --- WSL: the terminal is a Windows program that draws with Windows' fonts ---------------------------------
 # A Linux font never reaches it. Instead: the symbols font goes into Windows for this user (no admin), and a
-# Windows Terminal fragment adds a "Force (<distro>)" profile whose font is Cascadia Mono with the symbols as
+# Windows Terminal fragment adds a "Force" profile (installed from Windows) or "Force (<distro>)" whose font is Cascadia Mono with the symbols as
 # fallback and which starts Force with icons. The user's own profiles and settings are not touched.
 is_wsl() {
   [ -n "${WSL_DISTRO_NAME:-}${WSL_INTEROP:-}" ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] \
@@ -217,23 +217,35 @@ windows_terminal() {
   fi
   (cd /mnt/c 2>/dev/null || cd /; "$reg" add "$WIN_FONTS_KEY" /v "$WIN_FONT_VALUE" /t REG_SZ \
       /d "$lad_win\\Microsoft\\Windows\\Fonts\\$WIN_FONT" /f) >/dev/null 2>&1 || return 1
-  # 2. the "Force" profile, as a Windows Terminal fragment
+  # 2. the profile, as a Windows Terminal fragment. Installed from Windows (install.ps1 wrote force.cmd for this
+  #    distro, SPEC §55): "Force", which runs that command; else "Force (<distro>)", which runs wsl.exe
   frag="$lad/Microsoft/Windows Terminal/Fragments/Force"
   mkdir -p "$frag" || return 1
-  force_bin="$HOME/.local/bin/force"
-  cat > "$frag/force-$distro.json" <<JSON || return 1
+  local name cmdline file
+  if windows_front "$lad" "$distro"; then
+    name="Force" file="force.json"
+    cmdline='%LOCALAPPDATA%\\Programs\\Force\\force.cmd --glyphs rich'
+    rm -f "$frag/force-$distro.json"
+  else
+    name="Force ($(json_str "$distro"))" file="force-$distro.json"
+    cmdline="wsl.exe -d $(json_str "$distro") --cd ~ -- bash -lc 'exec $(json_str "$HOME/.local/bin/force") --glyphs rich'"
+  fi
+  cat > "$frag/$file" <<JSON || return 1
 {
   "profiles": [
     {
-      "name": "Force ($(json_str "$distro"))",
-      "commandline": "wsl.exe -d $(json_str "$distro") --cd ~ -- bash -lc 'exec $(json_str "$force_bin") --glyphs rich'",
+      "name": "$name",
+      "commandline": "$cmdline",
       "icon": "⚡",
       "font": { "face": "Cascadia Mono, $SYMBOL_FAMILY" }
     }
   ]
 }
 JSON
-  say "Windows Terminal: restart it once, then open \"Force ($distro)\" from its new-tab menu for Force with icons"
+  say "Windows Terminal: restart it once, then open \"$name\" from its new-tab menu for Force with icons"
+}
+windows_front() {  # windows_front LAD DISTRO: install.ps1's force.cmd runs Force in this distro
+  [ -f "$1/Programs/Force/force.cmd" ] && grep -q -- "wsl.exe -d $2 " "$1/Programs/Force/force.cmd" 2>/dev/null
 }
 windows_uninstall() {  # the fragment and, when no other distro's Force profile is left, the font too
   local lad_win lad reg frag
@@ -242,6 +254,9 @@ windows_uninstall() {  # the fragment and, when no other distro's Force profile 
   lad=$(wslpath -u "$lad_win" 2>/dev/null) || return 0
   frag="$lad/Microsoft/Windows Terminal/Fragments/Force"
   rm -f "$frag/force-${WSL_DISTRO_NAME:-}.json"
+  if [ ! -f "$lad/Programs/Force/force.cmd" ] || windows_front "$lad" "${WSL_DISTRO_NAME:-}"; then
+    rm -f "$frag/force.json"                            # the Windows "Force" profile runs this distro's Force
+  fi
   rmdir "$frag" 2>/dev/null || return 0                 # another distro still has its profile: keep the font
   rm -f "$lad/Microsoft/Windows/Fonts/$WIN_FONT" 2>/dev/null || true
   reg=$(win_exe reg.exe) || return 0

@@ -1018,8 +1018,10 @@ def hosts_menu_command(cockpit: Cockpit, client: str, window: str) -> int:
     keys = iter("123456789")
     current = cockpit.ui_tmux.run("display", "-p", "-t", window, "#{@force_host}")
     hosts = [("this machine", "local")] + [(r.name, r.name) for r in remote_mod.load(cockpit.paths) if r.enabled]
-    # the Force menu's look (menus.py): coral icons in the rich tier, the current host marked with a coral dot, notes in grey
-    icon = lambda ch: f"#{{?{menus_mod.RICH},#[fg={menus_mod.CORAL}]{ch}#[default]  ,}}"
+    # the Force menu's look (menus.py): coral icons (Nerd Font in the rich tier, Cascadia Mono's ⌂ and ◫ in the
+    # plain one), the current host marked with a coral dot, notes in grey
+    icon = lambda ch, plain: (f"#{{?{menus_mod.RICH},#[fg={menus_mod.CORAL}]{ch}#[default]  ,"
+                              f"#[fg={menus_mod.CORAL}]{plain}#[default] }}")
     for label, host in hosts:
         on = (host == "local" and not current) or host == current
         mark = f"#[fg={menus_mod.CORAL}]●#[default] " if on else "  "
@@ -1031,7 +1033,7 @@ def hosts_menu_command(cockpit: Cockpit, client: str, window: str) -> int:
             st = f" ({state})" if state != "connected" else \
                 _attention_note(snap) if _has_sessions(snap) else " (new shell)"
         note = f"#[fg={menus_mod.GREY}]{st}#[default]" if st else ""
-        items += [f"{mark}{icon(chr(0xF109) if host == 'local' else chr(0xF233))}{label}{note}", next(keys, ""),
+        items += [f"{mark}{icon(chr(0xF109), '⌂') if host == 'local' else icon(chr(0xF233), '◫')}{label}{note}", next(keys, ""),
                   f"run-shell -b {shlex.quote(shlex.join([cockpit.cockpit_bin, 'ui-host', host, '--window', window]) + ' >/dev/null 2>&1')}"]
     if len(hosts) == 1:
         items += ["", "-add a host: force host add NAME [SSH]", "", ""]
@@ -1934,7 +1936,7 @@ def uninstall_command(cockpit: Cockpit, purge: bool, yes: bool) -> int:
             print("not removed")
             return 1
 
-    if purge:
+    if purge or config.is_wsl():        # on WSL the Windows Terminal profile would run a removed Force (SPEC §45)
         import force
         fonts = Path(force.__file__).resolve().parent.parent / "share" / "fonts.sh"
         if fonts.exists():
