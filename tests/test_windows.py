@@ -1,6 +1,5 @@
 """share/windows/force-wsl (SPEC §55): what force.cmd runs inside WSL. A login shell, then the real launcher with the
 arguments exactly as given (spaces and quotes included)."""
-import os
 import stat
 import subprocess
 from pathlib import Path
@@ -28,7 +27,7 @@ def test_it_runs_the_launcher_with_the_arguments_as_given(tmp_path):
     assert f"{home}/profile-bin" in r.stdout.splitlines()[4]
 
 
-def test_a_missing_launcher_is_127(tmp_path):
+def test_a_missing_launcher_fails(tmp_path):
     r = subprocess.run([str(RUN), "list"], env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
                        capture_output=True, text=True, timeout=20)
-    assert r.returncode == 127
+    assert r.returncode in (126, 127)            # 127 from bash 4+ (WSL's); macOS's bash 3.2 says 126
