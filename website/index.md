@@ -10,7 +10,15 @@ curl -fsSL https://useforce.cc/install.sh | sh
 force
 ```
 
-Linux (x86-64) and macOS on Apple Silicon. No root, no packages, no config files.
+On Windows, in PowerShell:
+
+```powershell
+irm https://useforce.cc/install.ps1 | iex
+force
+```
+
+Linux (x86-64), macOS on Apple Silicon, and Windows 10 and 11 (Force runs inside WSL; `force` works in PowerShell,
+cmd and Windows Terminal). No root, no packages, no config files.
 
 ## What it does
 

@@ -61,6 +61,14 @@
         <code id="install-line"><span class="prompt" aria-hidden="true">$</span> <span class="nb">curl -fsSL</span> <span class="nb">https://useforce.cc/install.sh | sh</span></code>
         <button type="button" class="copy" data-copy="install-line">Copy</button>
       </div>
+      <p>On Windows 10 and 11, one line in PowerShell. Force runs inside WSL, Windows' Linux: the installer sets WSL up
+        when it is missing (Windows asks for permission once, and may want a restart), installs Force in it, and puts
+        a <code>force</code> command into PowerShell, cmd and Windows Terminal that runs from the folder you are in.
+        Windows Terminal also gets a <b>Force</b> profile with Force's icons.</p>
+      <div class="install">
+        <code id="install-line-windows"><span class="prompt" aria-hidden="true">&gt;</span> <span class="nb">irm https://useforce.cc/install.ps1 | iex</span></code>
+        <button type="button" class="copy" data-copy="install-line-windows">Copy</button>
+      </div>
       <p>It unpacks into <code>~/.local/share/force</code> and brings its own tmux 3.4 (and its own Python 3.12 when
         the system one is older than 3.11). It puts <code>force</code> in <code>~/.local/bin</code> and on your PATH
         for bash, zsh and fish, starts its two background services (systemd user units; without systemd,

@@ -1,0 +1,5 @@
+#!/bin/bash -l
+# Force from Windows (SPEC §55): force.cmd runs this inside WSL with `wsl.exe --exec`, so PowerShell, cmd and
+# Windows Terminal get the `force` command. A login shell, so the user's PATH and profile are what a terminal
+# has; then the real launcher with the arguments as given.
+exec "$HOME/.local/bin/force" "$@"

@@ -1,0 +1,126 @@
+# Windows (SPEC §55): build the Linux tarball, then on a GitHub Windows runner install it as a user would, with
+# install.ps1 into WSL (Ubuntu), and use Force from PowerShell and cmd: a shell session, the list, the session
+# still there after the step ends, `force api` the way a frontend starts it through wsl.exe, and the uninstall.
+name: Windows
+
+on:
+  pull_request:
+    paths:
+      - force/**
+      - share/**
+      - website/root/install.ps1
+      - scripts/build-release.sh
+      - scripts/fill-installer.py
+      - .github/workflows/windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tarball:
+    name: Linux tarball
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          echo "FORCE_BUILD_ROOT=$RUNNER_TEMP/build" >> "$GITHUB_ENV"
+          FORCE_BUILD_ROOT="$RUNNER_TEMP/build" scripts/build-release.sh "$(scripts/version.sh)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: |
+            ${{ env.FORCE_BUILD_ROOT }}/dist/install.sh
+            ${{ env.FORCE_BUILD_ROOT }}/dist/releases/force-*-linux-x86_64.tar.gz*
+          if-no-files-found: error
+          retention-days: 3
+
+  install:
+    name: Install with install.ps1, use from PowerShell and cmd, uninstall
+    needs: tarball
+    runs-on: windows-2025
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-dist
+          path: dist
+      - uses: Vampire/setup-wsl@e707f0b61a07f8ea48a64d83edfcbd4a7af45926   # v7.2.0
+        with:
+          distribution: Ubuntu-24.04
+          additional-packages: curl python3
+          wsl-shell-user: root
+          # as Ubuntu's own: systemd on; and the user Force installs as
+          wsl-conf: |
+            [boot]
+            systemd=true
+            [user]
+            default=ci
+      - name: A user (Force installs as a user, never as root)
+        shell: wsl-bash {0}
+        run: id ci || useradd -m -s /bin/bash ci
+      - name: Restart the distribution as that user
+        run: |
+          wsl.exe --terminate Ubuntu-24.04
+          $u = wsl.exe -d Ubuntu-24.04 --exec id -un
+          "default user: $u"
+          if ($u -ne 'ci') { throw "the default user is $u, not ci" }
+      - name: install.ps1 (the release from dist/, through FORCE_DOWNLOAD_BASE)
+        run: |
+          $d = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a ((Resolve-Path dist).Path)).Trim()
+          $env:FORCE_DOWNLOAD_BASE = "file://$d"
+          & ./website/root/install.ps1
+          if ($LASTEXITCODE) { throw "install.ps1 failed" }
+          $bin = Join-Path $env:LOCALAPPDATA 'Programs\Force'
+          Get-Content (Join-Path $bin 'force.cmd')
+          if (-not ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' -contains $bin)) {
+            throw "force.cmd's folder is not on the user's PATH"
+          }
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: force from PowerShell
+        run: |
+          force --version
+          if ($LASTEXITCODE) { throw "force --version failed" }
+          force new e2e-shell --shell --no-switch
+          if ($LASTEXITCODE) { throw "force new failed" }
+          $list = force list | Out-String
+          $list
+          if ($list -notmatch 'e2e-shell') { throw "e2e-shell is not in force list" }
+      - name: force from cmd, in a Windows folder
+        shell: cmd
+        run: |
+          cd /d %RUNNER_TEMP%
+          force list || exit /b 1
+          force list | findstr e2e-shell || exit /b 1
+      - name: The session outlives the terminal (a minute with no wsl.exe running)
+        run: |
+          Start-Sleep -Seconds 60
+          $list = force list | Out-String
+          $list
+          if ($list -notmatch 'e2e-shell') { throw "e2e-shell is gone once no terminal was open" }
+          force doctor
+      - name: force api, as the Minecraft mod starts it
+        run: |
+          $out = '{"id":1,"op":"hello","protocol":1,"client":"ci"}' | wsl.exe --exec sh -lc 'exec ~/.local/bin/force api'
+          $out
+          if (-not ($out -match '"id": ?1' -and $out -match '"ok"')) { throw "no hello reply from force api" }
+      - name: Uninstall
+        run: |
+          & ./website/root/install.ps1 -Uninstall
+          if ($LASTEXITCODE) { throw "uninstall failed" }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\Force\force.cmd')) { throw "force.cmd is still there" }
+          wsl.exe -d Ubuntu-24.04 --exec sh -c 'test ! -e ~/.local/bin/force'
+          if ($LASTEXITCODE) { throw "Force is still installed in WSL" }
+      - name: Force's logs
+        if: always()
+        run: wsl.exe -d Ubuntu-24.04 --exec sh -c 'tail -n 80 ~/.local/state/force/daemon.log 2>/dev/null; journalctl --user -u force -n 80 --no-pager 2>/dev/null || true'

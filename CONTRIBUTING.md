@@ -14,7 +14,9 @@ pull request against `main` ([below](#how-a-change-gets-in)).
    `<type>(<optional scope>): <what changes, in the imperative>`, such as `fix(sidebar): stop the flicker on resize`.
 4. **Try it**: the tests, the sandbox (`./dev.sh`), and for installer changes `scripts/try-release.sh` (below).
 5. **Open a pull request** against `main`, its title a Conventional Commit too: it becomes the one commit on `main`.
-   CI must pass: the tests on Python 3.11 to 3.13, the Rust crates, the website build and the title check.
+   CI must pass: the tests on Python 3.11 to 3.13, the Rust crates, the website build and the title check. A change
+   to Force itself or its installers also runs the end-to-end installs: on a GitHub Mac (`macos.yml`) and on a
+   GitHub Windows machine, in WSL through `install.ps1` (`windows.yml`).
 6. **The maintainer tries it.** Features are used before they are merged: the maintainer installs the branch build
    on a real machine (`scripts/install-build.sh HOST`, below) and gives feedback. Changes go onto the same branch,
    as more commits, until the feature is right.

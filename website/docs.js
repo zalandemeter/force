@@ -3,7 +3,7 @@
   document.querySelectorAll("[data-copy]").forEach(function (b) {
     b.addEventListener("click", function () {
       var el = document.getElementById(b.getAttribute("data-copy"));
-      var text = el.textContent.replace(/^\s*\$\s*/, "").trim();
+      var text = el.textContent.replace(/^\s*[$>]\s*/, "").trim();      // without the prompt ($, or > on Windows)
       if (!navigator.clipboard) return;
       navigator.clipboard.writeText(text).then(function () {
         b.textContent = "Copied";
