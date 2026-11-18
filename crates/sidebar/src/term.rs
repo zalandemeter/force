@@ -11,6 +11,10 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
+use ratatui::buffer::Cell;
+use ratatui::layout::{Position, Size};
+
 /// Set when a signal handler observes SIGTERM/SIGHUP (kind forwarded on the channel too).
 pub static SIGNALLED: AtomicBool = AtomicBool::new(false);
 /// Set when the sidebar receives SIGUSR1 (forwarded as `Event::Signal(Usr1)` too).
@@ -60,6 +64,72 @@ unsafe extern "C" fn handle_sighup(_: i32) {
 unsafe extern "C" fn handle_sigusr1(_: i32) {
     USR1.store(true, Ordering::SeqCst);
     sig_write(1);
+}
+
+/// The sidebar's and header's ratatui backend (SPEC §28): crossterm's, except that a frame whose first cell is not plain
+/// ASCII (a spinner glyph, an icon) first writes a space there. tmux 3.4 resets its terminal state, mouse
+/// modes included, after a lone non-ASCII cell that a pane other than the active one writes first in a batch
+/// (`tty_cmd_cell` with `num == 1`): VTE terminals then flicker the pointer with every spinner frame. A plain
+/// cell first starts the batch the other way; the glyph overwrites it in the same synchronized update.
+pub struct PaneBackend<W: io::Write>(CrosstermBackend<W>);
+
+impl<W: io::Write> PaneBackend<W> {
+    pub fn new(writer: W) -> Self {
+        Self(CrosstermBackend::new(writer))
+    }
+}
+
+impl<W: io::Write> Backend for PaneBackend<W> {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        let mut content = content.peekable();
+        if let Some(&(x, y, cell)) = content.peek() {
+            if !cell.symbol().is_ascii() {
+                self.0.draw(std::iter::once((x, y, &Cell::default())))?;
+            }
+        }
+        self.0.draw(content)
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.0.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.0.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        self.0.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        self.0.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.0.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        self.0.clear_region(clear_type)
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        self.0.size()
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        self.0.window_size()
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Backend::flush(&mut self.0)
+    }
 }
 
 /// Wrap one `draw` in DEC mode 2026 (Begin/EndSynchronizedUpdate) so tmux / the terminal never shows a
@@ -342,6 +412,49 @@ pub fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// A writer the test reads back after the backend has written to it.
+    #[derive(Clone, Default)]
+    struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl io::Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn pane_draw(cells: &[(u16, u16, &str)]) -> String {
+        let cells: Vec<(u16, u16, Cell)> = cells
+            .iter()
+            .map(|&(x, y, s)| {
+                let mut c = Cell::default();
+                c.set_symbol(s);
+                (x, y, c)
+            })
+            .collect();
+        let out = Shared::default();
+        let mut backend = PaneBackend::new(out.clone());
+        backend.draw(cells.iter().map(|(x, y, c)| (*x, *y, c))).unwrap();
+        let bytes = out.0.borrow().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// A frame that starts with a non-ASCII cell (a spinner glyph) writes a plain space there first, so tmux 3.4
+    /// does not reset the terminal's mouse modes; a frame that starts with ASCII is written as crossterm does.
+    #[test]
+    fn pane_backend_leads_a_glyph_frame_with_a_space() {
+        let glyph = pane_draw(&[(4, 2, "⠋"), (6, 2, "x")]);
+        let space = glyph.find(" ").expect("a space before the glyph");
+        assert!(space < glyph.find('⠋').unwrap(), "{glyph:?}");
+        assert_eq!(glyph.matches("\x1b[3;5H").count(), 2, "the glyph's cell, twice: {glyph:?}");
+        let ascii = pane_draw(&[(4, 2, "x"), (6, 2, "⠋")]);
+        assert!(!ascii.contains(' '), "{ascii:?}");
+        assert!(!pane_draw(&[]).contains(' '), "an empty frame writes no cell");
+    }
 
     /// The loop's blocking deadline: a pending draw must block 0 ms, an animation ~33 ms ahead wins, and the
     /// footer-error expiry beats the 5 s cap when it is earlier.

@@ -5,7 +5,6 @@ use std::io;
 use std::path::PathBuf;
 
 use crossterm::event::Event;
-use ratatui::backend::CrosstermBackend;
 use ratatui::style::{Modifier, Style};
 use ratatui::Terminal;
 
@@ -96,7 +95,7 @@ fn paint_grid(buf: &mut ratatui::buffer::Buffer, grid: &force_sidebar::app::Grid
 /// animation frames / the spinner while visible.
 fn run_loop(
     app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<term::PaneBackend<io::Stdout>>,
     rx: std::sync::mpsc::Receiver<term::Event>,
 ) -> io::Result<()> {
     let mut changed = true; // draw the first frame
@@ -224,7 +223,7 @@ fn run() -> io::Result<()> {
     let mut app = App::new(tmux, args.snapshot.clone(), args.cockpit_bin, tmux_pane, args.glyphs, tz, w, h);
     app.set_anims(args.anims);
 
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let mut terminal = Terminal::new(term::PaneBackend::new(io::stdout()))?;
     // a plain clear-screen: terminal.clear() asks for the cursor position, which times out (and exits)
     // when tmux is busy resizing the pane, e.g. while a client attaches
     crossterm::execute!(io::stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;

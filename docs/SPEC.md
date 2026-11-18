@@ -718,6 +718,10 @@ mode: host and ui tmux servers), §40 (remote hosts) and §41 (a local Force on 
   ratatui's previous frame (`swap_buffers`); never `Terminal::clear()`: it queries the cursor position,
   the input thread swallows the reply and the timeout exits the process (every sidebar and header would die
   on each SIGUSR1). Startup clears with a plain clear-screen for the same reason.
+- A frame of the sidebar or header that starts with a non-ASCII cell (a spinner glyph, an icon) first writes a
+  space in that cell (`term::PaneBackend`). tmux 3.4 resets the terminal's modes, mouse tracking included,
+  after a lone non-ASCII cell written first in a batch by a pane that is not the active one (`tty_cmd_cell`
+  with `num == 1`): every spinner frame made the pointer flicker in VTE terminals.
 - VTE (Tilix / GNOME Terminal, `VTE(7600)`): with the Symbols Nerd Font installed, RICH renders like
   kitty (icons at text size through fontconfig fallback, usage bars, chips), so `rich_terminals` can add
   `|vte`. Not the default: a VTE without the symbols font shows boxes. VTE ignores OSC 52 (tmux copies

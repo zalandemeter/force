@@ -6,7 +6,6 @@ use std::io;
 use std::path::PathBuf;
 
 use crossterm::event::Event;
-use ratatui::backend::CrosstermBackend;
 use ratatui::style::{Modifier, Style};
 use ratatui::Terminal;
 
@@ -135,7 +134,7 @@ fn run() -> io::Result<()> {
     let mut header = Header::new(tmux, spawner, args.snapshot.clone(), args.share_dir, tmux_pane, args.glyphs, w);
     header.set_anims(args.anims);
 
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let mut terminal = Terminal::new(term::PaneBackend::new(io::stdout()))?;
     // a plain clear-screen: terminal.clear() asks for the cursor position, which times out (and exits)
     // when tmux is busy resizing the pane, e.g. while a client attaches
     crossterm::execute!(io::stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
@@ -151,7 +150,7 @@ fn run() -> io::Result<()> {
 /// so idle wakeups stay at ~1 per 5 s. Every draw is wrapped in DEC mode 2026 synchronized update.
 fn run_loop(
     header: &mut Header,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<term::PaneBackend<io::Stdout>>,
     rx: std::sync::mpsc::Receiver<term::Event>,
 ) -> io::Result<()> {
     let mut changed = true;
