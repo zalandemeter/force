@@ -184,7 +184,12 @@ def test_exec_round_trip_over_the_direct_link(paired):
     assert p.stderr == b"oops\n"
     # only the short list of variables reaches the program (none of the daemon's other ones)
     env_line = next(line for line in out.splitlines() if line.startswith("env:"))
-    assert env_line == "env:HOME,LANG,PATH", env_line
+    allowed = {"env:HOME,LANG,PATH"}
+    if sys.platform == "darwin":
+        # not passed by the daemon: on macOS CoreFoundation, which Python's framework build loads, sets it in the
+        # program's own environment at start (python with an empty environment shows it too; /usr/bin/env does not)
+        allowed.add("env:HOME,LANG,PATH,__CF_USER_TEXT_ENCODING")
+    assert env_line in allowed, env_line
     assert not laptop.ssh_log.exists(), "went over ssh"
 
 
