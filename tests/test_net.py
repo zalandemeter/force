@@ -384,28 +384,78 @@ def test_hint_card_says_what_and_where(env, capsys):
     assert net.hint_command(env.paths, env.cfg, "devbox", ui=True, wait_key=lambda: "\x1b") == 0
     out = capsys.readouterr().out
     for want in ("devbox", "force net up", "UDP 47900", "ssh keeps working", "faster", "network",
-                 "Don't show again", "Esc"):
+                 "Don't show for devbox", "Never show (any host)", "Esc"):
         assert want in out, want
     plain = net.hint_text("devbox", 47900, color=False)
     assert all(len(line) <= 68 for line in plain.splitlines()), "fits the 72-wide popup"
     assert len(plain.splitlines()) <= 15, "fits the 17-high popup"
+    keys = [line for line in net.hint_text("h" * 32, 47900, color=False).splitlines() if "Esc" in line]
+    assert len(keys) == 1 and "Don't show for this host" in keys[0] and len(keys[0]) <= 68, "a long name"
     assert config.load_config(env.paths.config_file).net_up_hint is True, "Esc changes nothing"
+    assert remote.get(env.paths, "devbox").net_up_hint is True
 
 
-def test_hint_card_dont_show_again_sets_the_setting(env, capsys):
+def test_hint_card_d_hides_it_for_this_host_only(env, capsys):
     setup_remote(env)
     assert net.hint_command(env.paths, env.cfg, "devbox", ui=True, wait_key=lambda: "d") == 0
+    assert remote.get(env.paths, "devbox").net_up_hint is False
+    assert config.load_config(env.paths.config_file).net_up_hint is True, "the setting stays"
+    assert link.link_hints(env.paths, env.cfg, running) == []
+    # a host the card names that is not in hosts.json (removed meanwhile): nothing to set
+    assert net.hint_command(env.paths, env.cfg, "gone", ui=True, wait_key=lambda: "d") == 2
+
+
+def test_hint_card_n_sets_the_setting(env, capsys):
+    setup_remote(env)
+    assert net.hint_command(env.paths, env.cfg, "devbox", ui=True, wait_key=lambda: "n") == 0
     assert config.load_config(env.paths.config_file).net_up_hint is False
     assert json.loads(env.paths.config_file.read_text())["netUpHint"] is False
     assert json.loads(env.paths.config_file.read_text())["layout"] == "classic", "the other settings stay"
+    assert remote.get(env.paths, "devbox").net_up_hint is True, "the host's field stays"
 
 
 def test_hint_card_needs_a_host(env, capsys):
     assert net.hint_command(env.paths, env.cfg, None, ui=True, wait_key=lambda: "d") == 2
     assert net.hint_command(env.paths, env.cfg, "bad host", ui=False) == 2
     assert config.load_config(env.paths.config_file).net_up_hint is True
+
+
+def test_net_hint_host_on_off(env, capsys):
+    setup_remote(env)
     assert cli.main(["net", "hint", "devbox"]) == 0
-    assert "force net up" in capsys.readouterr().out
+    assert capsys.readouterr().out == "devbox: hint on\n"
+    assert cli.main(["net", "hint", "devbox", "off"]) == 0
+    assert capsys.readouterr().out == "devbox: hint off\n"
+    assert json.loads(remote.remotes_file(env.paths).read_text())["hosts"][0]["netUpHint"] is False
+    assert cli.main(["net", "hint", "devbox"]) == 0
+    assert capsys.readouterr().out == "devbox: hint off\n"
+    assert cli.main(["net", "hint", "devbox", "on"]) == 0
+    assert "netUpHint" not in json.loads(remote.remotes_file(env.paths).read_text())["hosts"][0], \
+        "on: the field goes (written only when false)"
+    assert cli.main(["net", "hint", "ghost", "off"]) == 2
+    assert "no host 'ghost'" in capsys.readouterr().err
+    assert cli.main(["net", "hint", "ghost"]) == 2
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["net", "hint", "devbox", "maybe"])
+
+
+def test_hint_hidden_per_host_with_the_setting(env):
+    """Shown only when the setting is on AND the host does not hide it; the other hosts' hints stay."""
+    setup_remote(env)
+    remote.save(env.paths, [remote.Remote("devbox", "devbox"), remote.Remote("buildbox", "buildbox")])
+    remote.write_status(env.paths, "buildbox", "connected", "", "1.0.0", link=True)
+    link.link_file(env.paths, "buildbox").parent.mkdir(parents=True, exist_ok=True)
+    link.link_file(env.paths, "buildbox").write_text(json.dumps(
+        {"id": ID, "addrs": ["192.0.2.8:47900"], "state": "ssh", "reason": "timeout", "fails": 3, "port": 47901}))
+    both = [{"host": "devbox", "port": 47900}, {"host": "buildbox", "port": 47901}]
+    assert link.link_hints(env.paths, env.cfg, running) == both
+    assert link.set_host_hint(env.paths, "devbox", False)
+    assert link.link_hints(env.paths, env.cfg, running) == [{"host": "buildbox", "port": 47901}]
+    assert link.ssh_only_hosts(env.paths, env.cfg, running) == both, "still ssh only (doctor)"
+    assert link.link_hints(env.paths, cfg_of(env, net_up_hint=False), running) == [], "the setting off hides all"
+    assert link.set_host_hint(env.paths, "devbox", True)
+    assert link.link_hints(env.paths, env.cfg, running) == both
+    assert not link.set_host_hint(env.paths, "ghost", False)
 
 
 # ----------------------------------------------------------------------------- uninstall, list, picker --
@@ -470,6 +520,10 @@ def test_doctor_link_ssh_only_whatever_the_setting(env, monkeypatch):
     probs = doctor._check_link(cockpit)
     assert [(p.code, p.warning) for p in probs] == [("link-ssh-only", True)]
     assert "on devbox run: force net up" in probs[0].detail and "UDP 47900" in probs[0].detail
+    assert "hidden" not in probs[0].detail
+    link.set_host_hint(env.paths, "devbox", False)
+    (p,) = doctor._check_link(cockpit)
+    assert p.detail.endswith("force net up (hint hidden for devbox)")
     setup_remote(env, fails=1)
     assert doctor._check_link(cockpit) == []
 

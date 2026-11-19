@@ -2,7 +2,8 @@
 so that a remote's direct link reaches it, close it again, and say what is open. Run on the host to be reached, as
 the user: the one firewall command runs under `sudo`, which asks for the password; Force itself never runs as root.
 
-Also the hint card (`force net hint --ui HOST`, opened from the sidebar's `HOST: ssh only · force net up there`).
+Also the hint card (`force net hint --ui HOST`, opened from the sidebar's `HOST: ssh only · force net up there`) and
+the hint per host (`force net hint HOST [on|off]`).
 
 Every program runs through `System.run` (tests inject a fake: never a real sudo or firewall).
 
@@ -345,25 +346,42 @@ def hint_text(host: str, port: int, color: bool = True, buttons: bool = True) ->
               "  " + c(f"It opens UDP {port} in that machine's firewall (sudo asks there).", "grey", color=color),
               "  " + c("ssh keeps working meanwhile.", "dim", color=color)]
     if buttons:
-        lines += ["", keys_right(("d", "Don't show again"), ("Esc", "Close"), color=color), ""]
+        # a long host name: "this host", so the row fits the card
+        this = host if len(host) <= 12 else "this host"
+        lines += ["", keys_right(("d", f"Don't show for {this}"), ("n", "Never show (any host)"), ("Esc", "Close"),
+                                  color=color), ""]
     return "\n".join(lines)
 
 
-def hint_command(paths, cfg, host: str | None, ui: bool, wait_key=None) -> int:
-    """`force net hint [--ui] HOST`: the hint card. In the popup (--ui) `d` turns the hint off (netUpHint false,
-    as `force settings set` does); any other key closes it."""
-    if not host or not remote.NAME_RE.fullmatch(host):
-        _err("usage: force net hint [--ui] HOST")
+def hint_command(paths, cfg, host: str | None, ui: bool, wait_key=None, value: str | None = None) -> int:
+    """`force net hint HOST [on|off]`: the hint for one host (its hosts.json `netUpHint`): `on`/`off` sets it,
+    without a value it prints `HOST: hint on|off`. `--ui`: the hint card (the sidebar's popup): `d` hides the hint
+    for HOST, `n` for every host (the setting netUpHint false, as `force settings set` does), any other key
+    closes it. A HOST not in hosts.json: exit 2."""
+    if not host or not remote.NAME_RE.fullmatch(host) or value not in (None, "on", "off") or (ui and value):
+        _err("usage: force net hint HOST [on|off]")
         return 2
-    port = hint_port(paths, cfg, host)
     if not ui:
-        print(hint_text(host, port, color=False, buttons=False))
+        r = remote.get(paths, host)
+        if r is None:
+            _err(f"no host {host!r} (force host list)")
+            return 2
+        if value is None:
+            print(f"{host}: hint {'on' if r.net_up_hint else 'off'}")
+            return 0
+        link.set_host_hint(paths, host, value == "on")
+        print(f"{host}: hint {value}")
         return 0
     if wait_key is None:
         from .support import _wait_key as wait_key
     print("\x1b[?25l", end="", flush=True)                      # no blinking cursor on the card
-    print(hint_text(host, port), end="", flush=True)
-    if wait_key() in ("d", "D"):
+    print(hint_text(host, hint_port(paths, cfg, host)), end="", flush=True)
+    key = wait_key()
+    if key in ("d", "D"):
+        if not link.set_host_hint(paths, host, False):
+            _err(f"no host {host!r} (force host list)")
+            return 2
+    elif key in ("n", "N"):
         try:
             config.save_setting(paths.config_file, "netUpHint", False)
         except ValueError as e:
@@ -373,8 +391,8 @@ def hint_command(paths, cfg, host: str | None, ui: bool, wait_key=None) -> int:
 
 
 def command(paths, cfg, action: str, host: str | None = None, as_json: bool = False, ui: bool = False,
-            s: System | None = None) -> int:
-    """`force net up | down | status [--json]` (and the internal `hint [--ui] HOST`)."""
+            s: System | None = None, value: str | None = None) -> int:
+    """`force net up | down | status [--json] | hint HOST [on|off]` (and the card, `hint --ui HOST`)."""
     if action == "up":
         return up(paths, cfg, s)
     if action == "down":
@@ -382,6 +400,6 @@ def command(paths, cfg, action: str, host: str | None = None, as_json: bool = Fa
     if action == "status":
         return status(paths, cfg, as_json, s)
     if action == "hint":
-        return hint_command(paths, cfg, host, ui)
+        return hint_command(paths, cfg, host, ui, value=value)
     _err("usage: force net up | down | status [--json]")
     return 2

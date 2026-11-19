@@ -39,6 +39,7 @@ class Remote:
     name: str
     ssh: str
     enabled: bool = True
+    net_up_hint: bool = True      # hosts.json "netUpHint": false hides the force net up hint for this host (SPEC §56.2)
 
 
 def remotes_file(paths) -> Path:
@@ -60,17 +61,20 @@ def load(paths) -> list[Remote]:
         for r in data.get("hosts") or []:
             if isinstance(r, dict) and isinstance(r.get("name"), str) and isinstance(r.get("ssh"), str) \
                     and NAME_RE.match(r["name"]):
-                out.append(Remote(r["name"], r["ssh"], bool(r.get("enabled", True))))
+                out.append(Remote(r["name"], r["ssh"], bool(r.get("enabled", True)),
+                                  r.get("netUpHint") is not False))
     return out
 
 
 def save(paths, remotes: list[Remote]) -> None:
-    """Write the hosts file; `enabled` is only stored when False."""
+    """Write the hosts file; `enabled` and `netUpHint` are only stored when False."""
     hosts = []
     for r in remotes:
         host = {"name": r.name, "ssh": r.ssh}
         if not r.enabled:
             host["enabled"] = False
+        if not r.net_up_hint:
+            host["netUpHint"] = False
         hosts.append(host)
     path = remotes_file(paths)
     path.parent.mkdir(parents=True, exist_ok=True)

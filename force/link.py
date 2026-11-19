@@ -463,9 +463,36 @@ def ssh_only_hosts(paths, cfg, running=None) -> list[dict]:
     return found
 
 
+def hint_hidden_hosts(paths) -> set[str]:
+    """The hosts whose hosts.json entry says "netUpHint": false (SPEC §56.2): no hint for them."""
+    try:
+        return {r.name for r in remote.load(paths) if not r.net_up_hint}
+    except Exception:
+        return set()
+
+
+def set_host_hint(paths, name: str, on: bool) -> bool:
+    """Show (on) or hide the hint for host `name` (its hosts.json `netUpHint`). False when there is no such host."""
+    rs = remote.load(paths)
+    r = next((r for r in rs if r.name == name), None)
+    if r is None:
+        return False
+    if r.net_up_hint != on:
+        r.net_up_hint = on
+        remote.save(paths, rs)
+    return True
+
+
 def link_hints(paths, cfg, running=None) -> list[dict]:
-    """The snapshot's `link_hints` (SPEC §56.2): ssh_only_hosts while netUpHint is on."""
-    return ssh_only_hosts(paths, cfg, running) if cfg.net_up_hint else []
+    """The snapshot's `link_hints` (SPEC §56.2): ssh_only_hosts while the setting netUpHint is on, but for the
+    hosts that hide it themselves."""
+    if not cfg.net_up_hint:
+        return []
+    found = ssh_only_hosts(paths, cfg, running)
+    if not found:
+        return []
+    hidden = hint_hidden_hosts(paths)
+    return [h for h in found if h["host"] not in hidden]
 
 
 def link_column(paths, cfg, name: str, running: bool, status: dict | None = None) -> str | None:

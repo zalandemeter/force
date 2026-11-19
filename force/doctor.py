@@ -255,10 +255,13 @@ def _check_link(cockpit) -> list[Problem]:
         out.append(Problem("link-daemon-down", None,
                            "directLink is on but the link daemon is not running: every remote goes over ssh "
                            "(force net status)", False))
-    for h in link.ssh_only_hosts(cockpit.paths, cfg, running=lambda _paths: running):
+    found = link.ssh_only_hosts(cockpit.paths, cfg, running=lambda _paths: running)
+    hidden = link.hint_hidden_hosts(cockpit.paths) if found else set()
+    for h in found:
+        note = f" (hint hidden for {h['host']})" if h["host"] in hidden else ""
         out.append(Problem("link-ssh-only", None,
                            f"{h['host']}: ssh only, its direct link gets no answer (UDP {h['port']} closed there?); "
-                           f"on {h['host']} run: force net up", False, warning=True))
+                           f"on {h['host']} run: force net up{note}", False, warning=True))
     return out
 
 

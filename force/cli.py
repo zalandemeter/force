@@ -2695,9 +2695,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("args", nargs="*")
     sub.add_parser("link-daemon", help="run the direct link's daemon (the force-link service, SPEC §56.2)")
     p = sub.add_parser("net", help="on the host to be reached: open the direct link's UDP port in its firewall (up, "
-                                   "asks sudo), close it (down), or show it (status)")
-    p.add_argument("action", choices=["up", "down", "status", "hint"], metavar="{up,down,status}")
-    p.add_argument("host", nargs="?", help=argparse.SUPPRESS)
+                                   "asks sudo), close it (down), or show it (status); hint HOST [on|off]: the "
+                                   "'ssh only' hint for one remote")
+    p.add_argument("action", choices=["up", "down", "status", "hint"], metavar="{up,down,status,hint}")
+    p.add_argument("host", nargs="?", help="hint: the remote host")
+    p.add_argument("value", nargs="?", choices=["on", "off"], help="hint: show (on) or hide (off) it for HOST")
     p.add_argument("--json", action="store_true", help="status as JSON")
     p.add_argument("--ui", action="store_true", help=argparse.SUPPRESS)
 
@@ -2937,7 +2939,7 @@ def _dispatch(args) -> int:
         return link.link_daemon_command(cockpit.paths, cockpit.cfg)
     if cmd == "net":
         from . import net
-        return net.command(cockpit.paths, cockpit.cfg, args.action, args.host, args.json, args.ui)
+        return net.command(cockpit.paths, cockpit.cfg, args.action, args.host, args.json, args.ui, value=args.value)
     if cmd == "remote":
         return remote_command(cockpit, args.action, args.name, args.ssh, args.no_install)
     if cmd == "host":
