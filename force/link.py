@@ -6,7 +6,8 @@ Files:
   ~/.config/force/link-peers.json    {"peers": [{"id", "name"}]}, 0600: who may connect here
   <state>/link/self.json             {"id", "port", "addrs"}: this host's card, written by the daemon
   <state>/link.sock                  the daemon's local socket
-  <state>/remotes/<name>/link.json   {"id", "addrs", "port"} (pairing, here) + {"state", "reason", "since_ms"} (daemon)
+  <state>/remotes/<name>/link.json   {"id", "addrs", "port"} (pairing, here) + {"state", "reason", "since_ms",
+                                     "fails"} (daemon)
 """
 from __future__ import annotations
 
@@ -268,3 +269,61 @@ def unpair(paths, r, run=None) -> None:
         link_file(paths, r.name).unlink()
     except OSError:
         pass
+
+
+# ------------------------------------------------------------------- what the link does: hint, column --
+HINT_FAILS = 2          # dial timeouts in a row before the `force net up` hint (SPEC §56.2)
+
+
+def _port(v) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 65536 else None
+
+
+def _ssh_only(paths, name: str) -> dict | None:
+    """The file side of the hint for remote `name`: connected, its last hello carried `link`, and its link.json
+    says ssh after HINT_FAILS or more dial timeouts in a row. {"host", "port"} (port: the remote's linkPort from
+    its card, None when unknown), else None."""
+    st = remote.read_status(paths, name)
+    if st.get("state") != "connected" or st.get("link") is not True:
+        return None
+    lj = read_link(paths, name)
+    fails = lj.get("fails")
+    if lj.get("state") != "ssh" or lj.get("reason") != "timeout" or isinstance(fails, bool) \
+            or not isinstance(fails, int) or fails < HINT_FAILS:
+        return None
+    return {"host": name, "port": _port(lj.get("port"))}
+
+
+def ssh_only_hosts(paths, cfg, running=None) -> list[dict]:
+    """The remotes reachable by ssh only because their direct dial gets no answer (SPEC §56.2): every condition
+    of the hint except the netUpHint setting (doctor's `link-ssh-only`). `running(paths)`: whether this machine's
+    link daemon answers (default: its socket), asked only when some remote qualifies."""
+    if not cfg.direct_link:
+        return []
+    try:
+        names = [r.name for r in remote.load(paths) if r.enabled]
+    except Exception:
+        return []
+    found = [h for h in (_ssh_only(paths, n) for n in names) if h is not None]
+    if not found or not (running or daemon_running)(paths):
+        return []
+    for h in found:
+        h["port"] = h["port"] or cfg.link_port
+    return found
+
+
+def link_hints(paths, cfg, running=None) -> list[dict]:
+    """The snapshot's `link_hints` (SPEC §56.2): ssh_only_hosts while netUpHint is on."""
+    return ssh_only_hosts(paths, cfg, running) if cfg.net_up_hint else []
+
+
+def link_column(paths, cfg, name: str, running: bool, status: dict | None = None) -> str | None:
+    """A remote's link as shown (`force host list`, the host picker, the API): "direct" | "ssh", or None when
+    directLink is off, this machine's link daemon does not answer (`running`) or the remote's last hello carried
+    no link (no link support there)."""
+    if not cfg.direct_link or not running:
+        return None
+    st = remote.read_status(paths, name) if status is None else status
+    if st.get("link") is not True:
+        return None
+    return "direct" if read_link(paths, name).get("state") == "direct" else "ssh"

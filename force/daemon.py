@@ -340,6 +340,16 @@ class Daemon:
             pass
         return tuple(out)
 
+    def _link_hints(self) -> list | None:
+        """The remotes reachable by ssh only because their direct dial gets no answer, for the sidebar's
+        `force net up` hint (SPEC §56.2). Never takes the tick down."""
+        try:
+            from . import link
+            return link.link_hints(self.paths, self.cfg) or None
+        except Exception as e:
+            _log("link_hints", e)
+            return None
+
     def _step_auto_update(self) -> None:
         """autoUpdate (SPEC §46): once the hourly check found a newer release and no terminal attached to the cockpit
         (host or ui server) has had a key or click for 10 min, install it (`force update --here`, detached, its output
@@ -1245,7 +1255,8 @@ class Daemon:
                                if limits else None),
                         limits=limits,
                         smoke=self._smoke_status(),
-                        update=updates.snapshot_update(self.paths.state, self._remote_versions()))
+                        update=updates.snapshot_update(self.paths.state, self._remote_versions()),
+                        link_hints=self._link_hints())
         write_snapshot(self.paths.snapshot, snap)
         # The header is a pane (`force header`) reading the snapshot; no status-line files any more.
 

@@ -25,6 +25,7 @@ class Problem:
     session: str | None
     detail: str
     fixable: bool
+    warning: bool = False        # worth knowing, not a fault: shown with `!`, not counted in the exit status
 
 
 # --- window info -------------------------------------------------------------
@@ -117,6 +118,8 @@ def check(cockpit, *, systemd: bool = True) -> list[Problem]:
             problems.append(Problem(
                 "remote-offline", None,
                 f"{r.name}: {st_state or 'unknown'}{(' — ' + detail) if detail else ''}", False))
+
+    problems += _check_link(cockpit)
 
     if systemd:
         for unit in ("force.service", "force-tmux.service"):
@@ -238,6 +241,27 @@ def check(cockpit, *, systemd: bool = True) -> list[Problem]:
     return problems
 
 
+def _check_link(cockpit) -> list[Problem]:
+    """The direct link (SPEC §56.2): its daemon runs while directLink is on (where the release has force-link; a
+    development instance runs no link service), and a remote reachable by ssh only because its direct dial gets no
+    answer is a warning with the command that opens the port there, whatever netUpHint says."""
+    from . import config, link, remote
+    cfg = cockpit.cfg
+    if not cfg.direct_link:
+        return []
+    out = []
+    running = link.daemon_running(cockpit.paths)
+    if not running and config.instance() is None and remote.link_bin(cockpit.paths).exists():
+        out.append(Problem("link-daemon-down", None,
+                           "directLink is on but the link daemon is not running: every remote goes over ssh "
+                           "(force net status)", False))
+    for h in link.ssh_only_hosts(cockpit.paths, cfg, running=lambda _paths: running):
+        out.append(Problem("link-ssh-only", None,
+                           f"{h['host']}: ssh only, its direct link gets no answer (UDP {h['port']} closed there?); "
+                           f"on {h['host']} run: force net up", False, warning=True))
+    return out
+
+
 def _check_ui(cockpit) -> list[Problem]:
     """Split mode: every ui session (one per terminal) has its main pane, header and (unless switched off)
     sidebar; a pane that died is respawned by the daemon, a missing one needs `force` again."""
@@ -348,18 +372,19 @@ def run_doctor(cockpit, fix: bool = False, out=print, systemd: bool = True) -> i
     def report(problems: list[Problem]) -> None:
         for prob in problems:
             where = prob.session or "-"
-            out(f"✗ {where} {prob.code}: {prob.detail}")
+            out(f"{'!' if prob.warning else '✗'} {where} {prob.code}: {prob.detail}")
 
     problems = check(cockpit, systemd=systemd)
-    if not problems:
+    faults = [p for p in problems if not p.warning]
+    report(problems)
+    if not faults:
         out("✓ healthy")
         return 0
-    report(problems)
     if not fix:
         return 1
-    for action in repair(cockpit, problems):
+    for action in repair(cockpit, faults):
         out(f"✓ {action}")
-    remaining = check(cockpit, systemd=systemd)
+    remaining = [p for p in check(cockpit, systemd=systemd) if not p.warning]
     if remaining:
         report(remaining)
     return 0 if not remaining else 1

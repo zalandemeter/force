@@ -962,10 +962,14 @@ def remote_command(cockpit: Cockpit, action: str, name: str | None, dest: str | 
             print("no hosts (force host add NAME [SSH])")
         wn = max((len(r.name) for r in rs), default=0)
         ws = max((len(r.ssh) for r in rs), default=0)
+        # the link column (SPEC §56.2): direct / ssh, `-` without link support there or a link daemon here
+        from . import link
+        running = bool(rs) and cockpit.cfg.direct_link and link.daemon_running(cockpit.paths)
         for r in rs:
             st = remote_mod.read_status(cockpit.paths, r.name)
+            via = link.link_column(cockpit.paths, cockpit.cfg, r.name, running, st) or "-"
             print(f"{r.name:{wn}}  {r.ssh:{ws}}  {'on ' if r.enabled else 'off'} {st.get('state', '?'):10} "
-                  f"{st.get('version') or ''} {st.get('detail') or ''}".rstrip())
+                  f"{via:6} {st.get('version') or ''} {st.get('detail') or ''}".rstrip())
         return 0
     if not name or not remote_mod.NAME_RE.match(name):
         print("force: a host needs a name (letters, digits, . _ -)", file=sys.stderr)
@@ -1133,6 +1137,9 @@ def hosts_menu_command(cockpit: Cockpit, client: str, window: str) -> int:
     keys = iter("123456789")
     current = cockpit.ui_tmux.run("display", "-p", "-t", window, "#{@force_host}")
     hosts = [("this machine", "local")] + [(r.name, r.name) for r in remote_mod.load(cockpit.paths) if r.enabled]
+    # a remote reached over the direct link says so (SPEC §56.2)
+    from . import link
+    running = len(hosts) > 1 and cockpit.cfg.direct_link and link.daemon_running(cockpit.paths)
     # the Force menu's look (menus.py): coral icons (Nerd Font in the rich tier, Cascadia Mono's ⌂ and ◫ in the
     # plain one), the current host marked with a coral dot, notes in grey
     icon = lambda ch, plain: (f"#{{?{menus_mod.RICH},#[fg={menus_mod.CORAL}]{ch}#[default]  ,"
@@ -1147,6 +1154,8 @@ def hosts_menu_command(cockpit: Cockpit, client: str, window: str) -> int:
             snap = remote_mod.remote_dir(cockpit.paths, host) / "snapshot.json"
             st = f" ({state})" if state != "connected" else \
                 _attention_note(snap) if _has_sessions(snap) else " (new shell)"
+            if link.link_column(cockpit.paths, cockpit.cfg, host, running) == "direct":
+                st = " · direct" + st
         note = f"#[fg={menus_mod.GREY}]{st}#[default]" if st else ""
         items += [f"{mark}{icon(chr(0xF109), '⌂') if host == 'local' else icon(chr(0xF233), '◫')}{label}{note}", next(keys, ""),
                   f"run-shell -b {shlex.quote(shlex.join([cockpit.cockpit_bin, 'ui-host', host, '--window', window]) + ' >/dev/null 2>&1')}"]
@@ -2050,6 +2059,9 @@ def uninstall_command(cockpit: Cockpit, purge: bool, yes: bool) -> int:
     """`force uninstall [--purge] [--yes]`: stop Force, remove the launcher and PATH blocks and the
     app's files; without --purge keep the registry, snapshots, archive, config and state."""
     data = cockpit.paths.home
+    from . import net
+    if net.net_file(cockpit.paths).exists():            # force net up opened a firewall port (SPEC §56.2)
+        print("force: run force net down first to close the firewall port")
     print("This removes: the force launcher (~/.local/bin/force), the ~/.local/bin PATH blocks, and "
           f"the app in {data}/app (releases, python, opencode).")
     if purge:
@@ -2660,6 +2672,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["trust", "untrust"])
     p.add_argument("args", nargs="*")
     sub.add_parser("link-daemon", help="run the direct link's daemon (the force-link service, SPEC §56.2)")
+    p = sub.add_parser("net", help="on the host to be reached: open the direct link's UDP port in its firewall (up, "
+                                   "asks sudo), close it (down), or show it (status)")
+    p.add_argument("action", choices=["up", "down", "status", "hint"], metavar="{up,down,status}")
+    p.add_argument("host", nargs="?", help=argparse.SUPPRESS)
+    p.add_argument("--json", action="store_true", help="status as JSON")
+    p.add_argument("--ui", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("remote", help="remote hosts (alias of `force host`): add NAME [SSH] | list | remove NAME | upgrade NAME")
     p.add_argument("action", choices=["add", "list", "remove", "upgrade"])
@@ -2895,6 +2913,9 @@ def _dispatch(args) -> int:
     if cmd == "link-daemon":
         from . import link
         return link.link_daemon_command(cockpit.paths, cockpit.cfg)
+    if cmd == "net":
+        from . import net
+        return net.command(cockpit.paths, cockpit.cfg, args.action, args.host, args.json, args.ui)
     if cmd == "remote":
         return remote_command(cockpit, args.action, args.name, args.ssh, args.no_install)
     if cmd == "host":

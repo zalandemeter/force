@@ -10,7 +10,7 @@ Files (local machine):
   ~/.config/force/hosts.json           {"hosts": [{"name":, "ssh":, "enabled":}]}
   <state>/remotes/<name>/snapshot.json the remote's snapshot (as of its last `force watch` line)
   <state>/remotes/<name>/registry.json the remote's registry
-  <state>/remotes/<name>/status.json   {"state": "connected"|"offline"|"version", "detail", "at", "version"}
+  <state>/remotes/<name>/status.json   {"state": "connected"|"offline"|"version", "detail", "at", "version", "link"}
   <state>/ssh/                         ControlMaster sockets
 """
 from __future__ import annotations
@@ -271,9 +271,16 @@ def _write_json(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
-def write_status(paths, name: str, state: str, detail: str = "", version: str | None = None) -> None:
-    _write_json(remote_dir(paths, name) / "status.json",
-                {"state": state, "detail": detail, "at": time.time(), "version": version})
+def write_status(paths, name: str, state: str, detail: str = "", version: str | None = None,
+                 link: bool | None = None) -> None:
+    """`link`: whether the remote's last hello carried a direct-link card (SPEC §56.2); None keeps what the file
+    says (a remote that went offline still has the link support its last hello showed)."""
+    data = {"state": state, "detail": detail, "at": time.time(), "version": version}
+    if link is None:
+        link = read_status(paths, name).get("link")
+    if isinstance(link, bool):
+        data["link"] = link
+    _write_json(remote_dir(paths, name) / "status.json", data)
 
 
 def read_status(paths, name: str) -> dict:
@@ -394,7 +401,8 @@ class Watcher:
                 ok = True
                 self.backoff = 2.0
                 self.hello_host = h.get("host") if isinstance(h.get("host"), str) else None
-                write_status(self.paths, self.r.name, "connected", h.get("host") or "", version)
+                write_status(self.paths, self.r.name, "connected", h.get("host") or "", version,
+                             link=isinstance(h.get("link"), dict))
                 if h.get("link") is not None:
                     threading.Thread(target=self._link_hello, args=(h["link"],), daemon=True).start()
             elif ok and "snapshot" in msg:

@@ -78,6 +78,9 @@ change Force's files, settings, registry or other sessions: changes go through t
 3. **Setting up a host** (`force host add`): first check the connection
    (`ssh -o BatchMode=yes -o ConnectTimeout=8 TARGET true`). If it fails, help with the ssh side first (a key,
    `ssh-copy-id`, a `~/.ssh/config` entry); never ask for or handle passwords, keys or tokens yourself.
+   A host reachable by ssh only (the sidebar's `HOST: ssh only · force net up there`, doctor's `link-ssh-only`):
+   the user runs `force net up` on that host in a terminal (it asks sudo for one firewall command; `force net
+   status` shows what is open); never run it or sudo for them.
 4. **Never ask for credentials.** No passwords, tokens, keys or logins, for GitHub or anything else.
 5. **Before any bug report or feature request** (a security problem: rule 12 instead)**: search for duplicates** (the search tool, or
    `force support search WORDS`). Show the matches. If one is the same problem:
