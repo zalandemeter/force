@@ -83,14 +83,21 @@ def _now_ms() -> int:
 
 
 def _read_fresh_snapshot(cockpit: Cockpit, now_ms: int | None = None) -> state.Snapshot | None:
-    """Snapshot if it exists and is < 5 s old, else None (caller computes live)."""
+    """Snapshot if it exists, is < 5 s old and is newer than the registry, else None (caller computes live). A
+    session created, renamed or archived since the daemon wrote it (`force new` then `force list` at once) is not
+    in it yet (SPEC §8)."""
     snap = state.read_snapshot(cockpit.paths.snapshot)
     if snap is None:
         return None
     now = now_ms if now_ms is not None else _now_ms()
-    if now - snap.generated_ms < 5000:
-        return snap
-    return None
+    if now - snap.generated_ms >= 5000:
+        return None
+    try:
+        if cockpit.paths.registry.stat().st_mtime_ns // 1_000_000 > snap.generated_ms:
+            return None
+    except OSError:
+        pass
+    return snap
 
 
 def _find_agent_pane(cockpit: Cockpit, name: str, panes: list | None = None):
