@@ -209,6 +209,23 @@ fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
+/// A status text (` <text> `, a blank at each end) cut to `room` columns with `…` (SPEC §41, narrow header);
+/// nothing when even a letter and the `…` do not fit.
+fn cut_status(text: &str, room: usize) -> String {
+    if width(text) <= room {
+        return text.to_string();
+    }
+    if room < 4 {
+        return String::new();
+    }
+    let body = model::truncate(text.trim(), room - 2);
+    let body = match body.strip_suffix('…') {
+        Some(b) => format!("{}…", b.trim_end()),
+        None => body,
+    };
+    format!(" {} ", body)
+}
+
 fn truncate_name(name: &str, limit: Option<usize>) -> String {
     match limit {
         None => name.to_string(),
@@ -930,32 +947,18 @@ impl Header {
         x = self.inlay(&mut row1, x, &sb, BUTTON_FG, false, Some(Action::Sidebar), &mut clicks) + 1;
         let left_end = x;
 
-        if !self.valid_snapshot() {
-            let text = if self.shown_host.is_empty() {
-                " daemon not running ".to_string()
-            } else {
-                match &self.host_status {
-                    Some(s) if s.state == "version" => format!(" {}: other Force version · force remote upgrade {} ", self.shown_host, self.shown_host),
-                    _ => format!(" {} offline · reconnecting ", self.shown_host),
-                }
-            };
-            let room = w.saturating_sub(left_end + RIGHT_TRAIL);
-            let shown: String = text.chars().take(room).collect();
-            self.inlay(&mut row1, left_end, &shown, DAEMON_FG, false, None, &mut clicks);
-            let mut rows = [row0, row1];
-            {
-                let [a, b] = &mut rows;
-                self.cascade_blend(&mut [a, b]);
-            }
-            let [row0, row1] = rows;
-            return Layout { row0, row1, clicks };
-        }
-
-        let snap = self.snapshot.as_ref().expect("valid snapshot");
+        // Without a usable snapshot (the daemon is not running, the remote shown is offline, connecting or on
+        // another version) a status text takes the title's place. Quit and controls need neither (SPEC §41,
+        // narrow header): they stay, so the user can still leave, open the Force menu and switch host.
+        let snap = if self.valid_snapshot() { self.snapshot.as_ref() } else { None };
+        let status = match snap {
+            Some(_) => None,
+            None => Some(self.status_text()),
+        };
         // right block, laid out right to left: ×, ?, working count
         let quit = format!(" {}{}", glyphs::state(tier, '×', '\u{F011}'), glyphs::gap(tier));
         let ctrl = format!(" {}{}", glyphs::state(tier, '?', '\u{F11C}'), glyphs::gap(tier));
-        let n = working_count(snap);
+        let n = snap.map_or(0, working_count);
         let working = if n == 0 {
             String::new()
         } else if self.sidebar_shown {
@@ -981,12 +984,16 @@ impl Header {
             rx = self.inlay(&mut row1, rx, text, *fg, false, action.clone(), &mut clicks) + 1;
         }
 
-        // attention items, right-aligned against the right block
+        // attention items, right-aligned against the right block: the other hosts' markers (they need nothing from
+        // the host shown), then this host's sessions
         let mut pills: Vec<Pill> = self.others.iter().map(host_marker).collect();
-        let own_pills = attention_pills(snap, self.display_own());
-        pills.extend(if self.sidebar_shown { count_pills(own_pills) } else { own_pills });
+        if let Some(snap) = snap {
+            let own_pills = attention_pills(snap, self.display_own());
+            pills.extend(if self.sidebar_shown { count_pills(own_pills) } else { own_pills });
+        }
         let pills_end = right_start; // each item already brings its `─` separator
-        let min_title = 12usize;
+        // a status text keeps all its room: the markers are drawn only where the whole of it still fits
+        let min_title = status.as_ref().map_or(12usize, |t| width(t) + 1);
         let avail = pills_end.saturating_sub(left_end + min_title);
         let (limit, kept) = fit_pills(&pills, avail, glyphs::extra(tier));
         let texts: Vec<(String, &Pill)> = pills
@@ -1033,8 +1040,12 @@ impl Header {
             self.inlay(&mut row1, px, &more, MORE_FG, false, None, &mut clicks);
         }
 
-        // the session on screen and its model, in what is left between the sidebar button and the attention items
-        if let Some(own) = self.display_own() {
+        // the session on screen and its model, in what is left between the sidebar button and the attention items;
+        // without a snapshot the status text there instead, cut with `…`
+        if let Some(text) = &status {
+            let room = pills_start.saturating_sub(left_end + 1);
+            self.inlay(&mut row1, left_end, &cut_status(text, room), DAEMON_FG, false, None, &mut clicks);
+        } else if let (Some(own), Some(snap)) = (self.display_own(), snap) {
             let room = pills_start.saturating_sub(left_end + 1);
             let sess = snap.sessions.iter().find(|s| s.name == own);
             let name = format!(" {} ", own);
@@ -1089,6 +1100,18 @@ impl Header {
         }
         let [row0, row1] = rows;
         Layout { row0, row1, clicks }
+    }
+
+    /// The rule's text when there is no usable snapshot: the daemon is not running (this machine), or the remote
+    /// shown is offline / on another Force version (SPEC §40, remote down).
+    fn status_text(&self) -> String {
+        if self.shown_host.is_empty() {
+            return " daemon not running ".to_string();
+        }
+        match &self.host_status {
+            Some(s) if s.state == "version" => format!(" {}: other Force version · force remote upgrade {} ", self.shown_host, self.shown_host),
+            _ => format!(" {} offline · reconnecting ", self.shown_host),
+        }
     }
 
     /// Write `text` into the rule at `x` (on the header colour) and return the column after it; with an action,
@@ -1620,8 +1643,10 @@ mod tests {
         let t = rule_text(&h);
         assert!(t.contains(" daemon not running "), "{:?}", t);
         assert_eq!(layout.row1[find_text(&layout.row1, "daemon")].fg, DAEMON_FG);
-        assert_eq!(layout.clicks.len(), 1, "only the sidebar toggle is clickable when down");
-        assert_eq!(layout.clicks[0].action, Action::Sidebar);
+        // down, the sidebar toggle, the Force menu and quit still work (SPEC §41, narrow header)
+        let mut actions: Vec<Action> = layout.clicks.iter().map(|c| c.action.clone()).collect();
+        actions.sort_by_key(|a| format!("{:?}", a));
+        assert_eq!(actions, [Action::Controls, Action::Quit, Action::Sidebar]);
         let mut s = snap(vec![sess("me", 0, State::Working, true, None, false)]);
         s.generated_ms = NOW - 10_000;
         assert!(rule_text(&header_with(Some(s), Some("me"), 80)).contains("daemon not running"), "stale = down");
@@ -2093,11 +2118,104 @@ mod tests {
                 h.shown_host = host.clone();
                 h.host_status = Some(hosts::HostStatus { state: "version".into(), detail: String::new() });
                 let layout = h.build_layout();
-                // only the sidebar button is clickable when there is no valid snapshot
-                assert!(layout.clicks.iter().all(|c| c.action == Action::Sidebar), "only sidebar click: {:?}", layout.clicks);
+                // the buttons stay as they would with a snapshot (no working count): the status text gives way
+                let idle = header_with_tier(Some(snap(vec![sess("me", 0, State::Idle, true, None, false)])), Some("me"), tier, w);
+                let actions = |l: &Layout| {
+                    let mut v: Vec<Action> = l.clicks.iter().map(|c| c.action.clone()).collect();
+                    v.sort_by_key(|a| format!("{:?}", a));
+                    v
+                };
+                assert_eq!(actions(&layout), actions(&idle.build_layout()), "tier={:?} w={}: the same buttons offline", tier, w);
+                assert!(layout.clicks.iter().all(|c| matches!(c.action, Action::Sidebar | Action::Quit | Action::Controls)));
                 assert_narrow_layout(&layout, &big, pills_start, w, &format!("tier={:?} status", tier));
+                // the status text ends before the right block, with a `─` between, and is cut with `…`
+                let text: String = layout.row1.iter().map(|c| c.ch).collect();
+                let right = layout.clicks.iter().filter(|c| c.action != Action::Sidebar).map(|c| c.start).min();
+                let status_end = layout.row1.iter().rposition(|c| c.fg == DAEMON_FG && c.ch != ' ');
+                if let (Some(r), Some(e)) = (right, status_end) {
+                    assert!(e + 2 < r, "tier={:?} w={}: status over the buttons: {:?}", tier, w, text);
+                }
+                if status_end.is_some() {
+                    assert!(text.contains('…'), "tier={:?} w={}: a cut status ends with …: {:?}", tier, w, text);
+                }
             }
         }
+    }
+
+    #[test]
+    fn offline_connecting_version_and_no_daemon_keep_quit_and_controls() {
+        // the remote shown is offline, still connecting (no status yet), on another version; or the local daemon
+        // is not running: the header still offers quit and the Force menu (where Switch host is)
+        let cases: [(&str, Option<&str>, &str); 4] = [
+            ("devbox", Some("offline"), "devbox offline · reconnecting"),
+            ("devbox", None, "devbox offline · reconnecting"),
+            ("devbox", Some("version"), "devbox: other Force version · force remote upgrade devbox"),
+            ("", None, "daemon not running"),
+        ];
+        for tier in [Tier::Plain, Tier::Rich] {
+            for (host, state, want) in cases {
+                let mut h = header_with_tier(None, Some("me"), tier, 120);
+                h.shown_host = host.to_string();
+                h.host_status = state.map(|s| hosts::HostStatus { state: s.into(), detail: String::new() });
+                let layout = h.build_layout();
+                let text: String = layout.row1.iter().map(|c| c.ch).collect();
+                assert!(text.contains(want), "{host}/{state:?}: {text:?}");
+                let at = |a: Action| layout.clicks.iter().find(|c| c.action == a).map(|c| c.start + 1);
+                let (q, c) = (at(Action::Quit).expect("quit"), at(Action::Controls).expect("controls"));
+                assert_eq!(h.hit_test(q), Some(Action::Quit));
+                assert_eq!(h.hit_test(c), Some(Action::Controls));
+                assert!(c < q && q < 120, "controls, then quit at the right end");
+                assert!(!text.contains("working"), "no working count without a snapshot");
+            }
+        }
+    }
+
+    #[test]
+    fn offline_publishes_the_controls_button_for_the_menu_click() {
+        // MouseDown1Pane opens the Force menu from the published cells (SPEC §41, menus by click)
+        let (tmux, log) = FakeTmux::new();
+        let mut h = Header::new(tmux, Box::new(FakeSpawner::default()), PathBuf::from("/nonexistent/snapshot.json"),
+                                PathBuf::from("/share"), Some("%10".into()), GlyphArg::Fixed(Tier::Plain), 100);
+        h.now_ms = NOW;
+        h.own = Some("me".into());
+        h.shown_host = "devbox".into();
+        h.host_status = Some(hosts::HostStatus { state: "offline".into(), detail: String::new() });
+        let ctl = h.build_layout().clicks.iter().find(|c| c.action == Action::Controls).cloned().expect("controls");
+        let _ = h.build_grid();
+        let log = log.lock().unwrap();
+        let m = log.iter().find(|e| e.first().map(|s| s.as_str()) == Some("set-option")).expect("a publish");
+        assert_eq!(m[5], "controls");
+        assert_eq!(m[12], ctl.start.to_string());
+        assert_eq!(m[19], ctl.end.to_string());
+    }
+
+    #[test]
+    fn offline_shows_other_hosts_markers_where_the_status_fits() {
+        let dir = temp_state("offline-markers");
+        write_snapshot(&dir, "snapshot.json", NOW, serde_json::json!([sess_json("x", "NEEDS_YOU")]));
+        write_status(&dir, "devbox", "offline");
+        let (mut h, _) = host_header(dir.join("remotes/devbox/snapshot.json"), None);
+        h.set_hosts(Some(dir.clone()), "devbox", "laptop");
+        h.poll(NOW);
+        let layout = h.build_layout();
+        let text: String = layout.row1.iter().map(|c| c.ch).collect();
+        assert!(text.contains("devbox offline · reconnecting"), "{text:?}");
+        assert!(text.contains("↔ laptop 1 need"), "this machine's marker: {text:?}");
+        assert!(layout.clicks.iter().any(|c| c.action == Action::Host("local".into())), "a click opens this machine");
+        // narrower: the marker gives way before the status text is cut
+        h.on_resize(60);
+        let text: String = h.build_layout().row1.iter().map(|c| c.ch).collect();
+        assert!(text.contains("devbox offline · reconnecting") && !text.contains("laptop"), "{text:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cut_status_keeps_its_blanks_and_ends_with_an_ellipsis() {
+        assert_eq!(cut_status(" devbox offline ", 20), " devbox offline ");
+        assert_eq!(cut_status(" devbox offline ", 10), " devbox… ");
+        assert_eq!(cut_status(" devbox offline ", 4), " d… ");
+        assert_eq!(cut_status(" devbox offline ", 3), "");
+        assert!(width(&cut_status(" devbox offline · reconnecting ", 17)) <= 17);
     }
 
     #[test]
