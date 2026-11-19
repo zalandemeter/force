@@ -146,11 +146,29 @@ TRUST_DECLINED_ACTIVITY = "folder not trusted"
 TRUST_MARKERS = ("yes, i trust this folder", "is this a project you created or one you trust")
 
 
-def pending_restart_activity(state: State) -> str | None:
+def pending_restart_activity(state: State, reason: str | None = None) -> str | None:
     """`restart --all` left this working session to restart once its turn ends: say so in the sidebar,
     or it looks as if the restart never happened (SPEC §7.3). A session that needs you keeps its prompt
-    label (the sidebar shows only that); it restarts once answered and idle."""
-    return "restarts after this turn" if state == State.WORKING else None
+    label (the sidebar shows only that); it restarts once answered and idle. A restart pending only for a Remote
+    Control choice (`pending_restart_reason` remote_control / account, SPEC §53) says so."""
+    if state != State.WORKING:
+        return None
+    if reason in RC_RESTART_REASONS:
+        return "restarts after this turn · Remote Control"
+    return "restarts after this turn"
+
+
+RC_RESTART_REASONS = ("remote_control", "account")
+RESTART_DROPPED_WHY_S = 60.0
+
+
+def read_cmdline(pid: int) -> list[str] | None:
+    """The command line of process `pid` (Linux /proc); None when it cannot be read (no /proc, gone)."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+    except (OSError, ValueError):
+        return None
+    return [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
 
 
 RESTART_NOTE_S = 10.0
@@ -297,6 +315,8 @@ class Daemon:
         st = account_mod.read_state(self.paths.state) if self.paths is not None else None
         self._account_since_ms: int | None = st["since_ms"] if st else None
         self._account_why: dict[str, int] = {}
+        # SPEC §53: restarts dropped because the session already matched its Remote Control choice (name -> (ms, clause))
+        self._restart_dropped: dict[str, tuple[int, str]] = {}
         # current tick state
         self._registry = []
         self._skipping = False
@@ -1005,8 +1025,15 @@ class Daemon:
                 with locked(self.paths.home) as reg:
                     e = reg.get(entry.name)
                     if e is not None:
+                        # the Remote Control session it had at the change: still connected to that one (the old
+                        # account's, until Claude Code notices) is not yet re-registered (SPEC §53)
+                        old_rc = claude_mod.rc_session(self.paths.claude_dir, getattr(pane, "pid", None)) or ""
                         e.extra["pending_restart"] = True
+                        e.extra["pending_restart_reason"] = "account"
+                        e.extra["pending_restart_rc"] = old_rc
                         entry.extra["pending_restart"] = True
+                        entry.extra["pending_restart_reason"] = "account"
+                        entry.extra["pending_restart_rc"] = old_rc
                 later.append(entry.name)
             else:
                 now.append(entry.name)
@@ -1100,6 +1127,25 @@ class Daemon:
                 print(f"force: pending move of {entry.name} failed: {ex}", file=sys.stderr)
             self._pinfo_dirty = True
 
+    def _rc_choice_matches(self, entry, pane) -> str | None:
+        """SPEC §53: "on"/"off" when the running Claude Code process already matches the session's Remote Control
+        choice, else None. On: its status file names a Remote Control session. Off: it names none and the process
+        was started without `--remote-control` (unreadable command line = not matching)."""
+        pid = getattr(pane, "pid", None)
+        current = claude_mod.rc_session(self.paths.claude_dir, pid)
+        connected = current is not None
+        if remote_control(entry):
+            if entry.extra.get("pending_restart_reason") == "account" \
+                    and current == (entry.extra.get("pending_restart_rc") or None):
+                return None         # still the Remote Control session it had at the account change
+            return "on" if connected else None
+        if connected or not pid:
+            return None
+        cmd = read_cmdline(pid)
+        if cmd is None or "--remote-control" in cmd or any(a.startswith("--remote-control=") for a in cmd):
+            return None
+        return "off"
+
     def _step_pending_restart(self) -> None:
         """`force restart --all` marks busy sessions; restart each once it is no longer busy."""
         seen = self._seen
@@ -1112,10 +1158,27 @@ class Daemon:
             st = compute_state(entry, pane_info, status, seen.get(entry.name, Seen()), now_ms, self.cfg)
             if st in (State.WORKING, State.NEEDS_YOU, State.STARTING):
                 continue
+            reason = entry.extra.get("pending_restart_reason")
+            if reason in RC_RESTART_REASONS:
+                word = self._rc_choice_matches(entry, _pane)
+                if word is not None:
+                    with locked(self.paths.home) as reg:
+                        e = reg.get(entry.name)
+                        if e is not None:
+                            e.extra.pop("pending_restart", None)
+                            e.extra.pop("pending_restart_reason", None)
+                            e.extra.pop("pending_restart_rc", None)
+                    entry.extra.pop("pending_restart", None)
+                    entry.extra.pop("pending_restart_reason", None)
+                    entry.extra.pop("pending_restart_rc", None)
+                    self._restart_dropped[entry.name] = (now_ms, f"restart no longer needed: Remote Control already {word}")
+                    continue
             with locked(self.paths.home) as reg:
                 e = reg.get(entry.name)
                 if e is not None:
                     e.extra.pop("pending_restart", None)
+                    e.extra.pop("pending_restart_reason", None)
+                    e.extra.pop("pending_restart_rc", None)
             due.append(entry.name)
         if not due:
             return
@@ -1319,7 +1382,7 @@ class Daemon:
                         clauses.append(f"reported by pid {rep.pid} {ago} s ago: {rep.state}" if rep.pid
                                        else f"reported {ago} s ago: {rep.state}")
             if entry.extra.get("pending_restart"):
-                act = pending_restart_activity(state) or act
+                act = pending_restart_activity(state, entry.extra.get("pending_restart_reason")) or act
             if entry.extra.get("pending_move") and state == State.WORKING:
                 act = "moves after this turn"
             sid = entry.session_id
@@ -1343,6 +1406,9 @@ class Daemon:
                 at = self._account_why.get(name)
                 if at is not None and 0 <= now_ms - at < account_mod.GRACE_MS:
                     clauses.append(self.ACCOUNT_WHY)
+                dropped = self._restart_dropped.get(name)
+                if dropped is not None and 0 <= now_ms - dropped[0] < RESTART_DROPPED_WHY_S * 1000:
+                    clauses.append(dropped[1])
             note = None
             mark = None if is_shell(entry) else self.cockpit.restarted(name)
             if mark is not None:
@@ -1376,6 +1442,9 @@ class Daemon:
             self._rc_seen.pop(n)
         for n in [n for n, at in self._account_why.items() if n not in names or now_ms - at >= account_mod.GRACE_MS]:
             self._account_why.pop(n)
+        for n in [n for n, (at, _c) in self._restart_dropped.items()
+                  if n not in names or now_ms - at >= RESTART_DROPPED_WHY_S * 1000]:
+            self._restart_dropped.pop(n)
         for k in [k for k in self._reply if k not in ids]:
             del self._reply[k]
         for k in [k for k in self._oc_reply if k not in names]:
