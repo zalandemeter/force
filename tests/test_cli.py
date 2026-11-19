@@ -1617,3 +1617,25 @@ def test_client_glyphs_ignores_linux_fonts_on_wsl(monkeypatch):
     monkeypatch.setattr(cli.config, "is_wsl", lambda: True)
     assert cli._client_glyphs("auto") == "auto"
     assert cli._client_glyphs("rich") == "rich"                           # `force settings set icons on` still wins
+
+
+def test_list_right_after_a_change_computes_live(fakes, capsys, monkeypatch):
+    """A fresh snapshot written before the registry changed (`force new`, then `force list` at once) is not used."""
+    cockpit, fake, tmp = fakes
+    old = int(time.time() * 1000) - 1000
+    state.write_snapshot(cockpit.paths.snapshot, Snapshot(old, "2.1.292", []))
+    os.utime(cockpit.paths.registry, None) if cockpit.paths.registry.exists() else cockpit.paths.registry.write_text('{"version": 1, "sessions": []}')
+    called = []
+    monkeypatch.setattr(cli, "_compute_live_snapshot", lambda c: called.append(1) or Snapshot(old, "2.1.292", []))
+    assert cli.list_command(cockpit, False, False) == 0
+    assert called == [1]
+
+
+def test_list_uses_a_snapshot_newer_than_the_registry(fakes, capsys, monkeypatch):
+    cockpit, fake, tmp = fakes
+    if not cockpit.paths.registry.exists():
+        cockpit.paths.registry.write_text('{"version": 1, "sessions": []}')
+    os.utime(cockpit.paths.registry, (time.time() - 10, time.time() - 10))
+    state.write_snapshot(cockpit.paths.snapshot, Snapshot(int(time.time() * 1000), "2.1.292", []))
+    monkeypatch.setattr(cli, "_compute_live_snapshot", lambda c: (_ for _ in ()).throw(AssertionError("computed live")))
+    assert cli.list_command(cockpit, False, False) == 0

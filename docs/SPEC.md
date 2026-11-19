@@ -401,7 +401,7 @@ as before). `tests/test_startup.py` checks which modules a fresh interpreter loa
 | `force unarchive NAME` | §7.5. |
 | `force restart NAME` | §7.3 (works on DOWN sessions: just respawn/create). |
 | `force upgrade [NAME \| --all]` | restart outdated sessions now if not WORKING / NEEDS_YOU; print what was done/skipped. |
-| `force list [--all] [--json]` | table from the snapshot (falls back to registry + live computation if the daemon is not running): index, glyph, name, state, age, version, `↑`. `--all` includes archived. |
+| `force list [--all] [--json]` | table from the snapshot (falls back to registry + live computation if the daemon is not running, the snapshot is 5 s old, or the registry changed after it was written, so a session `force new` just created is listed at once): index, glyph, name, state, age, version, `↑`. `--all` includes archived. |
 | `force switch NAME \| --index N \| --next \| --prev` | `switch-client` of the calling client (`-c $TMUX client` if run from a binding via `run-shell`, which passes `#{client_name}` as `--client`). Index = 1-based position in the sidebar order of non-archived sessions. next/prev wrap around. `--print` (internal, §40): then print the session the client shows |
 | `force forget NAME` | only for archived entries: remove from the registry (archive copy is kept). |
 | `force import [--dry-run] [--pid PID --name NAME]` | migration (§11). |
