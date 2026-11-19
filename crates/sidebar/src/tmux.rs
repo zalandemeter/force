@@ -52,7 +52,8 @@ pub const HOST_TMUX_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// The HOST tmux handle in split (ui) mode: every command runs `<@force_host_tmux words> <args…>`
 /// instead of `tmux -S <socket>`. `@force_host_tmux` is a whitespace-separated argv prefix, e.g.
-/// `tmux -L force` (later `ssh -S /path host tmux -L force`); empty falls back to `tmux -L force`.
+/// `tmux -L force`; for a remote either `force-link exec HOST -- …` (which quotes every word itself, SPEC
+/// §56.1) or, in a dev checkout without force-link, `ssh … HOST …`; empty falls back to `tmux -L force`.
 pub struct HostTmux {
     prefix: Vec<String>,
     timeout: Duration,
@@ -72,8 +73,9 @@ impl HostTmux {
         self
     }
 
-    /// The full argv (prefix + `args`). Through ssh the remote shell re-splits the command line (and a
-    /// `#{…}` word would start a comment there), so the tmux arguments are shell-quoted then.
+    /// The full argv (prefix + `args`). When the prefix goes through plain ssh (a dev checkout without
+    /// force-link) the remote shell re-splits the command line (and a `#{…}` word would start a comment
+    /// there), so the tmux arguments are shell-quoted then; a force-link prefix quotes them itself (SPEC §56.1).
     pub fn full_argv(&self, args: &[String]) -> Vec<String> {
         let mut v = self.prefix.clone();
         v.extend(remote_args(&self.prefix, args));
@@ -81,7 +83,8 @@ impl HostTmux {
     }
 }
 
-/// `args` as they must follow `prefix`: shell-quoted when the prefix goes through ssh (SPEC §40).
+/// `args` as they must follow `prefix`: shell-quoted only when the prefix goes through plain ssh (SPEC §40);
+/// a force-link prefix quotes every word itself, so its args are left as they are (SPEC §56.1).
 pub fn remote_args(prefix: &[String], args: &[String]) -> Vec<String> {
     let via_ssh = prefix
         .first()
@@ -405,6 +408,15 @@ mod tests {
         assert_eq!(argv.last().unwrap(), "'#{client_name}\t#{client_session}'");
         let local = HostTmux::from_option("tmux -L force");
         assert_eq!(local.full_argv(&["-F".to_string(), "#{x}".to_string()]), ["tmux", "-L", "force", "-F", "#{x}"]);
+    }
+
+    #[test]
+    fn force_link_prefix_leaves_args_unquoted() {
+        // force-link quotes every word itself (SPEC §56.1), so the tmux arguments are not shell-quoted here.
+        let h = HostTmux::from_option("force-link exec --state /s --hosts /h devbox -- tmux -L force");
+        let argv = h.full_argv(&["display".into(), "-p".into(), "-c".into(), "c".into(), "#{client_session}".into()]);
+        assert_eq!(argv.last().unwrap(), "#{client_session}");
+        assert_eq!(argv[..8], ["force-link", "exec", "--state", "/s", "--hosts", "/h", "devbox", "--"]);
     }
 
     #[test]

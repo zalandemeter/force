@@ -254,8 +254,8 @@ def _route(cockpit, args, command: str):
 
 
 def _remote_argv(cockpit, r, command: str, name: str, *opts: str) -> list[str]:
-    """The ssh argv that runs `force CMD NAME …` on `r` (SPEC §40)."""
-    return remote_mod.ssh_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, command, name, *opts)
+    """The argv that runs `force CMD NAME …` on `r` (SPEC §40, force-link when its binary ships)."""
+    return remote_mod.link_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, command, name, *opts)
 
 
 def _prompt_cli_opts(args) -> list[str]:

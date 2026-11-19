@@ -168,6 +168,17 @@ def host_tmux_prefix(paths, r: Remote) -> str:
     return " ".join(["ssh", *ssh_opts(paths), r.ssh, remote_tmux(paths, r), "-L", REMOTE_TMUX_SOCKET])
 
 
+def link_tmux_prefix(paths, r: Remote) -> str:
+    """The ui window option @force_host_tmux for a remote, via force-link when the release ships its binary (SPEC
+    §56.1), else `host_tmux_prefix` (a dev checkout without a built binary keeps today's ssh prefix). Same
+    --state/--hosts values as link_argv."""
+    bin_ = link_bin(paths)
+    if bin_.exists() and os.access(bin_, os.X_OK):
+        return " ".join([str(bin_), "exec", "--state", str(paths.state), "--hosts", str(remotes_file(paths)),
+                        r.name, "--", remote_tmux(paths, r), "-L", REMOTE_TMUX_SOCKET])
+    return host_tmux_prefix(paths, r)
+
+
 # --------------------------------------------------------------------------- the host side ------------
 def _release_of(app) -> str | None:
     """The release the `app` link points at, or None while it is missing or being swapped (an upgrade replaces the
@@ -300,7 +311,7 @@ class Watcher:
         if self.alive() or now < self.next_try:
             return
         from . import messages
-        argv = ssh_argv(self.paths, self.r, REMOTE_FORCE, "watch")
+        argv = link_argv(self.paths, self.r, REMOTE_FORCE, "watch")
         try:
             self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, text=True, bufsize=1)

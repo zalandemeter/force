@@ -243,7 +243,7 @@ class CellsTerminal:
         if self.host == short_host():
             return [cockpit.tmux.binary, "-L", cockpit.tmux.socket, "-C", "attach", "-t", "=" + self.name]
         r = self.api.remote(self.host)
-        return remote_mod.ssh_argv(cockpit.paths, r, remote_mod.remote_tmux(cockpit.paths, r), "-L",
+        return remote_mod.link_argv(cockpit.paths, r, remote_mod.remote_tmux(cockpit.paths, r), "-L",
                                    remote_mod.REMOTE_TMUX_SOCKET, "-C", "attach", "-t", "=" + self.name)
 
     def start(self, timeout: float = 15.0) -> None:
