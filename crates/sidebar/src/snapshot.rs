@@ -105,6 +105,31 @@ pub struct Snapshot {
     pub smoke_failed: Option<String>,
     /// a newer Force release is available (SPEC §3): its version, shown in the footer.
     pub update: Option<String>,
+    /// remotes reachable by ssh only because their direct dial gets no answer (SPEC §56.2): the footer's
+    /// `HOST: ssh only · force net up there` lines, one per host.
+    pub link_hints: Vec<LinkHint>,
+}
+
+/// One `link_hints` item (SPEC §56.2): a remote and the UDP port `force net up` opens there.
+#[derive(Clone, PartialEq, Debug)]
+pub struct LinkHint {
+    pub host: String,
+    pub port: u16,
+}
+
+/// The snapshot's `link_hints`: the well-formed items (a host name, a port 1..65535); anything else is skipped.
+pub fn parse_link_hints(v: Option<&Value>) -> Vec<LinkHint> {
+    v.and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|h| {
+            let host = h.get("host")?.as_str()?;
+            let port = h.get("port")?.as_u64().filter(|p| (1..=65535).contains(p))? as u16;
+            let ok = !host.is_empty() && host.len() <= 64
+                && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+            ok.then(|| LinkHint { host: host.to_string(), port })
+        })
+        .collect()
 }
 
 /// Read + parse the snapshot file. Any failure (missing, unreadable, bad JSON, not a dict) -> None.
@@ -158,6 +183,7 @@ pub fn from_value(value: &Value) -> Option<Snapshot> {
             .to_string()
     });
     Some(Snapshot {
+        link_hints: parse_link_hints(obj.get("link_hints")),
         update: obj.get("update").and_then(|v| v.as_str()).map(str::to_string),
         smoke_failed,
         generated_ms,
@@ -428,8 +454,20 @@ mod tests {
     }
 
     #[test]
+    fn link_hints_parse_and_skip_bad_items() {
+        let snap = from_value(&json!({"generated_ms": 1, "link_hints": [
+            {"host": "devbox", "port": 47823}, {"host": "bad host", "port": 1}, {"host": "x", "port": 0},
+            {"host": "y"}, {"port": 5}, "nope", {"host": "pi", "port": 50000}
+        ]})).unwrap();
+        assert_eq!(snap.link_hints, vec![LinkHint { host: "devbox".into(), port: 47823 },
+                                         LinkHint { host: "pi".into(), port: 50000 }]);
+        assert!(from_value(&json!({"generated_ms": 1})).unwrap().link_hints.is_empty());
+        assert!(from_value(&json!({"generated_ms": 1, "link_hints": {"host": "a"}})).unwrap().link_hints.is_empty());
+    }
+
+    #[test]
     fn staleness() {
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: 1, latest_version: None, sessions: vec![], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: 1, latest_version: None, sessions: vec![], usage: None, limits: vec![] };
         assert!(is_stale(&snap, 6001));
         assert!(!is_stale(&snap, 5000));
     }

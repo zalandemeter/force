@@ -1440,7 +1440,7 @@ mod tests {
     }
 
     fn snap(sessions: Vec<Session>) -> Snapshot {
-        Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] }
+        Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] }
     }
 
     /// The text of the rule row (row 1), where every label sits.
