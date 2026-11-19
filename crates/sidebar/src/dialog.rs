@@ -160,6 +160,14 @@ pub trait Runner {
     fn tmux_ok(&self, args: &[String]) -> bool;
 }
 
+/// The commands `force` forwards to the host a ui window shows (cli.py `_FORWARDED`, SPEC §40; a pytest keeps the
+/// two lists the same).
+pub const FORWARDED: &[&str] = &[
+    "new", "rename", "sync-titles", "delete", "archive", "unarchive", "restart", "upgrade", "list", "switch",
+    "remote-control", "forget", "move", "kinds", "dirs", "prompt", "wait", "read", "keys", "report", "status",
+    "explain", "import",
+];
+
 /// Real runner shelling out to the force binary and the tmux CLI on a named socket.
 pub struct RealRunner {
     cockpit_bin: String,
@@ -192,6 +200,24 @@ impl RealRunner {
             }
         }
     }
+    /// `force ARGS`: a command forwarded to a remote reached by force-link (the host prefix `force-link exec … NAME
+    /// -- TMUX -L force`) goes straight through the link, `force-link exec … NAME -- ~/.local/bin/force ARGS` (the argv
+    /// `force` here would forward it with), so no Python starts on this machine for it (SPEC §40); anything else
+    /// runs `<force-bin> ARGS` (which forwards by FORCE_HOST through plain ssh).
+    pub fn cockpit_argv(&self, args: &[String]) -> (String, Vec<String>) {
+        if let (Some(p), Some(cmd)) = (&self.host, args.first()) {
+            if let Some(sep) = p.iter().position(|w| w == "--") {
+                if sep > 0 && FORWARDED.contains(&cmd.as_str()) {
+                    let mut argv: Vec<String> = p[1..=sep].to_vec();
+                    argv.push("~/.local/bin/force".to_string());
+                    argv.extend(args.iter().cloned());
+                    return (p[0].clone(), argv);
+                }
+            }
+        }
+        (self.cockpit_bin.clone(), args.to_vec())
+    }
+
     fn exec(bin: &str, args: &[String]) -> Result<String, String> {
         let out = Command::new(bin)
             .args(args)
@@ -214,7 +240,8 @@ impl RealRunner {
 
 impl Runner for RealRunner {
     fn cockpit(&self, args: &[String]) -> Result<String, String> {
-        Self::exec(&self.cockpit_bin, args)
+        let (bin, argv) = self.cockpit_argv(args);
+        Self::exec(&bin, &argv)
     }
     fn tmux(&self, args: &[String]) -> Result<String, String> {
         let (bin, argv) = self.tmux_argv(args);
@@ -1461,8 +1488,11 @@ impl Dialog {
         let new = self.rename_input.trim().to_string();
         match self.runner.cockpit(&["rename".to_string(), old.clone(), new.clone()]) {
             Err(e) => self.set_status(StatusKind::Error, e),
-            Ok(_) => {
-                if self.runner.tmux_ok(&["has-session".to_string(), format!("={}", old)]) {
+            Ok(out) => {
+                // `renamed OLD to NEW`: done, OLD's session is gone, so the host need not be asked (on a remote a
+                // round trip, SPEC §40); any other answer (it waits for the session to be idle): asked as before
+                let done = out.lines().last().is_some_and(|l| l.starts_with(&format!("renamed {} to ", old)));
+                if !done && self.runner.tmux_ok(&["has-session".to_string(), format!("={}", old)]) {
                     self.set_status(StatusKind::Ok, "renamed — applies when the session is idle");
                     self.exit_after_ms = Some(self.now_ms + 1500);
                 } else {
@@ -2553,6 +2583,22 @@ mod tests {
         assert!(t.is_empty()); // tmux_ok doesn't log to tmux log
     }
 
+    /// Done at once (`renamed OLD to NEW`): closes without asking the host whether OLD still runs (SPEC §40).
+    #[test]
+    fn rename_done_now_asks_nothing_more() {
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let runner = FakeRunner::new();
+        let mut d = Dialog::new(Kind::Rename, Some("old".into()), &reg, &snap, Box::new(runner.clone()), Tier::Plain, 64, 12);
+        d.rename_input = "new".into();
+        d.validate_rename();
+        runner.logs.cockpit_resp.borrow_mut().push_back(Ok("renamed old to new".into()));
+        runner.logs.has.borrow_mut().push_back(true);    // would say "pending" if it were asked
+        d.action_submit_rename();
+        assert!(d.done);
+        assert_eq!(runner.logs.has.borrow().len(), 1, "has-session not asked");
+    }
+
     #[test]
     fn registry_kind_parses_defaults_to_claude() {
         let reg = tmp_file(r#"{"sessions":[
@@ -3201,6 +3247,23 @@ mod layout_tests {
         let r = RealRunner::new("force".into(), "force".into()).with_host_prefix(Some(""));
         let (bin, argv) = r.tmux_argv(&["ls".to_string()]);
         assert_eq!((bin.as_str(), argv), ("tmux", vec!["-L".to_string(), "force".to_string(), "ls".to_string()]));
+    }
+
+    #[test]
+    fn real_runner_forwards_through_force_link() {
+        let link = "/app/share/bin/force-link exec --state /s --hosts /h devbox -- /usr/bin/tmux -L force";
+        let r = RealRunner::new("/bin/force".into(), "force".into()).with_host_prefix(Some(link));
+        let s = |v: &[&str]| v.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(r.cockpit_argv(&s(&["rename", "a", "b"])),
+                   ("/app/share/bin/force-link".to_string(),
+                    s(&["exec", "--state", "/s", "--hosts", "/h", "devbox", "--", "~/.local/bin/force", "rename", "a", "b"])));
+        // this machine's own settings stay here (not forwarded)
+        assert_eq!(r.cockpit_argv(&s(&["settings", "--json"])), ("/bin/force".to_string(), s(&["settings", "--json"])));
+        // plain ssh, or no host: force with FORCE_HOST, as before
+        let ssh = RealRunner::new("/bin/force".into(), "force".into()).with_host_prefix(Some("ssh -S /tmp/c h tmux -L force"));
+        assert_eq!(ssh.cockpit_argv(&s(&["kinds", "--json"])), ("/bin/force".to_string(), s(&["kinds", "--json"])));
+        let here = RealRunner::new("/bin/force".into(), "force".into());
+        assert_eq!(here.cockpit_argv(&s(&["kinds"])), ("/bin/force".to_string(), s(&["kinds"])));
     }
 
     #[test]

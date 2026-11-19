@@ -214,7 +214,7 @@ def test_uninstall_launchd_boots_out_and_removes(tmp_path, monkeypatch):
     fr.handle(lambda a, k: R(0) if a[:2] == ["launchctl", "print"] else None)
     services.uninstall(run=fr)
     bootouts = [c for c in fr.calls if c[1] == "bootout"]
-    assert len(bootouts) == 3
+    assert len(bootouts) == 4                                   # with the link agent (SPEC §56.2)
     assert all(c[2].rsplit("/", 1)[-1] in services.LAUNCHD_LABELS.values() for c in bootouts)
     assert not list(agents.glob("cc.useforce.*.plist")), "plists removed"
 
@@ -246,3 +246,165 @@ def test_is_active_launchd_state_running(monkeypatch):
             if a[:2] == ["launchctl", "print"] and a[2].endswith("/cc.useforce.force") else None)
     fr2.handle(lambda a, k: R(0) if a[:2] == ["launchctl", "print"] else None)
     assert services.is_active("daemon", run=fr2) is False
+
+
+# --- direct link (SPEC §56.2) -----------------------------------------------------------------
+def test_link_plist_fields(tmp_path):
+    home = tmp_path / "home"
+    plist = plistlib.loads(services.link_plist(home))
+    assert plist["Label"] == "cc.useforce.force-link"
+    assert plist["ProgramArguments"] == ["/bin/sh", "-c", services.LINK_AGENT_SH]
+    assert plist["KeepAlive"] == {"SuccessfulExit": False}
+    assert plist["RunAtLoad"] is True
+    assert plist["ThrottleInterval"] == 3
+    log = f"{home}/.local/state/force/link.log"
+    assert plist["StandardOutPath"] == log and plist["StandardErrorPath"] == log
+
+
+def test_install_launchd_link_true_writes_and_bootstraps(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    fr, agents, data = _install_fake(monkeypatch, home)
+    services.install(Path(tmp_path), home, fr, True, "whoami", link=True)
+    assert (agents / "cc.useforce.force-link.plist").read_bytes() == services.link_plist(home)
+    assert "cc.useforce.force-link" in _ops(fr, "bootstrap")
+    assert "cc.useforce.force-link" in fr.loaded
+
+
+def test_install_launchd_link_loaded_unchanged_kickstarted(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    fr, agents, data = _install_fake(monkeypatch, home,
+                                     loaded=("cc.useforce.force-tmux", "cc.useforce.force",
+                                             "cc.useforce.force-link"))
+    (agents / "cc.useforce.force-link.plist").write_bytes(services.link_plist(home))
+    services.install(Path(tmp_path), home, fr, True, "whoami", link=True)
+    assert "cc.useforce.force-link" not in _ops(fr, "bootout")
+    assert ["launchctl", "kickstart", "-k", f"gui/{_UID}/cc.useforce.force-link"] in fr.calls
+
+
+def test_install_launchd_link_false_boots_out_and_removes(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    fr, agents, data = _install_fake(monkeypatch, home,
+                                     loaded=("cc.useforce.force-tmux", "cc.useforce.force",
+                                             "cc.useforce.force-link"))
+    (agents / "cc.useforce.force-link.plist").write_bytes(services.link_plist(home))
+    services.install(Path(tmp_path), home, fr, True, "whoami", link=False)
+    assert "cc.useforce.force-link" in _ops(fr, "bootout")
+    assert not (agents / "cc.useforce.force-link.plist").exists()
+    assert "cc.useforce.force-link" not in fr.loaded
+
+
+# --- apply_link on systemd ----------------------------------------------------------------------
+def test_apply_link_systemd_off_disables(monkeypatch):
+    fr = FakeRun()
+    monkeypatch.setattr(services, "backend", lambda run=None: "systemd")
+    services.apply_link(False, run=fr)
+    assert fr.calls == [["systemctl", "--user", "disable", "--now", "force-link.service"]]
+
+
+def test_apply_link_systemd_on_active_enables_then_restarts(monkeypatch):
+    fr = FakeRun()
+    fr.handle(lambda a, k: R(0, "active") if a[-1] == "--value" else R(0))
+    monkeypatch.setattr(services, "backend", lambda run=None: "systemd")
+    services.apply_link(True, run=fr)
+    assert fr.calls == [["systemctl", "--user", "show", "force-link.service", "-p", "ActiveState", "--value"],
+                       ["systemctl", "--user", "enable", "--now", "force-link.service"],
+                       ["systemctl", "--user", "restart", "force-link.service"]]
+
+
+def test_apply_link_systemd_on_inactive_enables_no_restart(monkeypatch):
+    fr = FakeRun()
+    fr.handle(lambda a, k: R(0, "inactive") if a[-1] == "--value" else R(0))
+    monkeypatch.setattr(services, "backend", lambda run=None: "systemd")
+    services.apply_link(True, run=fr)
+    assert fr.calls == [["systemctl", "--user", "show", "force-link.service", "-p", "ActiveState", "--value"],
+                       ["systemctl", "--user", "enable", "--now", "force-link.service"]]
+
+
+def test_apply_link_systemd_enable_fails_notes_no_restart(monkeypatch, capsys):
+    fr = FakeRun()
+    fr.handle(lambda a, k: R(0, "active") if a[-1] == "--value" else None)
+    fr.handle(lambda a, k: R(1) if a[:3] == ["systemctl", "--user", "enable"] else None)
+    monkeypatch.setattr(services, "backend", lambda run=None: "systemd")
+    services.apply_link(True, run=fr)
+    assert "note" in capsys.readouterr().out
+    # show state -> enable (fails) -> no restart
+    assert fr.calls[0][:3] == ["systemctl", "--user", "show"]
+    assert fr.calls[1] == ["systemctl", "--user", "enable", "--now", "force-link.service"]
+    assert not any(c[1] == "restart" for c in fr.calls[2:])
+
+
+def test_apply_link_backend_none_no_calls(monkeypatch):
+    fr = FakeRun()
+    monkeypatch.setattr(services, "backend", lambda run=None: None)
+    services.apply_link(True, run=fr)
+    services.apply_link(False, run=fr)
+    assert fr.calls == []
+
+
+def test_uninstall_systemd_disables_link_too(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    fr = FakeRun()
+    monkeypatch.setattr(services, "backend", lambda run=None: "systemd")
+    services.uninstall(run=fr)
+    assert fr.calls[0][:4] == ["systemctl", "--user", "disable", "--now"]
+    assert "force-link.service" in fr.calls[0]
+
+
+# --- the link agent's guard: a live release without the direct link stays down (SPEC §51.1) ---------------
+def _agent_home(tmp_path, binary=True, link_py=True):
+    home = tmp_path / "home"
+    app = home / ".local" / "share" / "force" / "app"
+    (app / "share" / "bin").mkdir(parents=True)
+    (app / "force").mkdir(parents=True)
+    if binary:
+        (app / "share" / "bin" / "force-link").write_text("#!/bin/sh\n")
+        (app / "share" / "bin" / "force-link").chmod(0o755)
+    if link_py:
+        (app / "force" / "link.py").write_text("")
+    launcher = home / ".local" / "bin" / "force"
+    launcher.parent.mkdir(parents=True)
+    out = tmp_path / "ran"
+    launcher.write_text(f'#!/bin/sh\necho "$@" > {out}\nexit 7\n')
+    launcher.chmod(0o755)
+    return home, out
+
+
+@pytest.mark.parametrize("binary,link_py", [(False, True), (True, False), (False, False)])
+def test_link_agent_without_the_direct_link_exits_0(tmp_path, binary, link_py):
+    import subprocess
+    home, out = _agent_home(tmp_path, binary, link_py)
+    argv = plistlib.loads(services.link_plist(home))["ProgramArguments"]
+    r = subprocess.run(argv, env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, timeout=10)
+    assert r.returncode == 0 and not out.exists()     # KeepAlive SuccessfulExit false: it stays down
+
+
+def test_link_agent_execs_force_link_daemon(tmp_path):
+    import subprocess
+    home, out = _agent_home(tmp_path)
+    argv = plistlib.loads(services.link_plist(home))["ProgramArguments"]
+    r = subprocess.run(argv, env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, timeout=10)
+    assert r.returncode == 7 and out.read_text().split() == ["link-daemon"]
+
+
+def test_force_link_unit_conditions():
+    text = (Path(__file__).resolve().parent.parent / "systemd" / "force-link.service").read_text()
+    lines = text.splitlines()
+    assert "ConditionPathExists=%h/.local/share/force/app/share/bin/force-link" in lines
+    assert "ConditionPathExists=%h/.local/share/force/app/force/link.py" in lines
+    assert "RestartPreventExitStatus=0 2" in lines
+
+
+# --- install says which manager runs the services (setup starts the link daemon itself without one) --------
+def test_install_returns_the_manager(tmp_path, monkeypatch):
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    none = FakeRun()
+    none.handle(lambda a, k: R(1) if a[2:3] == ["show-environment"] else None)
+    assert services.install(tmp_path, tmp_path / "home", none, False, "u") is None
+    (tmp_path / "systemd").mkdir()
+    fr = FakeRun()
+    fr.handle(lambda a, k: R(0, "Linger=yes") if a[0] == "loginctl" else None)
+    assert services.install(tmp_path, tmp_path / "home", fr, False, "u", link=False) == "systemd"
+    monkeypatch.setattr(services.sys, "platform", "darwin")
+    no_gui = FakeRun()
+    no_gui.handle(lambda a, k: R(1) if a[:2] == ["launchctl", "print"] else None)
+    assert services.install(tmp_path, tmp_path / "home", no_gui, False, "u") is None

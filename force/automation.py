@@ -16,30 +16,13 @@ import time
 
 from . import messages, registry, report
 from . import remote as remote_mod
+from .errors import CmdError, UsageError  # noqa: F401  (raised here; also automation.CmdError for callers)
 from .tmux import TmuxError
 
 # a snapshot older than this (ms) means the daemon is not running (SPEC §43.1)
 FRESH_MS = 10_000
 _POLL = 0.2
 _SEND_LAG = 0.15
-
-
-class CmdError(Exception):
-    """A command failed: (code, message). Printed as `force: MESSAGE` (or an error object with --json)
-    and the process exits 1."""
-
-    def __init__(self, code: str, message: str):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-
-
-class UsageError(Exception):
-    """Bad usage: printed to stderr, process exits 2."""
-
-    def __init__(self, message: str):
-        super().__init__(message)
-        self.message = message
 
 
 # --------------------------------------------------------------------------- #

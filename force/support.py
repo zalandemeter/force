@@ -26,9 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 from pathlib import Path
 
@@ -331,9 +329,12 @@ def _ua() -> str:
     return f"force/{current_version() or 'dev'}"
 
 
-def search(words: str, limit: int = 10, opener=urllib.request.urlopen) -> list[dict]:
+def search(words: str, limit: int = 10, opener=None) -> list[dict]:
     """Open and closed issues of the repo matching `words` (GitHub's public search API, no login: 10
     searches a minute)."""
+    import urllib.error                  # here: `force` builds its parser with this module, without the network
+    import urllib.request
+    opener = opener or urllib.request.urlopen
     q = f"{words} repo:{REPO} is:issue"
     url = f"{API}/search/issues?" + urllib.parse.urlencode({"q": q, "per_page": str(limit)})
     req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": _ua()})
@@ -465,7 +466,10 @@ def slug(text: str, n: int = 40) -> str:
     return s[:n].rstrip("-") or "fix"
 
 
-def issue_title(number: int, opener=urllib.request.urlopen) -> str | None:
+def issue_title(number: int, opener=None) -> str | None:
+    import urllib.error
+    import urllib.request
+    opener = opener or urllib.request.urlopen
     req = urllib.request.Request(f"{API}/repos/{REPO}/issues/{int(number)}",
                                  headers={"Accept": "application/vnd.github+json", "User-Agent": _ua()})
     try:

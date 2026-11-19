@@ -1,15 +1,25 @@
-//! force-link: Force's single entry point to a remote host (SPEC §56.1, part A — over ssh, unchanged
-//! behaviour). `exec` builds exactly what `force/remote.py`'s `ssh_argv` builds and execs it; `version`
-//! prints the program's version. In this part it only ever shells out to ssh.
+//! force-link: Force's single entry point to a remote host (SPEC §56). `exec` asks the local link daemon whether a
+//! direct link to the host is up and proxies the channel over it; otherwise (no daemon, no link, any error) it
+//! builds exactly what `force/remote.py`'s `ssh_argv` builds and execs it (part A). `daemon` is that link daemon,
+//! `status` asks it how each remote is reached, `version` prints the program's version.
 
+mod allow;
+mod client;
+mod daemon;
+mod frame;
 mod hosts;
+mod identity;
 mod json;
 mod quote;
+mod serve;
 
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 
-const USAGE: &str = "usage: force-link exec --state DIR --hosts FILE HOST [--tty] [--print] -- ARGV...\n       force-link version";
+const USAGE: &str = "usage: force-link exec --state DIR --hosts FILE HOST [--tty] [--print] -- ARGV...\n       \
+force-link daemon --state DIR --hosts FILE --peers FILE --port N\n       \
+force-link status --state DIR [--json]\n       \
+force-link version";
 
 struct ExecArgs {
     state: String,
@@ -185,9 +195,57 @@ fn run_exec(args: impl IntoIterator<Item = String>) -> i32 {
         print_argv_json(&argv);
         return 0;
     }
+    // the direct link when the daemon has one up (SPEC §56.2); from here on there is no going back to ssh
+    let header = client::header_for(&p.host, &p.argv, p.tty);
+    if let Some(stream) = client::ask(&p.state, &header) {
+        client::proxy(stream, &p.host, header.tty);
+    }
     let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
     eprintln!("force-link: exec {}: {}", argv[0], err);
     255
+}
+
+/// `force-link status --state DIR [--json]`: how each remote is reached, from the daemon; exit 1 when it is not
+/// running.
+fn run_status(args: impl IntoIterator<Item = String>) -> i32 {
+    let mut state = None;
+    let mut as_json = false;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--state" => state = it.next(),
+            "--json" => as_json = true,
+            _ => {
+                eprintln!("force-link: unexpected argument: {}\n{}", a, USAGE);
+                return 2;
+            }
+        }
+    }
+    let Some(state) = state else {
+        eprintln!("force-link: missing --state\n{}", USAGE);
+        return 2;
+    };
+    let Some(st) = client::status(&state) else {
+        if as_json {
+            println!("{}", serde_json::json!({"running": false, "error": "daemon not running"}));
+        } else {
+            println!("daemon not running");
+        }
+        return 1;
+    };
+    if as_json {
+        println!("{}", st);
+        return 0;
+    }
+    println!("id {}  port {}", st["id"].as_str().unwrap_or("?"), st["port"]);
+    let now = identity::now_ms();
+    for r in st["remotes"].as_array().into_iter().flatten() {
+        let since = r["since_ms"].as_u64().map(|t| format!("{} s", now.saturating_sub(t) / 1000)).unwrap_or_default();
+        let rtt = r["rtt_ms"].as_f64().map(|v| format!("rtt {:.0} ms", v)).unwrap_or_default();
+        println!("{:16} {:7} {:12} {:10} {}", r["name"].as_str().unwrap_or("?"), r["state"].as_str().unwrap_or("?"),
+                 since, rtt, r["reason"].as_str().unwrap_or(""));
+    }
+    0
 }
 
 fn main() {
@@ -199,6 +257,14 @@ fn main() {
             println!("force-link {}", env!("CARGO_PKG_VERSION"));
         }
         Some("exec") => std::process::exit(run_exec(it)),
+        Some("daemon") => match daemon::parse_opts(it) {
+            Ok(o) => std::process::exit(daemon::run(o)),
+            Err(e) => {
+                eprintln!("force-link: {}\n{}", e, USAGE);
+                std::process::exit(2);
+            }
+        },
+        Some("status") => std::process::exit(run_status(it)),
         _ => {
             eprintln!("{}", USAGE);
             std::process::exit(2);

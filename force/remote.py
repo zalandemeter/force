@@ -10,7 +10,7 @@ Files (local machine):
   ~/.config/force/hosts.json           {"hosts": [{"name":, "ssh":, "enabled":}]}
   <state>/remotes/<name>/snapshot.json the remote's snapshot (as of its last `force watch` line)
   <state>/remotes/<name>/registry.json the remote's registry
-  <state>/remotes/<name>/status.json   {"state": "connected"|"offline"|"version", "detail", "at", "version"}
+  <state>/remotes/<name>/status.json   {"state": "connected"|"offline"|"version", "detail", "at", "version", "link"}
   <state>/ssh/                         ControlMaster sockets
 """
 from __future__ import annotations
@@ -39,6 +39,7 @@ class Remote:
     name: str
     ssh: str
     enabled: bool = True
+    net_up_hint: bool = True      # hosts.json "netUpHint": false hides the force net up hint for this host (SPEC §56.2)
 
 
 def remotes_file(paths) -> Path:
@@ -60,17 +61,20 @@ def load(paths) -> list[Remote]:
         for r in data.get("hosts") or []:
             if isinstance(r, dict) and isinstance(r.get("name"), str) and isinstance(r.get("ssh"), str) \
                     and NAME_RE.match(r["name"]):
-                out.append(Remote(r["name"], r["ssh"], bool(r.get("enabled", True))))
+                out.append(Remote(r["name"], r["ssh"], bool(r.get("enabled", True)),
+                                  r.get("netUpHint") is not False))
     return out
 
 
 def save(paths, remotes: list[Remote]) -> None:
-    """Write the hosts file; `enabled` is only stored when False."""
+    """Write the hosts file; `enabled` and `netUpHint` are only stored when False."""
     hosts = []
     for r in remotes:
         host = {"name": r.name, "ssh": r.ssh}
         if not r.enabled:
             host["enabled"] = False
+        if not r.net_up_hint:
+            host["netUpHint"] = False
         hosts.append(host)
     path = remotes_file(paths)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,11 +194,12 @@ def _release_of(app) -> str | None:
 
 
 def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, heartbeat: float = 2.0,
-          out=sys.stdout, inp=sys.stdin) -> int:
+          out=sys.stdout, inp=sys.stdin, link: dict | None = None) -> int:
     """`force watch` (on a host): a hello line, then {"snapshot", "registry"} whenever the snapshot changes
     (and every `heartbeat` seconds: the reader takes a copy older than 5 s for a dead link). Ends when the
     reader goes away. A first stdin line {"peer": NAME} (SPEC §52) marks NAME as a peer that is watching this
-    machine; its queued messages are streamed over this connection as {"prompt": {…}} lines."""
+    machine; its queued messages are streamed over this connection as {"prompt": {…}} lines. `link` is this
+    host's direct-link card ({"id", "port", "addrs"}, SPEC §56.2), in the hello when there is one."""
     from . import messages
     peer: str | None = None
 
@@ -217,8 +222,10 @@ def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, hear
     if inp is not None:
         threading.Thread(target=_hello_peer, daemon=True).start()
     try:
-        out.write(json.dumps({"hello": {"proto": PROTO, "version": release, "host": socket.gethostname(),
-                                        "ui": ui_mode}}) + "\n")
+        hello = {"proto": PROTO, "version": release, "host": socket.gethostname(), "ui": ui_mode}
+        if link:
+            hello["link"] = link
+        out.write(json.dumps({"hello": hello}) + "\n")
         out.flush()
         last, beat = None, 0.0
         app = paths.home / "app"
@@ -268,9 +275,16 @@ def _write_json(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
-def write_status(paths, name: str, state: str, detail: str = "", version: str | None = None) -> None:
-    _write_json(remote_dir(paths, name) / "status.json",
-                {"state": state, "detail": detail, "at": time.time(), "version": version})
+def write_status(paths, name: str, state: str, detail: str = "", version: str | None = None,
+                 link: bool | None = None) -> None:
+    """`link`: whether the remote's last hello carried a direct-link card (SPEC §56.2); None keeps what the file
+    says (a remote that went offline still has the link support its last hello showed)."""
+    data = {"state": state, "detail": detail, "at": time.time(), "version": version}
+    if link is None:
+        link = read_status(paths, name).get("link")
+    if isinstance(link, bool):
+        data["link"] = link
+    _write_json(remote_dir(paths, name) / "status.json", data)
 
 
 def read_status(paths, name: str) -> dict:
@@ -290,6 +304,7 @@ class Watcher:
         self.next_try = 0.0
         self.backoff = 2.0
         self.hello_host: str | None = None      # the remote's own host name, from its hello
+        self.pairing = threading.Lock()         # one pairing at a time (SPEC §56.2)
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -356,6 +371,19 @@ class Watcher:
                 pass
         threading.Thread(target=_run, daemon=True).start()
 
+    def _link_hello(self, card: object) -> None:
+        """The remote's direct-link card (SPEC §56.2): record its addresses, or pair over plain ssh when this pair
+        is new or the remote's id changed. Off the reader thread: pairing is an ssh round trip."""
+        from . import link
+        if not self.pairing.acquire(blocking=False):
+            return
+        try:
+            link.on_hello(self.paths, self.r, card, config.load_config(self.paths.config_file))
+        except Exception as e:                  # never take the watcher down
+            print(f"force: {self.r.name}: link pairing: {e}", file=sys.stderr)
+        finally:
+            self.pairing.release()
+
     def _read(self, proc: subprocess.Popen, started: float) -> None:
         d = remote_dir(self.paths, self.r.name)
         version = None
@@ -377,7 +405,10 @@ class Watcher:
                 ok = True
                 self.backoff = 2.0
                 self.hello_host = h.get("host") if isinstance(h.get("host"), str) else None
-                write_status(self.paths, self.r.name, "connected", h.get("host") or "", version)
+                write_status(self.paths, self.r.name, "connected", h.get("host") or "", version,
+                             link=isinstance(h.get("link"), dict))
+                if h.get("link") is not None:
+                    threading.Thread(target=self._link_hello, args=(h["link"],), daemon=True).start()
             elif ok and "snapshot" in msg:
                 # stamped with the time it arrived: "stale" then means the link (or the remote's daemon) is
                 # silent, whatever the two clocks say

@@ -77,6 +77,9 @@ def make_release(tmp, version="9.9.9"):
     sidebar = rel / "share" / "bin" / "force-sidebar"
     sidebar.write_text("#!/bin/sh\nsleep 5\n")
     sidebar.chmod(0o755)
+    link_bin = rel / "share" / "bin" / "force-link"          # the direct link's program (SPEC §56.2)
+    link_bin.write_text("#!/bin/sh\nexit 0\n")
+    link_bin.chmod(0o755)
     return rel
 
 
@@ -186,9 +189,11 @@ def test_full_setup_systemd_present(tmp_path, capsys, linux_services):
     for name in ("force.service", "force-tmux.service", "force-smoke.timer"):
         assert (home / ".config" / "systemd" / "user" / name).is_file()
 
-    # systemctl calls: enable --now exactly the two units; restart only force.service
+    # systemctl calls: enable --now exactly the two units, then the link service (directLink is on by default,
+    # SPEC §56.2); restart only force.service (the link service was not running)
     enable = [c[0] for c in fr.calls if c[0][2:4] == ["enable", "--now"]]
-    assert enable == [["systemctl", "--user", "enable", "--now", "force-tmux.service", "force.service"]]
+    assert enable == [["systemctl", "--user", "enable", "--now", "force-tmux.service", "force.service"],
+                      ["systemctl", "--user", "enable", "--now", "force-link.service"]]
     restarts = [c[0] for c in fr.calls if c[0][2] == "restart"]
     assert [r[3] for r in restarts] == ["force.service"]
     # never any command touching force-tmux except the enable --now
@@ -368,7 +373,8 @@ def test_prune_keeps_five_plus_live(tmp_path):
 
 
 def test_systemd_call_records_exactly(tmp_path, linux_services):
-    """The enable --now is one call with exactly the two units and there is a restart only for force.service."""
+    """The enable --now is one call with exactly the two units (then the link service's own, SPEC §56.2) and there
+    is a restart only for force.service."""
     rel = make_release(tmp_path)
     home, data = make_home(tmp_path)
     env = base_env(tmp_path, home, data)
@@ -376,8 +382,70 @@ def test_systemd_call_records_exactly(tmp_path, linux_services):
     _systemd_present_handlers(fr, active="inactive")
     S.run_setup(str(rel), sys.executable, env=env, run=fr)
     enable = [c[0] for c in fr.calls if c[0][2:4] == ["enable", "--now"]]
-    assert enable == [["systemctl", "--user", "enable", "--now", "force-tmux.service", "force.service"]]
+    assert enable == [["systemctl", "--user", "enable", "--now", "force-tmux.service", "force.service"],
+                      ["systemctl", "--user", "enable", "--now", "force-link.service"]]
     assert not any(c[0][2] == "restart" for c in fr.calls)   # not active -> no restart
+
+
+def test_setup_with_direct_link_off_disables_the_link_service(tmp_path, linux_services):
+    rel = make_release(tmp_path)
+    home, data = make_home(tmp_path)
+    env = base_env(tmp_path, home, data)
+    settings = Path(env.get("FORCE_CONFIG") or home / ".config" / "force" / "settings.json")
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"directLink": false}')
+    fr = FakeRun()
+    _systemd_present_handlers(fr, active="active")
+    S.run_setup(str(rel), sys.executable, env=env, run=fr)
+    link_calls = [c[0][2:] for c in fr.calls if any("force-link" in w for w in c[0])]
+    assert link_calls == [["disable", "--now", "force-link.service"]]
+
+
+def test_setup_restarts_a_running_link_service(tmp_path, linux_services):
+    """A new release's force-link must run: setup restarts the link service when it was running."""
+    rel = make_release(tmp_path)
+    home, data = make_home(tmp_path)
+    env = base_env(tmp_path, home, data)
+    fr = FakeRun()
+    _systemd_present_handlers(fr, active="inactive")
+    fr.handle(lambda a, k: R(0, "active\n") if a[:4] == ["systemctl", "--user", "show", "force-link.service"] else None)
+    S.run_setup(str(rel), sys.executable, env=env, run=fr)
+    restarts = [c[0][3] for c in fr.calls if c[0][2] == "restart"]
+    assert restarts == ["force-link.service"]
+
+
+@pytest.mark.parametrize("missing", ["share/bin/force-link", "force/link.py"])
+def test_setup_of_a_release_without_the_direct_link_stops_the_link_service(tmp_path, linux_services, missing):
+    """An older release (a rollback) or a build without force-link: the link service is stopped and disabled
+    rather than left restarting a program or command that is not there."""
+    rel = make_release(tmp_path)
+    (rel / missing).unlink()
+    home, data = make_home(tmp_path)
+    env = base_env(tmp_path, home, data)
+    fr = FakeRun()
+    _systemd_present_handlers(fr, active="active")
+    fr.handle(lambda a, k: R(0, "active\n") if a[:4] == ["systemctl", "--user", "show", "force-link.service"] else None)
+    S.run_setup(str(rel), sys.executable, env=env, run=fr)
+    link_calls = [c[0][2:] for c in fr.calls if any("force-link" in w for w in c[0])]
+    assert link_calls == [["disable", "--now", "force-link.service"]]
+
+
+def test_setup_without_systemd_restarts_a_link_daemon_force_started(tmp_path, linux_services, monkeypatch):
+    """No service manager (SPEC §46): setup hands the link daemon to force.link (restarted on the new release when
+    Force runs one), with the launcher it wrote; --no-services leaves it alone."""
+    from force import link as link_mod
+    rel = make_release(tmp_path)
+    home, data = make_home(tmp_path)
+    env = base_env(tmp_path, home, data)
+    got = []
+    monkeypatch.setattr(link_mod, "restart_unmanaged",
+                        lambda paths, cfg, launcher, on: got.append((paths.state, launcher, on)) or "restarted")
+    fr = FakeRun()
+    fr.handle(lambda a, k: R(1) if a[:3] == ["systemctl", "--user", "show-environment"] else None)
+    S.run_setup(str(rel), sys.executable, env=env, run=fr)
+    assert got == [(Path(env["FORCE_STATE"]), str(home / ".local" / "bin" / "force"), True)]
+    S.run_setup(str(rel), sys.executable, no_services=True, env=env, run=fr)
+    assert len(got) == 1
 
 
 # --- the one-line bootstrap, end to end -------------------------------------------------------------

@@ -318,6 +318,7 @@ class Snapshot:
     smoke: dict | None = None    # the last `force smoke` result: {"ok", "at"} (SPEC §37)
     update: str | None = None    # a newer Force version available (SPEC §3): set when one was found
     limits: list | None = None   # plan limits per provider: [{"kind", "label", "five_hour", "seven_day"}] (§49.2)
+    link_hints: list | None = None   # remotes reachable by ssh only: [{"host", "port"}] (`force net up`, §56.2)
 
     def counts(self) -> dict[str, int]:
         """Keys needs_you, working, your_turn, idle, stale, down (live sessions only; STARTING/UNKNOWN not counted)."""
@@ -381,6 +382,8 @@ class Snapshot:
         }
         if self.update:
             data["update"] = self.update
+        if self.link_hints:
+            data["link_hints"] = self.link_hints
         return data
 
     @staticmethod
@@ -423,7 +426,18 @@ class Snapshot:
                         limits=[x for x in d.get("limits") or [] if isinstance(x, dict)]
                         if isinstance(d.get("limits"), list) else None,
                         smoke=d.get("smoke") if isinstance(d.get("smoke"), dict) else None,
-                        update=d.get("update") if isinstance(d.get("update"), str) else None)
+                        update=d.get("update") if isinstance(d.get("update"), str) else None,
+                        link_hints=_link_hints(d.get("link_hints")))
+
+
+def _link_hints(v) -> list | None:
+    """The snapshot's `link_hints` (SPEC §56.2): the well-formed {"host", "port"} items, None when there are none."""
+    if not isinstance(v, list):
+        return None
+    out = [{"host": h["host"], "port": h["port"]} for h in v
+           if isinstance(h, dict) and isinstance(h.get("host"), str) and isinstance(h.get("port"), int)
+           and not isinstance(h.get("port"), bool)]
+    return out or None
 
 
 # Per-path (serialised content without generated_ms, clock() time of the last write) so the snapshot

@@ -109,6 +109,9 @@ pub struct App {
     state_dir: Option<PathBuf>,
     host_status: Option<hosts::HostStatus>,
     status_read_ms: f64,
+    /// While a remote is shown: this machine's own `link_hints` (SPEC §56.2), read with the remote's status. The
+    /// hints are about this machine's link to its remotes, so they come from its snapshot whichever host is shown.
+    local_hints: Vec<snapshot::LinkHint>,
     pub tz_offset: i32,
     pub now_ms: i64,
     pub w: usize,
@@ -135,6 +138,12 @@ pub struct App {
     host_tmux_prefix: Option<String>,
     /// `@force_overlay` set: the main pane shows Chuck from this machine over a remote's list (SPEC §50)
     overlay: bool,
+    /// A SIGUSR1 came: whoever sent it published `@force_session` first (ui-key.sh after a switch) or changed
+    /// nothing about it (a resize, a tier), so a remote's shown session is read from there, without a round trip;
+    /// the regular poll asks the host (SPEC §40)
+    usr1_published: bool,
+    /// the host query found another shown session: SIGUSR1 to the header once it is published
+    signal_header: bool,
 
     items: Vec<Item>,
     offset: usize,
@@ -219,6 +228,8 @@ const BRAND_H: usize = m::BRAND_ROWS; // the brand rule is the sessions panel's 
 const RAIL_BRAND_H: usize = 2;
 /// The usage panel is dropped only when it would leave the list fewer rows than this (about two cards).
 const MIN_LIST_ROWS: usize = 8;
+/// At most this many direct-link hint lines in the footer (SPEC §56.2).
+const MAX_HINTS: usize = 3;
 /// Below this many list rows the actions scroll with the cards (pinning would leave no room for them).
 const PIN_MIN_LIST: usize = 7;
 /// The own-card arrival fade is exactly 3 frames ~40 ms apart (blends 1/3, 2/3, 1).
@@ -306,6 +317,7 @@ impl App {
             state_dir,
             host_status: None,
             status_read_ms: f64::NEG_INFINITY,
+            local_hints: Vec::new(),
             tz_offset,
             now_ms: 0,
             w,
@@ -324,6 +336,8 @@ impl App {
             host_tmux: None,
             host_tmux_prefix: None,
             overlay: false,
+            usr1_published: false,
+            signal_header: false,
             items: Vec::new(),
             offset: 0,
             list_h: 0,
@@ -480,6 +494,14 @@ impl App {
                     let new_status = hosts::read_status(sd, &self.remote_host);
                     if new_status != self.host_status {
                         self.host_status = new_status;
+                        changed = true;
+                    }
+                    let hints = snapshot::load(&sd.join("snapshot.json"))
+                        .filter(|s| !snapshot::is_stale(s, now_ms))
+                        .map(|s| s.link_hints)
+                        .unwrap_or_default();
+                    if hints != self.local_hints {
+                        self.local_hints = hints;
                         changed = true;
                     }
                 }
@@ -640,8 +662,24 @@ impl App {
                 .as_ref()
                 .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_overlay}"))
                 .map_or(false, |s| !s.is_empty());
+            let published = std::mem::take(&mut self.usr1_published) && !self.remote_host.is_empty() && !self.overlay;
             if let (Some(h), Some(nest)) = (&self.host_tmux, &self.nested) {
-                if let Some(c) = tmux::clients(h.as_ref()).into_iter().find(|c| &c.name == nest) {
+                let asked = if published {
+                    self.tmux_pane
+                        .as_ref()
+                        .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_session}"))
+                        .filter(|s| !s.is_empty())
+                } else {
+                    None
+                };
+                if let Some(s) = asked {
+                    self.host_own = Some(s);
+                } else if let Some(c) = tmux::clients(h.as_ref()).into_iter().find(|c| &c.name == nest) {
+                    if !self.remote_host.is_empty() && self.host_own.is_some() && self.host_own.as_deref() != Some(c.session.as_str()) {
+                        // the host says another session than we knew: the header follows now, not at its own poll
+                        // (it reads what we publish instead of asking the remote itself)
+                        self.signal_header = true;
+                    }
                     self.host_own = Some(c.session);
                 }
             } else if self.host_own.is_none() {
@@ -673,6 +711,21 @@ impl App {
         if self.host_own != prev {
             self.publish_force_session();
         }
+        if std::mem::take(&mut self.signal_header) {
+            self.signal_headers();
+        }
+    }
+
+    /// SIGUSR1 to this window's header (it re-reads `@force_session`).
+    fn signal_headers(&self) {
+        if let Some(pane) = &self.tmux_pane {
+            for pid in tmux::window_role_pids(self.tmux.as_ref(), pane, "header") {
+                // SAFETY: kill(2) with a pid read from tmux; window_role_pids only returns Force's own programs
+                unsafe {
+                    libc::kill(pid, libc::SIGUSR1);
+                }
+            }
+        }
     }
 
     /// `set-option -w -t <$TMUX_PANE> @force_session <host_own>` on the ui server (the sidebar always
@@ -692,6 +745,7 @@ impl App {
         self.set_now(now_ms);
         self.view_for(2000);
         self.force_own_once = true;
+        self.usr1_published = true;
         self.follow_own = true;
         self.seen_viewed = true;
         // SIGUSR1 also re-reads the auto glyph tier (and redraws if it changed).
@@ -727,14 +781,7 @@ impl App {
             return true;
         }
         self.own_cached_at = Some(std::time::Instant::now());
-        if let Some(pane) = &self.tmux_pane {
-            for pid in tmux::window_role_pids(self.tmux.as_ref(), pane, "header") {
-                // SAFETY: kill(2) with a pid read from tmux; window_role_pids only returns Force's own programs
-                unsafe {
-                    libc::kill(pid, libc::SIGUSR1);
-                }
-            }
-        }
+        self.signal_headers();
         false
     }
 
@@ -1084,6 +1131,18 @@ impl App {
         }
     }
 
+    /// The direct-link hint card (`force net hint --ui HOST`, SPEC §56.2) in a popup, opened by a click on that
+    /// host's hint line. It runs on this machine (`net` is never forwarded to the host shown).
+    fn open_net_hint(&mut self, host: &str) {
+        let client = self.own_client();
+        let env = self.popup_env();
+        let command = format!("{} net hint --ui {}", tmux::shell_quote(&self.cockpit_bin), tmux::shell_quote(host));
+        if let Err(e) = tmux::popup_with(self.tmux.as_ref(), client.as_deref(), &env, 72, 17,
+                                         &tmux::CHUCK_POPUP_STYLE, &command) {
+            self.show_error(format!("net: {}", e));
+        }
+    }
+
     fn popup_env(&self) -> Vec<(String, String)> {
         let mut env: Vec<(String, String)> = Vec::new();
         if self.ui_mode {
@@ -1205,6 +1264,10 @@ impl App {
         use crossterm::event::MouseEventKind as M;
         match kind {
             M::Down(MouseButton::Left) => {
+                if let Some(host) = self.hint_at(col as usize, row as usize) {
+                    self.open_net_hint(&host);
+                    return true;
+                }
                 if self.update_at(col as usize, row as usize) {
                     self.open_update();
                     return true;
@@ -1322,6 +1385,50 @@ impl App {
         self.error.is_none()
             && self.snapshot.as_ref().and_then(|s| s.smoke_failed.as_deref()).is_none()
             && self.snapshot.as_ref().and_then(|s| s.update.as_deref()).is_some()
+    }
+
+    /// This machine's `link_hints` (SPEC §56.2): from its own snapshot (none while it is stale: the footer says the
+    /// daemon is not running), or, while a remote is shown, the copy read with that remote's status.
+    fn link_hints(&self) -> &[snapshot::LinkHint] {
+        if !self.remote_host.is_empty() {
+            return &self.local_hints;
+        }
+        if self.daemon() {
+            return &[];
+        }
+        self.snapshot.as_ref().map(|s| &s.link_hints[..]).unwrap_or(&[])
+    }
+
+    /// The footer's hint lines below the update note (SPEC §56.2): (host, text, cells of the grey lead-in before
+    /// the coral command), `HOST: ssh only · force net up there` cut with `…` to the width, at most MAX_HINTS.
+    /// None in the rail (no footer there).
+    fn hint_lines(&self) -> Vec<(String, String, usize)> {
+        if self.rail() {
+            return Vec::new();
+        }
+        self.link_hints()
+            .iter()
+            .take(MAX_HINTS)
+            .map(|h| {
+                let lead = format!("{}: ssh only · ", h.host);
+                let text = m::truncate(&format!("{lead}force net up there"), self.w);
+                (h.host.clone(), text, lead.chars().count())
+            })
+            .collect()
+    }
+
+    /// The row of the footer note (an error, the self-test, the update note), when there is one; the hint lines
+    /// follow it. The footer block ends right above the dock.
+    fn footer_top(&self) -> Option<usize> {
+        self.h.checked_sub(self.dock_h + self.footer_h)
+    }
+
+    /// Whether the given cell is on a hint line's text: that line's host (its click opens the hint card).
+    fn hint_at(&self, x: usize, y: usize) -> Option<String> {
+        let lines = self.hint_lines();
+        let first = self.footer_top()? + self.footer_note().is_some() as usize;
+        let (host, text, _) = lines.get(y.checked_sub(first)?)?;
+        (x < text.chars().count()).then(|| host.clone())
     }
 
     /// The footer text as drawn: none when the host chip already says it (a remote that is down: the chip
@@ -1684,7 +1791,7 @@ impl App {
         // The bottom dock: a blank row, then a rule with the host set into it like the header's labels (a plain
         // rule without a host), then the limits (a blank row, one row per window, a blank row) or, without
         // them, one blank row. A footer note (an error, the self-test, daemon down) gets its own row above it.
-        self.footer_h = self.footer_note().is_some() as usize;
+        self.footer_h = self.footer_note().is_some() as usize + self.hint_lines().len();
         let (items, total) = self.build_items(c, now_ms);
         // The limits stay (owner: they must always be visible); a list that does not fit scrolls, with the own
         // card kept in view. Only a window so short that the list would get fewer than MIN_LIST_ROWS rows drops
@@ -1871,14 +1978,25 @@ impl App {
                 self.draw_host_chip(&mut grid, y, w);
             }
         }
-        if let Some(text) = self.footer_note() {
-            if let Some(y) = h.checked_sub(1 + self.dock_h) {
+        if let Some(mut y) = self.footer_top() {
+            if let Some(text) = self.footer_note() {
                 let fg = if self.footer_is_update() { m::ACCENT } else { m::C_DOWN };
                 for (x, ch) in text.chars().enumerate() {
                     if x < w {
                         grid.set(y, x, RowCell { ch, fg, bg: m::BG, bold: false });
                     }
                 }
+                y += 1;
+            }
+            // the direct-link hints (SPEC §56.2): the host and "ssh only" in grey, the command in coral
+            for (_, text, lead) in self.hint_lines() {
+                for (x, ch) in text.chars().enumerate() {
+                    if x < w && y < h {
+                        let fg = if x < lead { m::GREY } else { m::ACCENT };
+                        grid.set(y, x, RowCell { ch, fg, bg: m::BG, bold: false });
+                    }
+                }
+                y += 1;
             }
         }
         self.publish_menu_hit();
@@ -1964,7 +2082,7 @@ impl App {
             return false;
         }
         let Some(note) = self.footer_note() else { return false };
-        if Some(y) != self.h.checked_sub(1 + self.dock_h) {
+        if Some(y) != self.footer_top() {
             return false;
         }
         x < note.chars().count()
@@ -2501,7 +2619,7 @@ mod tests {
     #[test]
     fn hit_test_respects_scroll_offset() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![
@@ -2524,7 +2642,7 @@ mod tests {
     #[test]
     fn hit_test_maps_row_to_item() {
         let (tmux, _log) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![
@@ -2560,7 +2678,7 @@ mod tests {
     #[test]
     fn host_label_truncates_and_keeps_its_row_under_notes() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         let mut a = app_with(tmux);
         a.set_now(NOW);
         a.update_from_snapshot(Some(snap), NOW);
@@ -2583,13 +2701,13 @@ mod tests {
         assert_eq!(a.footer_h, 1);
         // a failed self-test likewise
         a.error = None;
-        let snap = Snapshot { update: None, smoke_failed: Some("self-test failed".into()), generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: Some("self-test failed".into()), generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         a.update_from_snapshot(Some(snap), NOW);
         let g = a.build_grid_at(NOW);
         assert!(text(&g, a.h - 4).contains("self-test failed"));
         assert!(text(&g, a.h - 2).starts_with(" ─ @") && text(&g, a.h - 2).contains("a-very"));
         // no host and no limits: no dock, the rows go back to the list
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         a.update_from_snapshot(Some(snap), NOW);
         a.host.clear();
         a.build_grid_at(NOW);
@@ -2601,7 +2719,7 @@ mod tests {
     #[test]
     fn host_chip_remote_offline_version_connected() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         let mut a = app_with(tmux);
         a.set_now(NOW);
         a.update_from_snapshot(Some(snap), NOW);
@@ -2648,7 +2766,7 @@ mod tests {
         let (tmux, _) = FakeTmux::new();
         let mut a = app_with(tmux);
         a.set_now(NOW);
-        let snap = Snapshot { update: Some("2.2.0".into()), smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: Some("2.2.0".into()), smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         a.update_from_snapshot(Some(snap), NOW);
         // shown when there is no error
         assert_eq!(a.footer_text(), Some("↑ Force 2.2.0 · force update".to_string()));
@@ -2672,7 +2790,7 @@ mod tests {
         let mut a = app_with(tmux);
         a.own = Some("own".into());
         a.set_now(NOW);
-        let snap = Snapshot { update: Some("2.2.0".into()), smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: Some("2.2.0".into()), smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         a.update_from_snapshot(Some(snap), NOW);
         let _ = a.build_grid_at(NOW);
         let y = a.h.checked_sub(1 + a.dock_h).unwrap();
@@ -2695,7 +2813,7 @@ mod tests {
         let mut a = app_with(tmux);
         a.own = Some("own".into());
         a.set_now(NOW);
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         a.update_from_snapshot(Some(snap), NOW);
         let _ = a.build_grid_at(NOW);
         let y = a.h.checked_sub(1 + a.dock_h).unwrap();
@@ -2706,6 +2824,109 @@ mod tests {
         assert!(!log.iter().any(|e| e.first().map(|s| s.as_str()) == Some("display-popup")), "no popup");
     }
 
+    fn hint(host: &str) -> crate::snapshot::LinkHint {
+        crate::snapshot::LinkHint { host: host.into(), port: 47823 }
+    }
+
+    /// The direct-link hints (SPEC §56.2): one line per host below the update note, cut with `…` to the width,
+    /// the host and "ssh only" in grey, the command in coral; each line's click target is its host.
+    #[test]
+    fn link_hints_below_the_update_note() {
+        let (tmux, _) = FakeTmux::new();
+        let mut a = app_with(tmux);
+        a.set_now(NOW);
+        let snap = Snapshot { link_hints: vec![hint("devbox"), hint("pi")], update: Some("2.2.0".into()), smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        a.update_from_snapshot(Some(snap), NOW);
+        let g = a.build_grid_at(NOW);
+        let text = |y: usize| g.row(y).iter().map(|c| c.ch).collect::<String>();
+        assert_eq!(a.footer_h, 3, "the update note and two hint lines");
+        let top = a.footer_top().unwrap();
+        assert_eq!(top + 3, a.h - a.dock_h, "the footer ends right above the dock");
+        assert!(text(top).starts_with("↑ Force 2.2.0"), "{:?}", text(top));
+        let line = text(top + 1);
+        assert!(line.starts_with("devbox: ssh only · force n") && line.trim_end().ends_with('…'), "{line:?}");
+        assert_eq!(line.trim_end().chars().count(), a.w, "cut to the width");
+        assert!(text(top + 2).starts_with("pi: ssh only · force net up"), "{:?}", text(top + 2));
+        assert_eq!(g.row(top + 1)[0].fg, m::GREY, "the host in grey");
+        assert_eq!(g.row(top + 1)["devbox: ssh only · ".chars().count()].fg, m::ACCENT, "the command in coral");
+        // click targets: the note opens the update card, each hint line its host's card
+        assert!(a.update_at(0, top) && a.hint_at(0, top).is_none());
+        assert_eq!(a.hint_at(0, top + 1).as_deref(), Some("devbox"));
+        assert_eq!(a.hint_at(3, top + 2).as_deref(), Some("pi"));
+        assert!(!a.update_at(0, top + 1));
+        assert!(a.hint_at(0, top + 3).is_none(), "the dock is not a hint");
+        // without the update note the hints move up into its row
+        let snap = Snapshot { link_hints: vec![hint("devbox")], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        a.update_from_snapshot(Some(snap), NOW);
+        let g = a.build_grid_at(NOW);
+        assert_eq!(a.footer_h, 1);
+        let top = a.footer_top().unwrap();
+        assert!(g.row(top).iter().map(|c| c.ch).collect::<String>().starts_with("devbox: ssh only"));
+        assert_eq!(a.hint_at(0, top).as_deref(), Some("devbox"));
+        // at most three lines
+        let snap = Snapshot { link_hints: vec![hint("a"), hint("b"), hint("c"), hint("d")], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        a.update_from_snapshot(Some(snap), NOW);
+        a.build_grid_at(NOW);
+        assert_eq!(a.footer_h, MAX_HINTS);
+    }
+
+    #[test]
+    fn link_hints_hidden_with_a_stale_snapshot() {
+        let (tmux, _) = FakeTmux::new();
+        let mut a = app_with(tmux);
+        a.set_now(NOW + 60_000);
+        let snap = Snapshot { link_hints: vec![hint("devbox")], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![], usage: None, limits: vec![] };
+        a.update_from_snapshot(Some(snap), NOW + 60_000);
+        a.build_grid_at(NOW + 60_000);
+        assert!(a.hint_lines().is_empty(), "a daemon that stopped writing: no hints, the footer says so");
+        assert_eq!(a.footer_text().as_deref(), Some("daemon not running"));
+    }
+
+    #[test]
+    fn link_hint_click_opens_the_card_in_a_popup() {
+        let (mut tmux, log) = FakeTmux::new();
+        tmux.clients_.push(Client { name: "c0".into(), session: "own".into(), activity: 9 });
+        let mut a = app_with(tmux);
+        a.own = Some("own".into());
+        a.set_now(NOW);
+        let snap = Snapshot { link_hints: vec![hint("devbox")], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        a.update_from_snapshot(Some(snap), NOW);
+        let _ = a.build_grid_at(NOW);
+        let y = a.footer_top().unwrap();
+        assert!(a.on_mouse(crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), 2, y as u16));
+        let log = log.lock().unwrap();
+        let e = log.iter().find(|e| e.first().map(|s| s.as_str()) == Some("display-popup")).expect("a popup");
+        assert_eq!(&e[1..6], &["-E", "-w", "72", "-h", "17"]);
+        for w in crate::tmux::CHUCK_POPUP_STYLE {
+            assert!(e.iter().any(|x| x == w), "styled like the update card: {w}");
+        }
+        assert_eq!(e.last().unwrap(), &format!("{} net hint --ui {}", crate::tmux::shell_quote("/bin/true"),
+                                                 crate::tmux::shell_quote("devbox")));
+    }
+
+    /// A window showing a remote: the hints are this machine's, from its own snapshot in the state dir.
+    #[test]
+    fn link_hints_come_from_this_machine_while_a_remote_is_shown() {
+        let (tmux, _) = FakeTmux::new();
+        let mut a = app_with(tmux);
+        let d = std::env::temp_dir().join(format!("force-sidebar-hints-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("snapshot.json"), format!(
+            r#"{{"generated_ms": {NOW}, "sessions": [], "link_hints": [{{"host": "devbox", "port": 47823}}]}}"#)).unwrap();
+        a.host = "devbox".into();
+        a.set_remote(Some(d.clone()), "devbox");
+        let snap = Snapshot { link_hints: vec![hint("other")], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        a.update_from_snapshot(Some(snap), NOW);
+        a.poll(NOW);
+        let hosts: Vec<String> = a.hint_lines().into_iter().map(|(h, _, _)| h).collect();
+        assert_eq!(hosts, vec!["devbox".to_string()], "the remote's own hints are not this machine's");
+        // this machine's snapshot goes stale: no hints
+        std::fs::write(d.join("snapshot.json"), r#"{"generated_ms": 1, "sessions": [], "link_hints": [{"host": "devbox", "port": 1}]}"#).unwrap();
+        a.poll(NOW + 1500);
+        assert!(a.hint_lines().is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     #[test]
     fn update_popup_passes_the_popup_env_in_ui_mode() {
         let (mut tmux, log) = FakeTmux::new();
@@ -2714,7 +2935,7 @@ mod tests {
         a.own = Some("own".into());
         a.ui_mode = true;
         a.set_now(NOW);
-        let snap = Snapshot { update: Some("2.2.0".into()), smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: Some("2.2.0".into()), smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         a.update_from_snapshot(Some(snap), NOW);
         let _ = a.build_grid_at(NOW);
         let y = a.h.checked_sub(1 + a.dock_h).unwrap();
@@ -2746,7 +2967,7 @@ mod tests {
     #[test]
     fn renders_full_sidebar_cards_and_usage() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![
@@ -2801,7 +3022,7 @@ mod tests {
     #[test]
     fn brand_rows_text_and_colours() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("s0", 0, State::Idle, false, true)],
@@ -2867,7 +3088,7 @@ mod tests {
     #[test]
     fn logo_shine_runs_once_on_arrival_and_not_in_off() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         let mut a = app_with(tmux);
         a.set_now(NOW);
         a.update_from_snapshot(Some(snap), NOW);
@@ -2890,7 +3111,7 @@ mod tests {
     #[test]
     fn card_rows_edge_and_backgrounds() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![
@@ -2937,7 +3158,7 @@ mod tests {
     #[test]
     fn usage_panel_texts_and_thresholds() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("s0", 0, State::Idle, false, true)],
@@ -2985,7 +3206,7 @@ mod tests {
     #[test]
     fn needs_you_attention_pulse_viewed() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("s0", 0, State::NeedsYou, false, true)],
@@ -3012,7 +3233,7 @@ mod tests {
     fn needs_you_no_pulse_when_not_viewed_or_current() {
         // not viewed: viewed=false for the own session
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("own", 0, State::NeedsYou, false, false)],
@@ -3026,7 +3247,7 @@ mod tests {
 
         // current session: pulse skipped
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("own", 0, State::NeedsYou, false, true)],
@@ -3114,6 +3335,47 @@ mod tests {
     }
 
     // --- split (ui) mode: detection, publish, switching, popup env -------------------
+    /// A remote shown (SPEC §40): a SIGUSR1 (ui-key.sh published the shown session first) is answered from
+    /// `@force_session` without a round trip; the regular poll asks the host.
+    #[test]
+    fn remote_sigusr1_reads_the_published_session_without_a_round_trip() {
+        let (mut tmux, _log) = FakeTmux::new();
+        tmux.nested = Some("/dev/pts/42".into());
+        tmux.session = Some("s2".into());                  // @force_session, just published
+        let (mut host, hlog) = FakeTmux::new();
+        host.clients_ = vec![Client { name: "/dev/pts/42".into(), session: "s1".into(), activity: 5 }];
+        let mut a = app_with(tmux);
+        a.tmux_pane = Some("%10".into());
+        a.remote_host = "devbox".into();
+        a.host_tmux = Some(host);
+        a.refresh_ui_mode();
+        assert_eq!(a.host_own.as_deref(), Some("s1"), "a poll asks the host");
+        let asked = |l: &Log| l.lock().unwrap().iter().filter(|e| e.first().map(String::as_str) == Some("list-clients")).count();
+        assert_eq!(asked(&hlog), 1);
+        a.sigusr1(1_000);
+        assert_eq!(a.host_own.as_deref(), Some("s2"), "what the sender published");
+        assert_eq!(asked(&hlog), 1, "no round trip for a SIGUSR1");
+        a.refresh_ui_mode();
+        assert_eq!(asked(&hlog), 2, "the next poll asks the host again");
+        assert_eq!(a.host_own.as_deref(), Some("s1"));
+    }
+
+    /// This machine shown: a SIGUSR1 still asks its tmux (no round trip to save).
+    #[test]
+    fn local_sigusr1_asks_the_host_tmux() {
+        let (mut tmux, _log) = FakeTmux::new();
+        tmux.nested = Some("/dev/pts/42".into());
+        tmux.session = Some("s2".into());
+        let (mut host, hlog) = FakeTmux::new();
+        host.clients_ = vec![Client { name: "/dev/pts/42".into(), session: "s1".into(), activity: 5 }];
+        let mut a = app_with(tmux);
+        a.tmux_pane = Some("%10".into());
+        a.host_tmux = Some(host);
+        a.sigusr1(1_000);
+        assert_eq!(a.host_own.as_deref(), Some("s1"));
+        assert_eq!(hlog.lock().unwrap().iter().filter(|e| e.first().map(String::as_str) == Some("list-clients")).count(), 1);
+    }
+
     #[test]
     fn ui_mode_detected_and_host_own_published_on_change() {
         let (mut tmux, log) = FakeTmux::new();
@@ -3258,7 +3520,7 @@ mod tests {
     fn ui_click_card_is_current_before_the_snapshot_says_viewed() {
         let (mut a, _hlog) = ui_app(false);
         // the daemon still reports the old session as the viewed one
-        a.snapshot = Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, usage: None, limits: vec![],
+        a.snapshot = Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, usage: None, limits: vec![],
             sessions: vec![sess("s0", 0, State::Idle, false, true), sess("s1", 1, State::Idle, false, false)] });
         assert_eq!(a.own_current_alpha(NOW), 1.0);
         a.activate("s1");
@@ -3321,7 +3583,7 @@ mod tests {
         let (mut tmux, log) = FakeTmux::new();
         tmux.session = Some("@N".into()); // `display -p -t <pane> '#{window_id}'` resolves via the fake's default
         tmux.clients_.push(Client { name: "c0".into(), session: "ui-sess".into(), activity: 9 });
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         let mut a = app_with(tmux);
         a.tmux_pane = Some("%10".into());
         a.ui_mode = true;
@@ -3394,7 +3656,7 @@ mod tests {
     fn sidebar_menu_app(classic: bool, error: Option<&str>) -> (App, Log) {
         let (mut tmux, log) = FakeTmux::new();
         tmux.session = Some("@N".into());
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         let mut a = App::new(tmux, PathBuf::from("/nonexistent.json"), "/bin/true".into(), Some("%10".into()), GlyphArg::Fixed(Tier::Plain), 0, 28, 30);
         a.ui_mode = !classic;
         a.own = Some("ui-sess".into());
@@ -3466,7 +3728,7 @@ mod tests {
     fn key_focuses_agent_no_popup_or_spawn() {
         let (mut tmux, log) = FakeTmux::new();
         tmux.agent = Some("pane1".into());
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, false, true)], usage: None, limits: vec![] };
         let mut a = app_with(tmux);
         a.own = Some("s0".into());
         a.set_now(NOW);
@@ -3496,7 +3758,7 @@ mod tests {
             .enumerate()
             .map(|(i, n)| sess(n, i as i32, State::Idle, false, true))
             .collect();
-        Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] }
+        Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] }
     }
 
     fn write_snap_file(names: &[&str]) -> PathBuf {
@@ -3527,7 +3789,7 @@ mod tests {
         a.set_now(NOW);
         let mut s = sess("s0", 0, State::YourTurn, false, true);
         s.order = 0;
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
         a.seen_viewed = true;
         a.finish_flash.insert("s0".into(), FinishFlash { start_ms: NOW as f64 });
 
@@ -3592,7 +3854,7 @@ mod tests {
         s.unread = true;
         s.activity = Some("editing the dialog".into());
         a.set_now(NOW);
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
         a.seen_viewed = true;
         let g = a.build_grid_at(NOW + 800);
         assert_eq!(g.row(BRAND_H + 1)[13].fg, lerp_bg(m::C_UNREAD_TEXT, UNREAD_SHIMMER_FG, 0.8), "blue text, lifted toward light blue");
@@ -3608,7 +3870,7 @@ mod tests {
         s.watching = true;
         s.activity = Some("waiting · watch the deploy".into());
         a.set_now(NOW);
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
         a.seen_viewed = true;
         assert!(!a.any_working(), "nothing turns: no spinner frames for it");
         assert!(a.continuous_running(), "but the glow keeps animating");
@@ -3624,7 +3886,7 @@ mod tests {
             s.order = 0;
             s.activity = Some("editing".into());
             a.set_now(NOW);
-            a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
+            a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
             a.seen_viewed = true;
             a
         };
@@ -3653,7 +3915,7 @@ mod tests {
         s.order = 0;
         s.activity = Some("editing".into());
         a.set_now(NOW);
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
         a.own = Some("s0".into());
         a.set_anims(AnimMode::Off);
         let g = a.build_grid();
@@ -3716,13 +3978,13 @@ mod tests {
         tmux.session = Some("s1".into());
         let mut a = App::new(tmux, PathBuf::from("/nonexistent.json"), "/bin/true".into(), Some("P".into()), GlyphArg::Fixed(Tier::Rich), 0, 28, 40);
         a.set_now(NOW);
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, true, false), sess("s1", 1, State::Idle, false, true)], usage: None, limits: vec![] }), NOW);
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, true, false), sess("s1", 1, State::Idle, false, true)], usage: None, limits: vec![] }), NOW);
         a.seen_viewed = true;
         a.own = Some("s1".into());
         // plain rows for comparison
         let mut p = App::new(FakeTmux::new().0, PathBuf::from("/nonexistent.json"), "/bin/true".into(), Some("P".into()), GlyphArg::Fixed(Tier::Plain), 0, 28, 40);
         p.set_now(NOW);
-        p.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, true, false), sess("s1", 1, State::Idle, false, true)], usage: None, limits: vec![] }), NOW);
+        p.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![sess("s0", 0, State::Idle, true, false), sess("s1", 1, State::Idle, false, true)], usage: None, limits: vec![] }), NOW);
         p.seen_viewed = true;
         p.own = Some("s1".into());
 
@@ -3751,7 +4013,7 @@ mod tests {
         s0.unread = true;
         let s1 = sess("s1", 1, State::Working, false, false);
         a.set_now(NOW);
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s0, s1], usage: None, limits: vec![] }), NOW);
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s0, s1], usage: None, limits: vec![] }), NOW);
         let g = a.build_grid_at(NOW);
         assert_eq!(g.row(BRAND_H)[1].fg, m::C_UNREAD, "unread card edge");
         assert_eq!(g.row(BRAND_H + 1)[1].fg, m::C_UNREAD, "the edge runs down the card");
@@ -3766,7 +4028,7 @@ mod tests {
         let mut s = sess("s0", 0, State::Working, false, false); // NOT viewed
         s.order = 0;
         a.set_now(NOW);
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions: vec![s], usage: None, limits: vec![] }), NOW);
         a.own = Some("s0".into());
         a.seen_viewed = true;
         a.current_fade_start = None; // nothing should highlight a hidden card
@@ -3865,7 +4127,7 @@ mod tests {
         let (tmux, _) = FakeTmux::new();
         let mut a = app_with(tmux);
         a.set_now(NOW);
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None,
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("s0", 0, State::Idle, false, false)], // archived=false, viewed=false
@@ -3876,7 +4138,7 @@ mod tests {
         assert!(!a.viewed(), "s0 not viewed");
         assert_eq!(a.next_frame_ms(), None, "hidden -> no frame deadline");
         // spinner: a viewed working session -> ~100 ms.
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None,
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("s0", 0, State::Working, false, true)],
@@ -3898,7 +4160,7 @@ mod tests {
         let (tmux, _) = FakeTmux::new();
         let mut a = app_with(tmux);
         a.set_now(NOW);
-        a.update_from_snapshot(Some(Snapshot { update: None, smoke_failed: None,
+        a.update_from_snapshot(Some(Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("s0", 0, State::NeedsYou, false, true)],
@@ -3914,7 +4176,7 @@ mod tests {
         // 10 sessions in a 26-row pane: the limits stay visible and the list scrolls to keep the own card.
         let (tmux, _) = FakeTmux::new();
         let sessions: Vec<Session> = (0..10).map(|i| sess(&format!("s{i}"), i, State::Idle, false, true)).collect();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions,
@@ -3950,7 +4212,7 @@ mod tests {
     #[test]
     fn usage_hidden_when_window_too_short() {
         let (tmux, _) = FakeTmux::new();
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("s0", 0, State::Idle, false, true)],
@@ -3980,7 +4242,7 @@ mod tests {
     // --- narrow rail mode (W < 16) --------------------------------------------------
 
     fn rail_snap() -> Snapshot {
-        Snapshot { update: None, smoke_failed: None,
+        Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![
@@ -4110,7 +4372,7 @@ mod tests {
         let mut chuck = sess("chuck", 2, state, false, false);
         chuck.support = true;
         let sessions = vec![sess("s0", 0, State::Idle, false, true), sess("s1", 1, State::Idle, false, true), chuck];
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] };
         let mut a = app_with(tmux);
         a.on_resize(28, 40);
         a.set_now(NOW);
@@ -4163,7 +4425,7 @@ mod tests {
         // a remote's list has no Chuck; @force_overlay says he is in the main pane (SPEC §50)
         let (tmux, _) = FakeTmux::new();
         let sessions = vec![sess("r0", 0, State::Idle, false, true)];
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] };
         let mut a = app_with(tmux);
         a.on_resize(28, 40);
         a.set_now(NOW);
@@ -4194,7 +4456,7 @@ mod tests {
         let sessions: Vec<Session> = (0..n)
             .map(|i| sess(&format!("s{i}"), i, if Some(i) == needs { State::NeedsYou } else { State::Idle }, false, true))
             .collect();
-        let snap = Snapshot { update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] };
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None, generated_ms: NOW, latest_version: None, sessions, usage: None, limits: vec![] };
         let mut a = app_with(tmux);
         a.on_resize(28, h);
         a.set_now(NOW);
@@ -4319,7 +4581,7 @@ mod tests {
         let (tmux, _) = FakeTmux::new();
         let mut odd = sess("odd", 2, State::Idle, false, true);
         odd.model = Some("sonnet 5.5".into());
-        let snap = Snapshot { update: None, smoke_failed: None,
+        let snap = Snapshot { link_hints: vec![], update: None, smoke_failed: None,
             generated_ms: NOW,
             latest_version: None,
             sessions: vec![sess("own", 0, State::Idle, false, true), sess("s1", 1, State::Idle, false, true), odd, sess("sh", 3, State::Shell, false, true)],

@@ -57,7 +57,18 @@ def _remote_snapshot(paths, name: str) -> Snapshot | None:
     return read_snapshot(remote_mod.remote_dir(paths, name) / "snapshot.json")
 
 
-def view_model(paths, now_ms: int | None = None) -> tuple[dict, dict[str, list]]:
+def _link_columns(paths, names: list[str], cfg=None) -> dict[str, str | None]:
+    """Each remote's link (SPEC §56.2): "direct" | "ssh" | None; this machine's link daemon asked once."""
+    from . import config, link
+    try:
+        cfg = cfg if cfg is not None else config.load_config(paths.config_file)
+        running = cfg.direct_link and link.daemon_running(paths)
+        return {n: link.link_column(paths, cfg, n, running) for n in names}
+    except Exception:
+        return {}
+
+
+def view_model(paths, now_ms: int | None = None, cfg=None) -> tuple[dict, dict[str, list]]:
     """(the `state` document, {host: [SessionView]} for notices). This machine's snapshot plus each enabled
     remote's copy (§40); a remote's sessions only while it is connected."""
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
@@ -65,15 +76,15 @@ def view_model(paths, now_ms: int | None = None) -> tuple[dict, dict[str, list]]
     snap = read_snapshot(paths.snapshot)
     fresh = snap is not None and now_ms - snap.generated_ms < STALE_MS
     hosts = [{"name": here, "local": True, "status": "connected" if fresh else "daemon_not_running",
-              "version": updates.current_version()}]
+              "version": updates.current_version(), "link": None}]
     views: dict[str, list] = {here: list(snap.sessions) if fresh else []}
-    for r in remote_mod.load(paths):
-        if not r.enabled:
-            continue
+    enabled = [r for r in remote_mod.load(paths) if r.enabled]
+    link_of = _link_columns(paths, [r.name for r in enabled], cfg) if enabled else {}
+    for r in enabled:
         st = remote_mod.read_status(paths, r.name)
         status = st.get("state") or "unknown"
         hosts.append({"name": r.name, "local": False, "status": status,
-                      "version": updates.base_version(st.get("version"))})
+                      "version": updates.base_version(st.get("version")), "link": link_of.get(r.name)})
         rs = _remote_snapshot(paths, r.name) if status == "connected" else None
         views[r.name] = list(rs.sessions) if rs is not None else []
     sessions = [_session(h, s) for h, vs in views.items() for s in vs]
@@ -733,7 +744,7 @@ class Api:
         trackers: dict[str, notices_mod.Transitions] = {}
         while not self.stop.is_set():
             try:
-                doc, views = view_model(self.cockpit.paths)
+                doc, views = view_model(self.cockpit.paths, cfg=getattr(self.cockpit, "cfg", None))
             except Exception as e:      # pragma: no cover (a half-written file: try again next round)
                 print(f"force api: state: {e}", file=sys.stderr)
                 self.stop.wait(STATE_EVERY)

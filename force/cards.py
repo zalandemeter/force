@@ -114,9 +114,10 @@ def doctor_head(color: bool = True) -> str:
 
 
 def doctor_line(line: str, color: bool = True) -> list[str]:
-    """One line of `force doctor` as card rows: a green ✓ or a red ✗ in the key column, the text wrapped."""
-    mark, rest = (line[:1], line[1:].strip()) if line[:1] in ("✓", "✗") else ("", line.strip())
-    fg = {"✓": "ok", "✗": "bad"}.get(mark)
+    """One line of `force doctor` as card rows: a green ✓, a red ✗ or a coral ! (a warning) in the key column,
+    the text wrapped."""
+    mark, rest = (line[:1], line[1:].strip()) if line[:1] in ("✓", "✗", "!") else ("", line.strip())
+    fg = {"✓": "ok", "✗": "bad", "!": "coral"}.get(mark)
     width = CARD_W - 4
     words, rows, cur = rest.split(), [], ""
     for w in words:

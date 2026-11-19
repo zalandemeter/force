@@ -55,14 +55,23 @@ echo "try-release: installing Force $1 as a new user (the real install.sh)"
 FORCE_RELEASES_URL=file:///dist/releases sh /dist/install.sh --no-fonts || { echo "  FAIL  install.sh"; exit 1; }
 echo "try-release: checks"
 check "force --version is $1" sh -c "force --version | grep -qx \"force $1\""
-# what a new user does first: open the cockpit (without systemd that starts the tmux server and the daemon); a
-# pseudo-terminal for a few seconds, then the client goes and Force keeps running
+L="$HOME/.local/share/force/app/share/bin/force-link"
+check "force-link version"    sh -c "\"$L\" version | grep -q \"^force-link \""
+# what a new user does first: open the cockpit (without systemd that starts the tmux server, the daemon and the
+# direct link daemon); a pseudo-terminal for a few seconds, then the client goes and Force keeps running
 check "the cockpit opens"     sh -c "timeout 8 script -qec force /dev/null >/tmp/cockpit.txt 2>&1; force list >/dev/null"
+# the direct link (SPEC §56.2, directLink on by default): no systemd in the container, so force started it
+check "the link daemon runs (started by force)" sh -c "for i in 1 2 3 4 5 6 7 8 9 10; do
+    \"$L\" status --state \"$HOME/.local/state/force\" --json >/tmp/link.json 2>&1 && grep -Eq \"running.: ?true\" /tmp/link.json && exit 0
+    sleep 1; done; cat /tmp/link.json; cat \"$HOME/.local/state/force/link.log\"; false"
 check "a shell session starts" sh -c "force new try --shell --no-switch >/dev/null"
 check "it is listed"          sh -c "sleep 2; force list >/tmp/list.txt 2>&1; grep -q try /tmp/list.txt || { cat /tmp/list.txt; false; }"
 check "it runs a command"     sh -c "force keys try \"echo hello-from-force\" Enter >/dev/null && sleep 1 && force read try | grep -q hello-from-force"
 check "force doctor"          sh -c "force doctor >/tmp/doctor.txt 2>&1 || { cat /tmp/doctor.txt; false; }"
 check "force uninstall"       sh -c "force uninstall --yes >/dev/null 2>&1 && ! test -e ~/.local/bin/force"
+# (force-lin[k]: the pattern must not match the command line of this check itself)
+check "no force-link left running" sh -c "sleep 1; ! cat /proc/[0-9]*/cmdline 2>/dev/null | tr \"\\000\" \" \" | grep -q \"force-lin[k] daemon\""
+check "the link identity removed" sh -c "! test -e ~/.local/state/force/link"
 exit $ok
 EOF
 chown tester /home/tester/checks.sh

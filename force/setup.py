@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from force import services
-from force.config import WSL_ICONS_HINT, get_paths, is_wsl
+from force.config import WSL_ICONS_HINT, get_paths, is_wsl, load_config
 
 # The one-line prefix used by every message ("force", orange like share/fonts.sh's `say`).
 COLOR = "\033[1;38;2;217;119;87mforce\033[0m"
@@ -223,10 +223,21 @@ def _linger(run, user) -> None:
     services._linger(run, user)
 
 
-def setup_services(rel, home, run, no_services, self_test, user) -> None:
+def setup_services(rel, home, run, no_services, self_test, user, link: bool = False) -> str | None:
+    """The service manager that now runs Force's services ("systemd" / "launchd"), None without one."""
     if no_services:
-        return
-    services.install(rel, home, run, self_test, user)
+        return None
+    return services.install(rel, home, run, self_test, user, link=link)
+
+
+def setup_link_unmanaged(env, launcher, on: bool) -> None:
+    """No service manager (SPEC §46): a link daemon Force started itself is restarted on the new release (stopped
+    with `on` false); one that does not run is started by `force` later, as the tmux server and daemon are."""
+    from force import link as link_mod
+    paths = get_paths(env)
+    cfg = load_config(paths.config_file)
+    if link_mod.restart_unmanaged(paths, cfg, str(launcher), on) == "restarted":
+        say("restarted the direct link daemon")
 
 
 # --- step 7: the icon font on a desktop ------------------------------------------------------
@@ -283,10 +294,16 @@ def run_setup(rel, py, no_fonts=False, no_services=False, self_test=False, env=N
     version = check_release(rel)
     check_tmux(rel, run, env)
     switch_app(data, rel, version)
-    write_launcher(py, data, home)
+    launcher = write_launcher(py, data, home)
     on_path = update_paths(home, env, run)
     user = env.get("USER") or getpass.getuser()
-    setup_services(rel, home, run, no_services, self_test, user)
+    # the direct link's service runs with the directLink setting on, in a release that has it (SPEC §56.2); else
+    # it is stopped and disabled, so a release without force-link never leaves a link service failing
+    from force import link as link_mod
+    link = load_config(get_paths(env).config_file).direct_link and link_mod.release_has_link(rel)
+    manager = setup_services(rel, home, run, no_services, self_test, user, link=link)
+    if manager is None and not no_services:
+        setup_link_unmanaged(env, launcher, link)
     if not no_fonts:
         setup_fonts(rel, env, run)
     check_claude(get_paths(env))

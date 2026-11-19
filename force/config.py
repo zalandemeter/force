@@ -110,6 +110,13 @@ class Config:
     support_model: str = ""
     # hosts whose agents may prompt sessions here (SPEC §52); "" = off
     accept_prompts_from: str = ""
+    # the direct link to remotes (SPEC §56): its daemon runs and listens, remotes are reached directly when they can
+    # be; false = ssh only, nothing listens
+    direct_link: bool = True
+    # the UDP port it listens on (1024..65535)
+    link_port: int = 47823
+    # the sidebar note when a remote is reachable by ssh only (`force net up` there)
+    net_up_hint: bool = True
 
 
 @dataclass(frozen=True)
@@ -117,7 +124,7 @@ class SettingSpec:
     """One user setting: the JSON key in settings.json (camelCase) -> a Config field (snake_case)."""
     key: str            # JSON key
     field: str          # Config field
-    kind: str           # bool | int | number | number0 (>= 0) | choice | icons | layout
+    kind: str           # bool | int | port (1024..65535) | number | number0 (>= 0) | choice | icons | layout
     allowed: tuple      # allowed JSON values for choice/icons/layout (() otherwise)
     public: bool        # shown by `force settings` without --all
     description: str    # one line for the schema
@@ -125,7 +132,7 @@ class SettingSpec:
 
 # kind -> the JSON types (schema) and how a value maps to the Config field.
 # icons: "auto"|"on"|"off" -> glyphs "auto"|"rich"|"plain"; layout: "split"|"classic" -> ui as-is.
-_KIND_TYPE = {"bool": "boolean", "int": "integer", "number": "number", "number0": "number",
+_KIND_TYPE = {"bool": "boolean", "int": "integer", "port": "integer", "number": "number", "number0": "number",
              "string": "string", "choice": "string", "icons": "string", "layout": "string"}
 _ICONS_JSON = {"auto": "auto", "on": "rich", "off": "plain"}
 _ICONS_FIELD = {"auto": "auto", "rich": "on", "plain": "off"}
@@ -167,6 +174,12 @@ SETTINGS = [
                "Chuck's model: Claude Code an alias or id (opus, sonnet), OpenCode provider/model (any provider it knows)"),
     SettingSpec("acceptPromptsFrom", "accept_prompts_from", "string", (), True,
                "hosts whose agents may prompt sessions here (space or comma separated, * = any; empty = off)"),
+    SettingSpec("directLink", "direct_link", "bool", (), True,
+               "reach remotes over a direct link when one works, ssh otherwise; false = ssh only, nothing listens"),
+    SettingSpec("linkPort", "link_port", "port", (), True,
+               "the UDP port the direct link listens on (1024-65535)"),
+    SettingSpec("netUpHint", "net_up_hint", "bool", (), True,
+               "the sidebar note when a remote is reachable by ssh only (force net up there)"),
     SettingSpec("crashRestartMax", "crash_restart_max", "int", (), False,
                "how often a session is restarted after a crash"),
     SettingSpec("crashWindowMinutes", "crash_window_minutes", "number", (), False,
@@ -300,6 +313,9 @@ def _check_json(spec: SettingSpec, value) -> object:
         if value <= 0:
             raise ValueError("must be positive")
         return value
+    if kind == "port":
+        _check_port(value)
+        return value
     if kind in ("number", "number0"):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError("must be a number")
@@ -327,6 +343,16 @@ def _check_json(spec: SettingSpec, value) -> object:
     raise ValueError("unknown kind")
 
 
+PORT_MIN, PORT_MAX = 1024, 65535       # no root needed to bind it
+
+
+def _check_port(value) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("must be an int")
+    if not PORT_MIN <= value <= PORT_MAX:
+        raise ValueError(f"must be a port from {PORT_MIN} to {PORT_MAX}")
+
+
 def _check_field(spec: SettingSpec, value):
     """Check a Config field value under the OLD (TOML) rules (migration): the config.toml used the snake_case
     Config fields, so icons was \"auto\"|\"rich\"|\"plain\" and naive numeric/layout rules applied."""
@@ -334,6 +360,8 @@ def _check_field(spec: SettingSpec, value):
     if kind == "bool":
         if not isinstance(value, bool):
             raise ValueError("must be a bool")
+    elif kind == "port":
+        _check_port(value)
     elif kind == "int":
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("must be an int")
@@ -464,7 +492,7 @@ def parse_value(key: str, text: str):
             value = False
         else:
             raise ValueError(f"settings {key}: expected true/false/on/off/yes/no, got {text!r}")
-    elif spec.kind == "int":
+    elif spec.kind in ("int", "port"):
         try:
             value = int(text)
         except ValueError:
@@ -494,6 +522,8 @@ def schema() -> dict:
                 "description": spec.description}
         if spec.allowed:
             props["enum"] = list(spec.allowed)
+        if spec.kind == "port":
+            props["minimum"], props["maximum"] = PORT_MIN, PORT_MAX
         properties[spec.key] = props
     properties["$schema"] = {"type": "string", "description": "the settings schema (ignored)"}
     return {
@@ -503,6 +533,11 @@ def schema() -> dict:
         "properties": properties,
         "additionalProperties": False,
     }
+
+
+# Force's own OpenCode copy for this process (SPEC §36): set from the settings with the Cockpit (cli._use_opencode),
+# read by force.opencode, which is imported only once an OpenCode session needs it
+opencode_root: "Path | None" = None
 
 
 def ensure_dirs(paths: Paths) -> None:

@@ -18,6 +18,9 @@ your terminal ── tmux client
 force daemon (systemd unit force.service; without systemd started by `force`):
    every second reads tmux + the agents' status files, computes each session's state, writes the snapshot,
    restarts crashed sessions, sends notifications, watches remote hosts (`ssh HOST force watch`)
+force-link daemon (systemd unit force-link.service or launchd agent, with the directLink setting on; without a service
+   manager started by `force` and the daemon): the direct link to the remotes over QUIC (UDP linkPort);
+   `force-link exec HOST` takes it when it is up, ssh otherwise (SPEC §56.2)
 classic layout: no ui server; sidebar and header panes live next to the agent pane on the host server
 ```
 
@@ -26,8 +29,8 @@ classic layout: no ui server; sidebar and header panes live next to the agent pa
 | Path | What |
 |---|---|
 | `~/.local/share/force/` | `registry.json` (the managed sessions), `archive/`, `releases/` + `app` (the live release), `support/` (Chuck) |
-| `~/.local/state/force/` | `snapshot.json` (what the sidebar draws), `seen.json`, `header/`, `daemon.lock`, `daemon.log`, `usage.json`, `remotes/`, `ssh/` |
-| `~/.config/force/` | `settings.json` (only what the user changed), `hosts.json` (remote hosts) |
+| `~/.local/state/force/` | `snapshot.json` (what the sidebar draws), `seen.json`, `header/`, `daemon.lock`, `daemon.log`, `usage.json`, `remotes/` (with each remote's `link.json`), `ssh/`, `link/` (the link key, `self.json`), `link.sock` |
+| `~/.config/force/` | `settings.json` (only what the user changed), `hosts.json` (remote hosts), `link-peers.json` (hosts whose direct link is accepted) |
 | `~/.local/bin/force` | the launcher: runs `<app>/force/cli.py` with Force's Python |
 | `~/.claude/` | Claude Code's own files (sessions/, projects/): read, never written by Force |
 
@@ -48,6 +51,8 @@ sockets `force-dev` / `force-dev-ui` (SPEC §2.1).
 | `tmux.py` | a thin wrapper over the tmux CLI |
 | `config.py` | paths (env overrides, instances) and the settings table |
 | `remote.py` | remote hosts: hosts.json, ssh options, `force watch`, the watchers |
+| `link.py` | the direct link's Python side: pairing over ssh, `force link trust\|untrust`, `force link-daemon`, starting and stopping it without a service manager |
+| `services.py` | the one place that talks to systemd / launchd |
 | `automation.py`, `report.py` | `force prompt`, `wait`, `read`, `keys`, `status`, `explain`, reported states |
 | `doctor.py` | `force doctor [--fix]` |
 | `updates.py`, `setup.py` | `force update` and the hourly check; the install/setup steps (launcher, units, PATH, fonts) |
@@ -62,7 +67,7 @@ sockets `force-dev` / `force-dev-ui` (SPEC §2.1).
 |---|---|---|
 | `crates/sidebar` | `force-sidebar`, `force-header`, `force-dialog` | the sidebar (reads the snapshot; ratatui), the header bar, the popup dialogs (new, rename, move, archive, delete, jump, archived) |
 | `crates/intro` | `force-intro` | the startup intro film |
-| `crates/link` | `force-link` | the host link: ssh to a remote host (SPEC §56.1) |
+| `crates/link` | `force-link` | the host link: `exec` over the direct link (QUIC, iroh) when it is up, else ssh; the link daemon (SPEC §56) |
 
 ## `share/` (shipped with every release)
 

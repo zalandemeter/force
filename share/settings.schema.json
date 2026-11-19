@@ -112,6 +112,23 @@
       "default": "",
       "description": "hosts whose agents may prompt sessions here (space or comma separated, * = any; empty = off)"
     },
+    "directLink": {
+      "type": "boolean",
+      "default": true,
+      "description": "reach remotes over a direct link when one works, ssh otherwise; false = ssh only, nothing listens"
+    },
+    "linkPort": {
+      "type": "integer",
+      "default": 47823,
+      "description": "the UDP port the direct link listens on (1024-65535)",
+      "minimum": 1024,
+      "maximum": 65535
+    },
+    "netUpHint": {
+      "type": "boolean",
+      "default": true,
+      "description": "the sidebar note when a remote is reachable by ssh only (force net up there)"
+    },
     "crashRestartMax": {
       "type": "integer",
       "default": 3,

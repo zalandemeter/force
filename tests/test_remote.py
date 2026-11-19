@@ -75,6 +75,23 @@ def test_remotes_file_roundtrip(env):
     assert remote.load(paths) == []
 
 
+def test_remotes_file_keeps_the_per_host_hint(env):
+    """SPEC §40/§56.2: `netUpHint` per host, written only when false, kept by every rewrite."""
+    paths = env.paths
+    remote.save(paths, [remote.Remote("devbox", "devbox"), remote.Remote("buildbox", "buildbox", True, False)])
+    data = json.loads(remote.remotes_file(paths).read_text())
+    assert data["hosts"] == [{"name": "devbox", "ssh": "devbox"},
+                             {"name": "buildbox", "ssh": "buildbox", "netUpHint": False}]
+    rs = remote.load(paths)
+    assert [(r.name, r.net_up_hint) for r in rs] == [("devbox", True), ("buildbox", False)]
+    remote.save(paths, rs + [remote.Remote("third", "third")])             # a rewrite (host add) keeps it
+    assert [(r.name, r.net_up_hint) for r in remote.load(paths)] == [("devbox", True), ("buildbox", False),
+                                                                      ("third", True)]
+    remote.remotes_file(paths).write_text(json.dumps({"hosts": [{"name": "a", "ssh": "a", "netUpHint": True},
+                                                                {"name": "b", "ssh": "b", "netUpHint": "no"}]}))
+    assert [r.net_up_hint for r in remote.load(paths)] == [True, True], "only false hides it"
+
+
 def test_ssh_argv_quotes_but_keeps_home(env):
     r = remote.Remote("n", "host")
     argv = remote.ssh_argv(env.paths, r, "~/.local/bin/force", "rename", "a b", "c")

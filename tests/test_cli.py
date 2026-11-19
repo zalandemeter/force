@@ -1567,6 +1567,31 @@ def test_uninstall_on_wsl_removes_the_windows_terminal_profile_without_purge(fak
         assert any(a[-1] == "--uninstall" and a[-2].endswith("fonts.sh") for a in calls) == expect, calls
 
 
+@pytest.mark.parametrize("managed", [False, True])
+def test_uninstall_stops_the_link_daemon_and_forgets_this_hosts_link(fakes, monkeypatch, managed):
+    """SPEC §46, §56.2: no link daemon is left running (one Force started itself without a service manager) and
+    <state>/link/ and link.sock go; the peers file, each remote's link.json and the logs stay with the data."""
+    cockpit, fake, tmp = fakes
+    monkeypatch.setenv("HOME", str(tmp))
+    state = cockpit.paths.state
+    (state / "link").mkdir(parents=True)
+    (state / "link" / "key").write_bytes(b"k" * 32)
+    (state / "link.sock").write_text("")
+    (state / "remotes" / "devbox").mkdir(parents=True)
+    (state / "remotes" / "devbox" / "link.json").write_text("{}")
+    stopped = []
+    monkeypatch.setattr(cli, "_services_installed", lambda any_units=False: managed)
+    monkeypatch.setattr(cli.services, "uninstall", lambda run=None: None)
+    monkeypatch.setattr(cli.subprocess, "call", lambda argv, **k: 0)
+    monkeypatch.setattr(cli, "_stop_daemon", lambda c: None)
+    from force import link
+    monkeypatch.setattr(link, "stop_daemon", lambda paths: stopped.append(paths.state) or True)
+    assert cli.uninstall_command(cockpit, False, True) == 0
+    assert stopped == [state]
+    assert not (state / "link").exists() and not (state / "link.sock").exists()
+    assert (state / "remotes" / "devbox" / "link.json").exists()
+
+
 def test_uninstall_keeps_foreign_launcher(fakes, monkeypatch):
     cockpit, fake, tmp = fakes
     monkeypatch.setenv("HOME", str(tmp))

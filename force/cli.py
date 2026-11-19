@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import re
@@ -18,14 +17,29 @@ import types
 import uuid
 from pathlib import Path
 
-from . import automation, claude, config, opencode, procinfo, registry, services, share, state
+from . import claude, config, procinfo, registry, state
 from .config import Config, Paths
+from .errors import CmdError, UsageError
 from . import remote as remote_mod
 from . import menus as menus_mod
 from .lifecycle import Cockpit, MoveError
 from .registry import RegistryError
 from .state import State
 from .tmux import Tmux, TmuxError
+
+# Imported where they are used, not here, so that `force` starts fast (SPEC §8): `cli.opencode`, `cli.services` …
+# still reach them (tests patch them so), through __getattr__ below.
+_LAZY = {"automation": ".automation", "opencode": ".opencode", "services": ".services", "share": ".share",
+         "getpass": "getpass"}
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        import importlib
+        mod = _LAZY[name]
+        return importlib.import_module(mod, __package__) if mod.startswith(".") else importlib.import_module(mod)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 SHARE = Path(__file__).resolve().parent.parent / "share"
 THEME_BG = config.THEME_BG   # the cockpit's dark background, painted by tmux's theme (SPEC §45)
@@ -41,8 +55,18 @@ def make_cockpit(env: dict[str, str] | None = None) -> Cockpit:
     # an instance's launcher (SPEC §2.1) names itself in FORCE_BIN; the live install is `force` on PATH
     cockpit_bin = os.environ.get("FORCE_BIN") or shutil.which("force") or str(Path.home() / ".local/bin/force")
     # OpenCode: Force's own copy when managed (SPEC §36), else the one on PATH
-    opencode.set_managed(paths.home / "opencode" if cfg.opencode_managed else None)
+    _use_opencode(paths.home / "opencode" if cfg.opencode_managed else None)
     return Cockpit(paths, cfg, tmux, cockpit_bin)
+
+
+def _use_opencode(root) -> None:
+    """Which OpenCode this process runs (opencode.set_managed), without importing force.opencode before an OpenCode
+    session needs it: the root waits in config.opencode_root, where the module reads it."""
+    oc = sys.modules.get(__package__ + ".opencode")
+    if oc is not None:
+        oc.set_managed(root)
+    else:
+        config.opencode_root = Path(root) if root else None
 
 
 def _inside_cockpit(cockpit: Cockpit) -> bool:
@@ -306,6 +330,7 @@ def attach_command(cockpit: Cockpit, name: str | None, no_intro: bool = False, g
 def _services_installed(any_units: bool = False) -> bool:
     """The host services are installed and their manager answers (systemd units, or launchd agents on macOS;
     never for a development instance): force/services.installed (SPEC §51)."""
+    from . import services
     return services.installed(any_units=any_units)
 
 
@@ -352,6 +377,16 @@ def _start_daemon(cockpit: Cockpit) -> None:
             pass
 
 
+def _start_link(cockpit: Cockpit) -> None:
+    """Without a service manager, the link daemon too (SPEC §46, §56.2): `force link-daemon` detached, with
+    directLink on, when the release has force-link and none runs (its lock). Never for a development instance
+    (SPEC §2.1): it would want the live install's UDP port."""
+    if config.instance() is not None:
+        return
+    from . import link
+    link.start_daemon(cockpit.paths, cockpit.cfg, _launcher())
+
+
 def _app_dir(cockpit: Cockpit) -> str:
     """The release this cockpit runs (<app>, the parent of share/tmux.conf): tmux's @force_app."""
     return os.path.abspath(Path(cockpit.paths.tmux_conf).parent.parent)
@@ -361,6 +396,7 @@ def _start_host(cockpit: Cockpit) -> bool:
     """This machine's host part (force-tmux + daemon) running; False when its tmux server does not come up.
     With systemd usable it starts the units as today; otherwise it starts the tmux server and the daemon itself
     (SPEC §1)."""
+    from . import services
     if _services_installed():
         if not services.is_active("daemon"):
             services.start("tmux", "daemon")
@@ -374,6 +410,7 @@ def _start_host(cockpit: Cockpit) -> bool:
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if not _daemon_lock_held(cockpit):
             _start_daemon(cockpit)
+        _start_link(cockpit)
     deadline = time.time() + 10
     while not cockpit.tmux.server_running():
         if time.time() > deadline:
@@ -900,9 +937,10 @@ def _remote_shell(cockpit: Cockpit, r) -> str | None:
 
 def watch_command(cockpit: Cockpit) -> int:
     """`force watch` (SPEC §40): this host's snapshot and registry as JSON lines, for a remote ui."""
+    from . import link
     app = cockpit.paths.home / "app"
     release = os.path.basename(os.path.realpath(app)) if app.exists() else None
-    return remote_mod.watch(cockpit.paths, release, cockpit.cfg.ui)
+    return remote_mod.watch(cockpit.paths, release, cockpit.cfg.ui, link=link.hello_link(cockpit.paths, cockpit.cfg))
 
 
 def install_to_command(cockpit: Cockpit, dest: str, yes: bool = True) -> int:
@@ -961,10 +999,14 @@ def remote_command(cockpit: Cockpit, action: str, name: str | None, dest: str | 
             print("no hosts (force host add NAME [SSH])")
         wn = max((len(r.name) for r in rs), default=0)
         ws = max((len(r.ssh) for r in rs), default=0)
+        # the link column (SPEC §56.2): direct / ssh, `-` without link support there or a link daemon here
+        from . import link
+        running = bool(rs) and cockpit.cfg.direct_link and link.daemon_running(cockpit.paths)
         for r in rs:
             st = remote_mod.read_status(cockpit.paths, r.name)
+            via = link.link_column(cockpit.paths, cockpit.cfg, r.name, running, st) or "-"
             print(f"{r.name:{wn}}  {r.ssh:{ws}}  {'on ' if r.enabled else 'off'} {st.get('state', '?'):10} "
-                  f"{st.get('version') or ''} {st.get('detail') or ''}".rstrip())
+                  f"{via:6} {st.get('version') or ''} {st.get('detail') or ''}".rstrip())
         return 0
     if not name or not remote_mod.NAME_RE.match(name):
         print("force: a host needs a name (letters, digits, . _ -)", file=sys.stderr)
@@ -974,6 +1016,8 @@ def remote_command(cockpit: Cockpit, action: str, name: str | None, dest: str | 
         if existing is None:
             print(f"force: no host {name!r}", file=sys.stderr)
             return 1
+        from . import link
+        link.unpair(cockpit.paths, existing)             # the remote stops accepting this host's link (SPEC §56.2)
         remote_mod.save(cockpit.paths, [r for r in rs if r.name != name])
         shutil.rmtree(remote_mod.remote_dir(cockpit.paths, name), ignore_errors=True)
         print(f"removed {name}")
@@ -1130,6 +1174,9 @@ def hosts_menu_command(cockpit: Cockpit, client: str, window: str) -> int:
     keys = iter("123456789")
     current = cockpit.ui_tmux.run("display", "-p", "-t", window, "#{@force_host}")
     hosts = [("this machine", "local")] + [(r.name, r.name) for r in remote_mod.load(cockpit.paths) if r.enabled]
+    # a remote reached over the direct link says so (SPEC §56.2)
+    from . import link
+    running = len(hosts) > 1 and cockpit.cfg.direct_link and link.daemon_running(cockpit.paths)
     # the Force menu's look (menus.py): coral icons (Nerd Font in the rich tier, Cascadia Mono's ⌂ and ◫ in the
     # plain one), the current host marked with a coral dot, notes in grey
     icon = lambda ch, plain: (f"#{{?{menus_mod.RICH},#[fg={menus_mod.CORAL}]{ch}#[default]  ,"
@@ -1144,6 +1191,8 @@ def hosts_menu_command(cockpit: Cockpit, client: str, window: str) -> int:
             snap = remote_mod.remote_dir(cockpit.paths, host) / "snapshot.json"
             st = f" ({state})" if state != "connected" else \
                 _attention_note(snap) if _has_sessions(snap) else " (new shell)"
+            if link.link_column(cockpit.paths, cockpit.cfg, host, running) == "direct":
+                st = " · direct" + st
         note = f"#[fg={menus_mod.GREY}]{st}#[default]" if st else ""
         items += [f"{mark}{icon(chr(0xF109), '⌂') if host == 'local' else icon(chr(0xF233), '◫')}{label}{note}", next(keys, ""),
                   f"run-shell -b {shlex.quote(shlex.join([cockpit.cockpit_bin, 'ui-host', host, '--window', window]) + ' >/dev/null 2>&1')}"]
@@ -1188,6 +1237,24 @@ def _write_ui_mode(cockpit: Cockpit, mode: str) -> None:
     config.save_setting(cockpit.paths.config_file, "layout", mode)
 
 
+LINK_SETTINGS = ("directLink", "linkPort")
+
+
+def _apply_link_setting(path: Path, key: str, run=None) -> None:
+    """directLink and linkPort reach the link service at once (SPEC §56.2): on = enabled and (re)started with the
+    new port, off = stopped and disabled. Where no service manager runs Force (a container, SPEC §46) the link
+    daemon Force started itself is stopped and, with directLink on, started again; never for an instance."""
+    from . import services
+    if key not in LINK_SETTINGS:
+        return
+    from . import link, services
+    cfg = config.load_config(path)
+    if services.apply_link(cfg.direct_link, run=run) is None and config.instance() is None:
+        paths = config.get_paths()
+        link.stop_daemon(paths)
+        link.start_daemon(paths, cfg, _launcher())
+
+
 def settings_command(cockpit: Cockpit, action: str | None, key: str | None, value: str | None,
                    all_: bool, as_json: bool) -> int:
     """`force settings [path|set KEY VALUE|unset KEY|edit] [--all] [--json]`."""
@@ -1203,6 +1270,7 @@ def settings_command(cockpit: Cockpit, action: str | None, key: str | None, valu
             print(f"force: {e}", file=sys.stderr)
             return 1
         print(f"{key} = {typed}")
+        _apply_link_setting(path, key)
         print("(applies within a few seconds: the daemon reloads)")
         return 0
     if action == "unset":
@@ -1212,6 +1280,7 @@ def settings_command(cockpit: Cockpit, action: str | None, key: str | None, valu
             print(f"force: {e}", file=sys.stderr)
             return 1
         print(f"unset {key}")
+        _apply_link_setting(path, key)
         print("(applies within a few seconds: the daemon reloads)")
         return 0
     if action == "edit":
@@ -1348,6 +1417,7 @@ def new_command(cockpit: Cockpit, name: str | None, cwd: str | None, no_switch: 
 def opencode_update_command(cockpit: Cockpit, version: str | None, check: bool) -> int:
     """`force opencode-update [--version V] [--check]`: install the latest OpenCode release (or V) into
     Force's own copy (config opencode_managed, SPEC §36). The daemon runs it every few hours."""
+    from . import opencode
     from . import opencode_update as ou
     if not cockpit.cfg.opencode_managed:
         print("force: opencodeManaged is off: OpenCode comes from PATH"
@@ -1583,6 +1653,7 @@ def remote_control_command(cockpit: Cockpit, name: str, action: str) -> int:
 
 def _upgrade_reason(cockpit: Cockpit, name: str) -> str | None:
     """None if the session should be upgraded, else a reason string."""
+    from . import opencode
     entry = registry.load(cockpit.paths.registry).get(name)
     if entry is not None and registry.is_shell(entry):
         return "a shell session"
@@ -1682,7 +1753,9 @@ def _current_session(cockpit: Cockpit, client: str | None) -> str | None:
 
 
 def switch_command(cockpit: Cockpit, name: str | None, index: int | None,
-                  next_: bool, prev_: bool, client: str | None) -> int:
+                  next_: bool, prev_: bool, client: str | None, print_: bool = False) -> int:
+    """`--print`: then print the session the client shows (ui-key.sh switching a remote: the switch and the answer
+    in one round trip, SPEC §40)."""
     # the session list (Alt+N, next, previous): without Chuck (SPEC §50), who opens from his own button
     live = [e.name for e in registry.load(cockpit.paths.registry).live() if not registry.is_support(e)]
     if name:
@@ -1707,6 +1780,8 @@ def switch_command(cockpit: Cockpit, name: str | None, index: int | None,
         print("force: switch needs NAME, --index, --next or --prev", file=sys.stderr)
         return 1
     cockpit.tmux.switch_client(target, client)
+    if print_:
+        print(cockpit.tmux.run("display", "-p", "-c", client, "#{client_session}") if client else target)
     return 0
 
 
@@ -1815,6 +1890,8 @@ def sidebar_toggle_command(cockpit: Cockpit) -> int:
 def share_command(cockpit: Cockpit, name: str, user: str, write_: bool) -> int:
     """`force share NAME --user USER [--write]`: share a LIVE registry session (shells allowed) with an
     existing account other than yourself. Stores mode "w" if --write else "r"; re-sharing changes the mode."""
+    import getpass
+    from . import share
     mode = "w" if write_ else "r"
     if not cockpit.cfg.sharing:
         print("force: sharing is disabled (force settings set sharing true enables it)", file=sys.stderr)
@@ -1905,6 +1982,7 @@ def shares_command(cockpit: Cockpit) -> int:
 
 def share_proxy_command(cockpit: Cockpit, name: str, user: str, mode: str) -> int:
     """`force share-proxy NAME USER MODE` (internal): serve guests for one (session, user) share until killed."""
+    from . import share
     return share.run_proxy(cockpit.tmux, name, user, mode, cockpit.paths.home, cockpit.paths.claude_dir)
 
 
@@ -2032,7 +2110,11 @@ def _uninstall_data(cockpit: Cockpit, purge: bool) -> None:
 def uninstall_command(cockpit: Cockpit, purge: bool, yes: bool) -> int:
     """`force uninstall [--purge] [--yes]`: stop Force, remove the launcher and PATH blocks and the
     app's files; without --purge keep the registry, snapshots, archive, config and state."""
+    from . import services
     data = cockpit.paths.home
+    from . import net
+    if net.net_file(cockpit.paths).exists():            # force net up opened a firewall port (SPEC §56.2)
+        print("force: run force net down first to close the firewall port")
     print("This removes: the force launcher (~/.local/bin/force), the ~/.local/bin PATH blocks, and "
           f"the app in {data}/app (releases, python, opencode).")
     if purge:
@@ -2062,6 +2144,12 @@ def uninstall_command(cockpit: Cockpit, purge: bool, yes: bool) -> int:
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _stop_daemon(cockpit)
         services.remove_launch_agents()     # macOS: agents written, but launchd does not answer here (ssh)
+    # the direct link (SPEC §56.2): a link daemon Force started itself (no service manager) stops too, and this
+    # host's link identity and socket go; the peers file and each remote's link.json stay with the settings
+    from . import link
+    link.stop_daemon(cockpit.paths)
+    if not purge:
+        link.forget_local(cockpit.paths)
     subprocess.call(["tmux", "-L", cockpit.paths.ui_socket, "kill-server"],
                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -2522,7 +2610,58 @@ def _attach_client_args(p: argparse.ArgumentParser, default=None) -> None:
                    help="show this remote host (force remote add); default: local sessions, else the last host used")
 
 
-def build_parser() -> argparse.ArgumentParser:
+class _OnlySub:
+    """The subcommands of `build_parser(only=…)`: only the one on the command line is built (an argparse parser
+    each, ~70 of them, cost more than the rest of a quick command). The others are `_Skipped`."""
+
+    def __init__(self, sub, only: str | None):
+        self._sub = sub
+        self._only = only
+        self.found = False
+
+    def wants(self, name: str) -> bool:
+        return self._only is None or name == self._only
+
+    def add_parser(self, name: str, **kw):
+        if self.wants(name):
+            self.found = True
+            return self._sub.add_parser(name, **kw)
+        return _Skipped()
+
+
+class _Skipped:
+    """A subcommand left out of the parser: whatever is called on it (add_argument, add_subparsers, …) does nothing."""
+
+    def __getattr__(self, name: str):
+        return self._nothing
+
+    def _nothing(self, *args, **kw):
+        return self
+
+
+_TOP_VALUE_OPTIONS = {"--glyphs", "--cell-aspect", "--remote"}
+
+
+def _command_word(words: list[str]) -> str | None:
+    """The subcommand a command line names, for `build_parser(only=…)`: its first word that is not an option or an
+    option's value; "" when there is none (`force`, `force --version`); None for the whole parser (help, `--`)."""
+    skip = False
+    for w in words:
+        if skip:
+            skip = False
+            continue
+        if w in ("-h", "--help", "--"):
+            return None
+        if w.startswith("-"):
+            skip = w in _TOP_VALUE_OPTIONS
+            continue
+        return w
+    return ""
+
+
+def build_parser(only: str | None = None) -> argparse.ArgumentParser:
+    """Force's argparse parser. `only`: build just that subcommand ("" none); `parser.only_found` says whether it
+    exists, else the caller builds the whole parser, so errors and help read the same."""
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]) or "force",
                                     description="Force — the code cockpit: your AI coding agent sessions in one terminal")
     parser.add_argument("--no-intro", action="store_true", help="attach without the startup intro")
@@ -2530,7 +2669,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"force {current_version() or '(development build)'}",
                         help="print the installed version and exit")
     _attach_client_args(parser)
-    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub = _OnlySub(parser.add_subparsers(dest="command", metavar="COMMAND"), only)
 
     p = sub.add_parser("attach", help="attach to the cockpit")
     p.add_argument("name", nargs="?", help="session name to attach to")
@@ -2615,6 +2754,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--next", action="store_true")
     p.add_argument("--prev", action="store_true")
     p.add_argument("--client", default=None)
+    p.add_argument("--print", dest="print_", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("forget", help="forget an archived session")
     p.add_argument("name")
@@ -2637,6 +2777,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remove", action="store_true", help="also delete the report")
 
     p = sub.add_parser("watch", help="this host's sessions as JSON lines, for a remote ui (SPEC §40)")
+
+    p = sub.add_parser("link", help="the hosts whose direct link this host accepts: trust ID NAME | untrust NAME "
+                                    "(internal, run over ssh when pairing, SPEC §56.2)")
+    p.add_argument("action", choices=["trust", "untrust"])
+    p.add_argument("args", nargs="*")
+    sub.add_parser("link-daemon", help="run the direct link's daemon (the force-link service, SPEC §56.2)")
+    p = sub.add_parser("net", help="on the host to be reached: open the direct link's UDP port in its firewall (up, "
+                                   "asks sudo), close it (down), or show it (status); hint HOST [on|off]: the "
+                                   "'ssh only' hint for one remote")
+    p.add_argument("action", choices=["up", "down", "status", "hint"], metavar="{up,down,status,hint}")
+    p.add_argument("host", nargs="?", help="hint: the remote host")
+    p.add_argument("value", nargs="?", choices=["on", "off"], help="hint: show (on) or hide (off) it for HOST")
+    p.add_argument("--json", action="store_true", help="status as JSON")
+    p.add_argument("--ui", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("remote", help="remote hosts (alias of `force host`): add NAME [SSH] | list | remove NAME | upgrade NAME")
     p.add_argument("action", choices=["add", "list", "remove", "upgrade"])
@@ -2747,8 +2901,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session", default="example", help="the session name the sample event names")
 
     sub.add_parser("skill", help="print the guide for agents that drive Force (also: force --skill)")
-    from . import support as support_mod
-    support_mod.add_parser(sub)
+    if sub.wants("support"):
+        from . import support as support_mod
+        support_mod.add_parser(sub)
     sub.add_parser("mcp", help="Force's local MCP server on stdin/stdout, for Chuck's session (SPEC §50)")
     sub.add_parser("api", help="the frontend API on stdin/stdout, JSON lines (SPEC §54)")
 
@@ -2806,6 +2961,7 @@ def build_parser() -> argparse.ArgumentParser:
     dsub.add_parser("archived", help="list archived sessions")
     dsub.add_parser("jump", help="jump to a session")
 
+    parser.only_found = sub.found or only == ""
     return parser
 
 
@@ -2849,7 +3005,7 @@ def _dispatch(args) -> int:
     if cmd == "list":
         return list_command(cockpit, args.all_, args.json)
     if cmd == "switch":
-        return switch_command(cockpit, args.name, args.index, args.next, args.prev, args.client)
+        return switch_command(cockpit, args.name, args.index, args.next, args.prev, args.client, args.print_)
     if cmd == "delete":
         return delete_command(cockpit, args.name, args.force, args.yes)
     if cmd == "forget":
@@ -2866,6 +3022,15 @@ def _dispatch(args) -> int:
         return nested_report_command(cockpit.paths.state, args.id, args.remove)
     if cmd == "watch":
         return watch_command(cockpit)
+    if cmd == "link":
+        from . import link
+        return link.link_command(cockpit.paths, args.action, args.args)
+    if cmd == "link-daemon":
+        from . import link
+        return link.link_daemon_command(cockpit.paths, cockpit.cfg)
+    if cmd == "net":
+        from . import net
+        return net.command(cockpit.paths, cockpit.cfg, args.action, args.host, args.json, args.ui, value=args.value)
     if cmd == "remote":
         return remote_command(cockpit, args.action, args.name, args.ssh, args.no_install)
     if cmd == "host":
@@ -2890,17 +3055,23 @@ def _dispatch(args) -> int:
     if cmd == "terminals":
         return terminals_alias_command(args.args)
     if cmd == "prompt":
+        from . import automation
         return automation.prompt_command(cockpit, args)
     if cmd == "wait":
+        from . import automation
         return automation.wait_command(cockpit, args)
     if cmd == "read":
+        from . import automation
         return automation.read_command(cockpit, args)
     if cmd == "keys":
+        from . import automation
         return automation.keys_command(cockpit, args)
     if cmd == "report":
+        from . import automation
         return automation.report_command(cockpit, args)
     if cmd == "status":
         args.clear = False
+        from . import automation
         return automation.report_command(cockpit, args)
     if cmd == "notify-test":
         return notify_test_command(cockpit, args.event, args.session)
@@ -2916,6 +3087,7 @@ def _dispatch(args) -> int:
         from . import api as api_mod
         return api_mod.serve(cockpit)
     if cmd == "explain":
+        from . import automation
         return automation.explain_command(cockpit, args)
     if cmd == "import":
         return import_command(cockpit, args.dry_run, args.pid, args.name, args.session,
@@ -3018,20 +3190,22 @@ def main(argv: list[str] | None = None) -> int:
     if words[:1] == ["terminals"]:
         # the deprecated alias, with its leading options, goes straight through to fonts.sh's cleanup modes
         return terminals_alias_command(words[1:])
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    parser = build_parser(only=_command_word(words))
+    if not parser.only_found:
+        parser = build_parser()
+    args = parser.parse_args(words)
     try:
         return _dispatch(args)
     except RegistryError as e:
         print(f"force: {e}", file=sys.stderr)
         return 1
-    except automation.CmdError as e:
+    except CmdError as e:
         if getattr(args, "json", False):
             print(json.dumps({"error": e.code, "message": e.message}), file=sys.stderr)
         else:
             print(f"force: {e.message}", file=sys.stderr)
         return 1
-    except automation.UsageError as e:
+    except UsageError as e:
         print(f"force: {e.message}", file=sys.stderr)
         return 2
     except TmuxError as e:

@@ -340,6 +340,16 @@ class Daemon:
             pass
         return tuple(out)
 
+    def _link_hints(self) -> list | None:
+        """The remotes reachable by ssh only because their direct dial gets no answer, for the sidebar's
+        `force net up` hint (SPEC §56.2). Never takes the tick down."""
+        try:
+            from . import link
+            return link.link_hints(self.paths, self.cfg) or None
+        except Exception as e:
+            _log("link_hints", e)
+            return None
+
     def _step_auto_update(self) -> None:
         """autoUpdate (SPEC §46): once the hourly check found a newer release and no terminal attached to the cockpit
         (host or ui server) has had a key or click for 10 min, install it (`force update --here`, detached, its output
@@ -612,6 +622,7 @@ class Daemon:
                 ("remotes", self._step_remotes, False),
                 ("tiers", self._step_tiers, False),
                 ("opencode_update", self._step_opencode_update, False),
+                ("link", self._step_link, False),
                 ("auto_update", self._step_auto_update, False),
                 ("reload", self._step_reload, False),
             ]
@@ -1039,6 +1050,29 @@ class Daemon:
         except OSError as e:
             _log("opencode_update", e)
 
+    # --- the link daemon without a service manager (SPEC §46, §56.2) --------
+    _LINK_EVERY = 30.0
+
+    def _step_link(self) -> None:
+        """Where no service manager runs Force (this daemon was started by `force`), keep the link daemon running
+        as this daemon keeps the tmux server: every 30 s, start `force link-daemon` when directLink is on, the
+        release has force-link and none runs. Never under systemd or launchd (the unit or agent runs it), never for
+        a development instance."""
+        if not self.cfg.direct_link or services.under_service_manager() or config.instance() is not None:
+            return
+        now = time.monotonic()
+        last = getattr(self, "_link_at", None)
+        if last is not None and now - last < self._LINK_EVERY:
+            return
+        self._link_at = now
+        from . import link as link_mod
+        if link_mod.daemon_pid(self.paths) is not None or not os.access(remote_mod.link_bin(self.paths), os.X_OK):
+            return
+        if services.installed():
+            return                      # the service manager's link service (stopped on purpose, or restarting)
+        if link_mod.start_daemon(self.paths, self.cfg, self.cockpit.cockpit_bin):
+            print("force: started the direct link daemon", file=sys.stderr)
+
     # --- glyph tiers (SPEC §28) ---------------------------------------------
     _TIER_EVERY = 5.0
 
@@ -1245,7 +1279,8 @@ class Daemon:
                                if limits else None),
                         limits=limits,
                         smoke=self._smoke_status(),
-                        update=updates.snapshot_update(self.paths.state, self._remote_versions()))
+                        update=updates.snapshot_update(self.paths.state, self._remote_versions()),
+                        link_hints=self._link_hints())
         write_snapshot(self.paths.snapshot, snap)
         # The header is a pane (`force header`) reading the snapshot; no status-line files any more.
 
