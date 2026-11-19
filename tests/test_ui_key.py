@@ -23,9 +23,19 @@ shift 3
 exec tmux -L "{host}" "$@"
 """
 
+FAKE_LINK_EXEC = """#!/bin/sh
+# force-link exec --state S --hosts H NAME -- ARGV (@force_host_tmux with force-link): one round trip
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+shift
+echo "$*" >> "{log}"
+if [ "$1" = "~/.local/bin/force" ]; then shift; FORCE_HOST=devbox NOLOG=1 exec "{force}" "$@"; fi
+shift 3
+exec tmux -L "{host}" "$@"
+"""
+
 FAKE_FORCE = """#!/bin/sh
 # the remote's force, reached with FORCE_HOST (a forwarded command: one round trip)
-echo "force $*" >> "{log}"
+[ -n "$NOLOG" ] || echo "force $*" >> "{log}"
 [ -n "$FORCE_HOST" ] || {{ echo "no FORCE_HOST" >&2; exit 9; }}
 cmd=$1; shift
 case "$cmd" in
@@ -59,10 +69,15 @@ def remote_window(tmp_path):
     log = tmp_path / "calls.log"
     made = {}
 
-    def make(old_force=False):
+    def make(old_force=False, link_exec=False):
         link = tmp_path / "fakelink"
-        link.write_text(FAKE_LINK.format(log=log, host=host))
         force = tmp_path / "force"
+        if link_exec:
+            link.write_text(FAKE_LINK_EXEC.format(log=log, host=host, force=force))
+            host_tmux = f"{link} exec --state /s --hosts /h devbox -- tmux -L force"
+        else:
+            link.write_text(FAKE_LINK.format(log=log, host=host))
+            host_tmux = f"{link} tmux -L force"
         force.write_text(FAKE_FORCE.format(log=log, host=host, old="1" if old_force else ""))
         for f in (link, force):
             f.chmod(0o755)
@@ -83,7 +98,7 @@ def remote_window(tmp_path):
                              capture_output=True, text=True).stdout.strip()
         sock = subprocess.run(["tmux", "-L", ui, "display", "-p", "-t", "ui", "#{socket_path}"],
                               capture_output=True, text=True).stdout.strip()
-        for k, v in (("@force_host", "devbox"), ("@force_host_tmux", f"{link} tmux -L force"),
+        for k, v in (("@force_host", "devbox"), ("@force_host_tmux", host_tmux),
                      ("@force_nested", nested), ("@force_session", "s1")):
             subprocess.run(["tmux", "-L", ui, "set-option", "-w", "-t", win, k, v], check=True)
         made.update(ui=ui, host=host, win=win, sock=sock, nested=nested, force=force)
@@ -161,3 +176,20 @@ def test_a_remote_without_print_switches_as_before(remote_window):
     assert [c.split()[0] for c in calls] == ["force", "force", "tmux"]
     assert "--print" in calls[0] and "--print" not in calls[1]
     assert shown == "s3" and published == "s3"
+
+
+def test_through_force_link_no_force_starts_here(remote_window):
+    """@force_host_tmux through force-link: `force …` goes straight through the link (what `force` here would
+    forward), so no Python starts on this machine for it (SPEC §40)."""
+    make, key = remote_window
+    make(link_exec=True)
+    calls, shown, published = key("idx", "2")
+    assert len(calls) == 1 and calls[0].startswith("~/.local/bin/force switch --index 2 --client "), calls
+    assert calls[0].endswith(" --print")
+    assert shown == "s2" and published == "s2"
+    calls, shown, published = key("last")
+    assert len(calls) == 1 and calls[0].startswith("tmux -L force switch-client"), calls
+    assert shown == "s1" and published == "s1"
+    calls, shown, published = key("newshell", "sh2")
+    assert [c.split()[0] for c in calls] == ["~/.local/bin/force", "tmux"], calls
+    assert shown == "sh2"

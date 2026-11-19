@@ -18,7 +18,18 @@ EOF
   [ -n "$htmux" ] || htmux="tmux -L force"
 }
 window
-f() { FORCE_HOST="$host" "${FORCE_BIN:-$HOME/.local/bin/force}" "$@"; }
+# `force …` on the host shown. A remote reached by force-link (@force_host_tmux = `force-link exec … NAME -- TMUX -L
+# force`): straight through the link, as `force` here would forward it (_forward: `force-link exec … NAME --
+# ~/.local/bin/force …`), without starting Python here first; through plain ssh (a dev checkout without force-link)
+# or this machine: `force` with FORCE_HOST.
+f() {
+  if [ -n "$host" ]; then
+    case "$htmux" in
+      *" -- "*) ${htmux%% -- *} -- '~/.local/bin/force' "$@"; return ;;
+    esac
+  fi
+  FORCE_HOST="$host" "${FORCE_BIN:-$HOME/.local/bin/force}" "$@"
+}
 # Chuck shown over a remote (SPEC §50, @force_overlay): going to another session first brings the window's own
 # host back in the main pane; the shown session's own actions (restart, upgrade) stay with Chuck here
 case "$A" in
