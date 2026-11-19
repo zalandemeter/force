@@ -64,6 +64,9 @@ default; an invalid file is never overwritten by `force settings set`.
 | `checkForUpdates` | true | hourly check for a newer Force (§46) |
 | `autoUpdate` | true | install a newer Force by itself once nobody has typed in the cockpit for 10 min (§46) |
 | `remoteControl` | true | new Claude Code sessions start with Remote Control: the New dialog's checkbox default and `force new`'s (§53) |
+| `directLink` | true | reach remotes over a direct link when one works, ssh otherwise; false = ssh only, nothing listens (§56) |
+| `linkPort` | 47823 | the UDP port the direct link listens on (§56) |
+| `netUpHint` | true | the sidebar note when a remote is reachable by ssh only: `force net up` there (§56) |
 
 Advanced, accepted but not listed by `force settings` (only `--all`): `crashRestartMax` 3,
 `crashWindowMinutes` 10, `startGraceSeconds` 30, `richTerminals`, `introCellAspect`, `reloadOnChange`,
@@ -1375,3 +1378,58 @@ CI (`.github/workflows/windows.yml`) builds the Linux tarball, then on a GitHub 
 24.04, systemd, a non-root user), installs the tarball with install.ps1 from a `file://` web root, and from
 PowerShell and cmd runs `force --version`, opens a shell session and lists it, checks it is still there after a
 minute with no `wsl.exe` running, says hello through `force api` as the Minecraft mod starts it, and uninstalls.
+
+## 56. Host link: ssh always, a direct link when it can (plan)
+Status: planned, not built. Everything that reaches a remote (§40, §52) goes through one entry point, the link, which
+carries it over ssh as today or, when the remote can be reached directly, over QUIC (iroh). ssh stays the way a host
+is added and the fallback whenever the direct link is not up, so a remote works whenever ssh works. Installing and
+running stay without sudo; the one optional step that uses sudo (`force net up`) runs a single firewall command under
+sudo, never Force.
+
+Why: on the internet path the direct link connected in 72 ms where a new ssh connection took 1129 ms, kept the same
+round trip for typing (61 ms against 63 ms; the network sets it), had shorter worst cases (p99 94 ms against 134 ms),
+and QUIC keeps a connection across a change of network (a laptop waking up or moving to another Wi-Fi), where TCP
+cannot. It sends nothing to anyone but the two hosts (B uses no relay and no address lookup service). Measured with a
+prototype, 2026-11-19.
+
+### 56.1 A: one entry point, over ssh (behaviour unchanged)
+| Part | |
+|---|---|
+| `force-link` | a Rust program in the release (`crates/link`, static like the sidebar), next to the sidebar's |
+| `force-link exec HOST [--tty] -- ARGV…` | runs ARGV on HOST with this process's stdin, stdout and stderr, and exits with its code. In A it builds today's ssh command (`ssh_argv`: the ControlMaster options, the quoting of every word for the remote shell except a leading `~/`) and `exec`s it, so it costs what ssh costs now. `--tty` = `ssh -t` |
+| no mux of our own over ssh | ssh's ControlMaster already carries every channel over one connection per host (§40); a second multiplexer inside one ssh channel would add code and no gain. The link's "one connection" is that one, and in B the QUIC connection |
+| every caller moves to it | `remote.ssh_argv` call sites become `remote.link_argv` (the watcher's `force watch`, forwarded commands `_forward`, `force nested --remote`, the host tmux of the sidebar, header, dialogs and `tmux-ui.conf`: `@force_host_tmux` = `force-link exec HOST -- TMUX -L force`). The Rust `HostTmux` passes its words as arguments and stops quoting them itself (force-link does it for ssh) |
+| what stays on ssh | adding and installing a host (`force host add`, `install-to`, `force host upgrade`, `uname`), because they bootstrap Force there: plain `ssh_argv`, never the link |
+| no remote shell | the callers that run `sh -c` on a remote today (the nested report file: `cat`, `rm`) use Force commands instead (`force nested-report ID [--remove]`), so in B the direct link can refuse anything but Force and its tmux |
+| tests | every caller's argv through a fake `force-link`; `force-link exec` builds exactly today's ssh argv (golden tests from `remote.ssh_argv`) |
+
+### 56.2 B: the direct link
+| Part | |
+|---|---|
+| `force-link daemon` | a user service on every install with `directLink` on: systemd user unit `force-link.service` (`Restart=always`, started with the others, linger as today, §12), on macOS a launchd agent (§51). No root: it binds UDP `linkPort` (≥ 1024) on all addresses and dials out. Its local socket `<state>/link.sock` (0600) serves `force-link exec` |
+| iroh | `iroh` 1.x with default features off (`tls-ring` only): no relay (`RelayMode::Disabled`), no address lookup (never the n0 preset, which publishes the host to n0's DNS), no port mapping, no metrics. Nothing goes to any server but the two hosts |
+| identity | each install has a link key, `<state>/link/key` (0600, made on first start); its public half is the host's link id |
+| pairing | over ssh, so the direct link trusts exactly whom ssh trusts. When a remote's `force watch` hello carries `link: {id, port, addrs}` and the pair is not recorded yet (or the id changed): this machine runs `force link trust ID NAME` there over ssh (adds this machine's id to the remote's `~/.config/force/link-peers.json`, 0600) and records the remote's id in `<state>/remotes/NAME/link.json`. `force host remove` removes both. A direct connection is accepted only from an id in link-peers.json and made only to the recorded id (QUIC/TLS with the two keys: mutual) |
+| addresses | the remote's hello lists its addresses (`addrs`, each with `linkPort`); this machine dials them all and keeps the one that answers |
+| exec over the link | `force-link exec` asks the local daemon: with a direct connection to HOST up, it opens a QUIC stream (header: argv, tty and size, then the bytes; resize and exit code as messages; closing = SIGHUP), else it `exec`s ssh as in A. The remote runs only the Force program (`~/.local/bin/force`) or its own tmux (as `remote_tmux` finds it) with `-L force`; anything else is refused (`not_allowed`). No environment is passed but `TERM` for a tty |
+| choosing | the daemon dials each enabled, paired remote at start, after a change of the machine's addresses, and every 60 s while not connected (timeout 2 s). New channels take the direct link when it is up; open ones stay where they are (the nested terminal moves at its next reconnect, §40). QUIC keeps the connection and its open channels across a change of the client's address. Keepalive 5 s; a connection silent for 15 s is down and its channels end (the nested client reconnects, §40) |
+| status | `<state>/remotes/NAME/link.json`: `{id, addrs, state: "direct"\|"ssh", reason, since_ms}`. Shown in `force host list` (`link` column), the host picker line (`· direct`), `force-link status [--json]`, doctor, and `force api`'s `state` host entries (`"link"`) |
+| hint: `force net up` | recommended by default. When a remote with link support is connected by ssh and its direct dial timed out twice in a row, the sidebar footer shows `devbox: ssh only · force net up there` (below the update note, §46). A click opens a card: what the direct link gives, the command to run on that host, and "Don't show again" (sets `netUpHint` false). Doctor reports `link-ssh-only` (with the same command) whatever the setting. Off: `force settings set netUpHint false`; `directLink` false turns the whole feature off |
+| `force net up` | run on the host to be reached, as the user (not with sudo). It finds the host firewall and runs the one command that opens UDP `linkPort` under `sudo` (which asks for the password): ufw `sudo ufw allow PORT/udp comment 'Force direct link'`; firewalld `sudo firewall-cmd --permanent --add-port=PORT/udp` and `--reload`; macOS application firewall `sudo socketfilterfw --add` and `--unblockapp` for force-link. nftables or iptables rules of its own: prints the rule to add, changes nothing. No host firewall: says there is nothing to open on this machine, and that a router or cloud firewall in front of it is opened there (or ssh stays). WSL: says incoming connections into WSL are not supported (the laptop side dials out and needs nothing). Records what it did in `<state>/net.json`. `sudo force net up` is not needed and does not find `force` (sudo's PATH): the command says so |
+| `force net down`, `force net status` | down: undoes what net.json records (the same way, under sudo). status: the listener (port bound or not), the firewall found, what net up did. `force uninstall` reminds of `force net down` when net.json records a rule |
+| versions | a remote without link support (no `link` in its hello) is ssh only, silently, with no hint; `force update` brings it along |
+| security | a new way into every host, held to ssh's level: keys only, mutual, pinned by pairing over ssh, Force commands only, never a shell; handshakes from unknown ids are dropped before any stream; rate-limited per address. Reviewed before it ships |
+| size | `force-link` adds about 3 MB to each release download (prototype, iroh with default features off, size-optimised) |
+| tests | crates/link: framing, the allowlist, an unknown id refused, a changed id refused until paired again; two daemons on loopback with their own state dirs and ports (never the live ones); Python callers with a fake force-link; `force smoke` gains `link: direct exec round trip` (loopback). CI on Linux and macOS |
+
+### 56.3 Order of work
+1. A (56.1): force-link exec over ssh, every caller moved, `nested-report`; no visible change.
+2. B: daemon, identity, pairing, exec over QUIC, choosing, status.
+3. B: `force net up/down/status`, the hint and its card, the settings, doctor.
+4. B: release (Linux static build in the builder container, macOS), units and agent, notices, website and README: still "nothing is sent anywhere else".
+
+### 56.4 Later: C, relays (opt in)
+Reaching a host that is neither directly reachable nor opened by `force net up` (behind a router or carrier NAT) needs
+a relay for hole punching. If it is built, it is off by default: a setting names the relay (a self-hosted
+`iroh-relay`, or a public one), and the README and disclosures say that this machine's address and link id go to it
+(the traffic itself stays encrypted end to end).
