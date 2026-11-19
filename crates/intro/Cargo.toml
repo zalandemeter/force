@@ -2,6 +2,7 @@
 name = "force-intro"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Cinematic startup animation for Force: a pre-rendered 3D film and a brand splash played in the terminal"
 
 # crossterm and libc: same versions as crates/sidebar. miniz_oxide (pure Rust, MIT/Zlib/Apache-2.0)
