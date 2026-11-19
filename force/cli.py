@@ -900,9 +900,10 @@ def _remote_shell(cockpit: Cockpit, r) -> str | None:
 
 def watch_command(cockpit: Cockpit) -> int:
     """`force watch` (SPEC §40): this host's snapshot and registry as JSON lines, for a remote ui."""
+    from . import link
     app = cockpit.paths.home / "app"
     release = os.path.basename(os.path.realpath(app)) if app.exists() else None
-    return remote_mod.watch(cockpit.paths, release, cockpit.cfg.ui)
+    return remote_mod.watch(cockpit.paths, release, cockpit.cfg.ui, link=link.hello_link(cockpit.paths, cockpit.cfg))
 
 
 def install_to_command(cockpit: Cockpit, dest: str, yes: bool = True) -> int:
@@ -974,6 +975,8 @@ def remote_command(cockpit: Cockpit, action: str, name: str | None, dest: str | 
         if existing is None:
             print(f"force: no host {name!r}", file=sys.stderr)
             return 1
+        from . import link
+        link.unpair(cockpit.paths, existing)             # the remote stops accepting this host's link (SPEC §56.2)
         remote_mod.save(cockpit.paths, [r for r in rs if r.name != name])
         shutil.rmtree(remote_mod.remote_dir(cockpit.paths, name), ignore_errors=True)
         print(f"removed {name}")
@@ -1188,6 +1191,18 @@ def _write_ui_mode(cockpit: Cockpit, mode: str) -> None:
     config.save_setting(cockpit.paths.config_file, "layout", mode)
 
 
+LINK_SETTINGS = ("directLink", "linkPort")
+
+
+def _apply_link_setting(path: Path, key: str, run=None) -> None:
+    """directLink and linkPort reach the link service at once (SPEC §56.2): on = enabled and (re)started with the
+    new port, off = stopped and disabled. Nothing where no service manager runs Force (an instance, a container)."""
+    if key not in LINK_SETTINGS:
+        return
+    from . import services
+    services.apply_link(config.load_config(path).direct_link, run=run)
+
+
 def settings_command(cockpit: Cockpit, action: str | None, key: str | None, value: str | None,
                    all_: bool, as_json: bool) -> int:
     """`force settings [path|set KEY VALUE|unset KEY|edit] [--all] [--json]`."""
@@ -1203,6 +1218,7 @@ def settings_command(cockpit: Cockpit, action: str | None, key: str | None, valu
             print(f"force: {e}", file=sys.stderr)
             return 1
         print(f"{key} = {typed}")
+        _apply_link_setting(path, key)
         print("(applies within a few seconds: the daemon reloads)")
         return 0
     if action == "unset":
@@ -1212,6 +1228,7 @@ def settings_command(cockpit: Cockpit, action: str | None, key: str | None, valu
             print(f"force: {e}", file=sys.stderr)
             return 1
         print(f"unset {key}")
+        _apply_link_setting(path, key)
         print("(applies within a few seconds: the daemon reloads)")
         return 0
     if action == "edit":
@@ -2638,6 +2655,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("watch", help="this host's sessions as JSON lines, for a remote ui (SPEC §40)")
 
+    p = sub.add_parser("link", help="the hosts whose direct link this host accepts: trust ID NAME | untrust NAME "
+                                    "(internal, run over ssh when pairing, SPEC §56.2)")
+    p.add_argument("action", choices=["trust", "untrust"])
+    p.add_argument("args", nargs="*")
+    sub.add_parser("link-daemon", help="run the direct link's daemon (the force-link service, SPEC §56.2)")
+
     p = sub.add_parser("remote", help="remote hosts (alias of `force host`): add NAME [SSH] | list | remove NAME | upgrade NAME")
     p.add_argument("action", choices=["add", "list", "remove", "upgrade"])
     p.add_argument("name", nargs="?")
@@ -2866,6 +2889,12 @@ def _dispatch(args) -> int:
         return nested_report_command(cockpit.paths.state, args.id, args.remove)
     if cmd == "watch":
         return watch_command(cockpit)
+    if cmd == "link":
+        from . import link
+        return link.link_command(cockpit.paths, args.action, args.args)
+    if cmd == "link-daemon":
+        from . import link
+        return link.link_daemon_command(cockpit.paths, cockpit.cfg)
     if cmd == "remote":
         return remote_command(cockpit, args.action, args.name, args.ssh, args.no_install)
     if cmd == "host":

@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from force import services
-from force.config import WSL_ICONS_HINT, get_paths, is_wsl
+from force.config import WSL_ICONS_HINT, get_paths, is_wsl, load_config
 
 # The one-line prefix used by every message ("force", orange like share/fonts.sh's `say`).
 COLOR = "\033[1;38;2;217;119;87mforce\033[0m"
@@ -223,10 +223,10 @@ def _linger(run, user) -> None:
     services._linger(run, user)
 
 
-def setup_services(rel, home, run, no_services, self_test, user) -> None:
+def setup_services(rel, home, run, no_services, self_test, user, link: bool = False) -> None:
     if no_services:
         return
-    services.install(rel, home, run, self_test, user)
+    services.install(rel, home, run, self_test, user, link=link)
 
 
 # --- step 7: the icon font on a desktop ------------------------------------------------------
@@ -286,7 +286,9 @@ def run_setup(rel, py, no_fonts=False, no_services=False, self_test=False, env=N
     write_launcher(py, data, home)
     on_path = update_paths(home, env, run)
     user = env.get("USER") or getpass.getuser()
-    setup_services(rel, home, run, no_services, self_test, user)
+    # the direct link's service runs with the directLink setting on (SPEC §56.2)
+    link = load_config(get_paths(env).config_file).direct_link
+    setup_services(rel, home, run, no_services, self_test, user, link=link)
     if not no_fonts:
         setup_fonts(rel, env, run)
     check_claude(get_paths(env))

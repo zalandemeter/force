@@ -190,11 +190,12 @@ def _release_of(app) -> str | None:
 
 
 def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, heartbeat: float = 2.0,
-          out=sys.stdout, inp=sys.stdin) -> int:
+          out=sys.stdout, inp=sys.stdin, link: dict | None = None) -> int:
     """`force watch` (on a host): a hello line, then {"snapshot", "registry"} whenever the snapshot changes
     (and every `heartbeat` seconds: the reader takes a copy older than 5 s for a dead link). Ends when the
     reader goes away. A first stdin line {"peer": NAME} (SPEC §52) marks NAME as a peer that is watching this
-    machine; its queued messages are streamed over this connection as {"prompt": {…}} lines."""
+    machine; its queued messages are streamed over this connection as {"prompt": {…}} lines. `link` is this
+    host's direct-link card ({"id", "port", "addrs"}, SPEC §56.2), in the hello when there is one."""
     from . import messages
     peer: str | None = None
 
@@ -217,8 +218,10 @@ def watch(paths, release: str | None, ui_mode: str, interval: float = 0.25, hear
     if inp is not None:
         threading.Thread(target=_hello_peer, daemon=True).start()
     try:
-        out.write(json.dumps({"hello": {"proto": PROTO, "version": release, "host": socket.gethostname(),
-                                        "ui": ui_mode}}) + "\n")
+        hello = {"proto": PROTO, "version": release, "host": socket.gethostname(), "ui": ui_mode}
+        if link:
+            hello["link"] = link
+        out.write(json.dumps({"hello": hello}) + "\n")
         out.flush()
         last, beat = None, 0.0
         app = paths.home / "app"
@@ -290,6 +293,7 @@ class Watcher:
         self.next_try = 0.0
         self.backoff = 2.0
         self.hello_host: str | None = None      # the remote's own host name, from its hello
+        self.pairing = threading.Lock()         # one pairing at a time (SPEC §56.2)
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -356,6 +360,19 @@ class Watcher:
                 pass
         threading.Thread(target=_run, daemon=True).start()
 
+    def _link_hello(self, card: object) -> None:
+        """The remote's direct-link card (SPEC §56.2): record its addresses, or pair over plain ssh when this pair
+        is new or the remote's id changed. Off the reader thread: pairing is an ssh round trip."""
+        from . import link
+        if not self.pairing.acquire(blocking=False):
+            return
+        try:
+            link.on_hello(self.paths, self.r, card, config.load_config(self.paths.config_file))
+        except Exception as e:                  # never take the watcher down
+            print(f"force: {self.r.name}: link pairing: {e}", file=sys.stderr)
+        finally:
+            self.pairing.release()
+
     def _read(self, proc: subprocess.Popen, started: float) -> None:
         d = remote_dir(self.paths, self.r.name)
         version = None
@@ -378,6 +395,8 @@ class Watcher:
                 self.backoff = 2.0
                 self.hello_host = h.get("host") if isinstance(h.get("host"), str) else None
                 write_status(self.paths, self.r.name, "connected", h.get("host") or "", version)
+                if h.get("link") is not None:
+                    threading.Thread(target=self._link_hello, args=(h["link"],), daemon=True).start()
             elif ok and "snapshot" in msg:
                 # stamped with the time it arrived: "stale" then means the link (or the remote's daemon) is
                 # silent, whatever the two clocks say

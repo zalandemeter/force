@@ -17,16 +17,21 @@ from pathlib import Path
 
 from force import config
 
-# The three services Force manages: API name -> systemd unit / launchd label.
+# The services Force manages: API name -> systemd unit / launchd label. "link" (SPEC §56.2) runs only with the
+# directLink setting on.
+LINK_UNIT = "force-link.service"
+LINK_LABEL = "cc.useforce.force-link"
 SYSTEMD_UNITS = {
     "tmux": "force-tmux.service",
     "daemon": "force.service",
     "smoke": "force-smoke.timer",
+    "link": LINK_UNIT,
 }
 LAUNCHD_LABELS = {
     "tmux": "cc.useforce.force-tmux",
     "daemon": "cc.useforce.force",
     "smoke": "cc.useforce.force-smoke",
+    "link": LINK_LABEL,
 }
 
 
@@ -122,13 +127,34 @@ def restart(name: str, run=None) -> None:
         r(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LAUNCHD_LABELS[name]}"])
 
 
-def plists(home) -> dict[str, bytes]:
-    """The three LaunchAgent plists (label -> plist bytes). Pure: tests check them on any platform."""
-    home = Path(home)
+def _launchd_path(home: Path) -> str:
     app = home / ".local" / "share" / "force" / "app"
+    return f"{app}/share/tmux-bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+
+def link_plist(home) -> bytes:
+    """The link daemon's LaunchAgent (SPEC §56.2), loaded only with directLink on. Kept alive unless it exits 0
+    (`force link-daemon` with directLink off). Pure: tests check it on any platform."""
+    home = Path(home)
+    log = home / ".local" / "state" / "force" / "link.log"
+    return plistlib.dumps({
+        "Label": LINK_LABEL,
+        "ProgramArguments": [f"{home}/.local/bin/force", "link-daemon"],
+        "EnvironmentVariables": {"PATH": _launchd_path(home)},
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 3,
+        "StandardOutPath": str(log),
+        "StandardErrorPath": str(log),
+    })
+
+
+def plists(home) -> dict[str, bytes]:
+    """The three LaunchAgent plists Force always has (label -> plist bytes; the link agent is link_plist). Pure:
+    tests check them on any platform."""
+    home = Path(home)
     state = home / ".local" / "state" / "force"
-    path = (f"{app}/share/tmux-bin:{home}/.local/bin:"
-            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+    path = _launchd_path(home)
     tmux = {
         "Label": LAUNCHD_LABELS["tmux"],
         "ProgramArguments": ["/bin/sh", "-c",
@@ -176,7 +202,58 @@ def _launchd_loaded(uid, run, label) -> bool:
     return run(["launchctl", "print", f"gui/{uid}/{label}"]).returncode == 0
 
 
-def _install_launchd(home, run, self_test) -> None:
+def _launchd_link(home, run, on: bool, restart: bool) -> None:
+    """The link agent: loaded with `on`, (re)started with `restart` (a new release, another port); unloaded and its
+    plist removed without."""
+    uid = os.getuid()
+    path = Path(home) / "Library" / "LaunchAgents" / f"{LINK_LABEL}.plist"
+    loaded = _launchd_loaded(uid, run, LINK_LABEL)
+    if not on:
+        if loaded:
+            run(["launchctl", "bootout", f"gui/{uid}/{LINK_LABEL}"])
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return
+    changed = _write_plist(path, link_plist(home))
+    if loaded and changed:
+        run(["launchctl", "bootout", f"gui/{uid}/{LINK_LABEL}"])
+        _wait_unloaded(uid, run, LINK_LABEL)
+        loaded = False
+    if not loaded:
+        run(["launchctl", "bootstrap", f"gui/{uid}", str(path)])
+    elif restart:
+        run(["launchctl", "kickstart", "-k", f"gui/{uid}/{LINK_LABEL}"])
+
+
+def _systemd_link(run, on: bool, restart: bool) -> None:
+    """force-link.service: enabled and started with `on` (restarted with `restart` when it was running), else
+    stopped and disabled."""
+    if not on:
+        run(["systemctl", "--user", "disable", "--now", LINK_UNIT])
+        return
+    r = run(["systemctl", "--user", "show", LINK_UNIT, "-p", "ActiveState", "--value"])
+    was_active = r.returncode == 0 and r.stdout.strip() == "active"
+    if run(["systemctl", "--user", "enable", "--now", LINK_UNIT]).returncode != 0:
+        _say(f"note: {LINK_UNIT} is not installed here yet (force update brings it)")
+        return
+    if was_active and restart:
+        run(["systemctl", "--user", "restart", LINK_UNIT])
+
+
+def apply_link(on: bool, run=None) -> None:
+    """The directLink / linkPort settings changed (SPEC §56.2): start (or restart, for a new port) the link service,
+    or stop it. Nothing without a service manager (an instance, a container: the user runs it)."""
+    r = _real_run if run is None else run
+    b = backend(run=r)
+    if b == "systemd":
+        _systemd_link(r, on, restart=True)
+    elif b == "launchd":
+        _launchd_link(Path.home(), r, on, restart=True)
+
+
+def _install_launchd(home, run, self_test, link: bool = False) -> None:
     if backend(run=run) != "launchd":
         _say("no launchd session here: force starts its services itself")
         return
@@ -199,6 +276,8 @@ def _install_launchd(home, run, self_test) -> None:
             run(["launchctl", "bootout", f"gui/{uid}/{label}"])
             _wait_unloaded(uid, run, label)
         run(["launchctl", "bootstrap", f"gui/{uid}", str(path)])
+    # the link daemon: restarted on every setup, so a new release's force-link runs (SPEC §56.2)
+    _launchd_link(home, run, link, restart=True)
 
 
 def _wait_unloaded(uid, run, label, sleep=None, tries: int = 50) -> None:
@@ -220,11 +299,12 @@ def _linger(run, user) -> None:
         _say(f"note: sessions stop when you log out (ask an admin for: loginctl enable-linger {user})")
 
 
-def install(rel, home, run, self_test, user) -> None:
-    """Install (or refresh) the host services. Linux: systemd units + linger, exactly as before. macOS: LaunchAgents."""
+def install(rel, home, run, self_test, user, link: bool = False) -> None:
+    """Install (or refresh) the host services. Linux: systemd units + linger, exactly as before. macOS: LaunchAgents.
+    `link`: the directLink setting, whether the link service runs (SPEC §56.2)."""
     rel = Path(rel)
     if sys.platform == "darwin":
-        _install_launchd(home, run, self_test)
+        _install_launchd(home, run, self_test, link)
         return
     # --- systemd (Linux): today's setup_services body --------------------------------------------
     if run(["systemctl", "--user", "show-environment"]).returncode != 0:
@@ -253,6 +333,8 @@ def install(rel, home, run, self_test, user) -> None:
         run(["systemctl", "--user", "restart", "force.service"])
     if self_test:
         run(["systemctl", "--user", "enable", "--now", "force-smoke.timer"])
+    # the link daemon: restarted when it ran, so a new release's force-link runs (SPEC §56.2)
+    _systemd_link(run, link, restart=True)
     _linger(run, user)
 
 
@@ -269,7 +351,7 @@ def uninstall(run=None) -> None:
     b = backend(run=r)
     if b == "systemd":
         r(["systemctl", "--user", "disable", "--now",
-           "force.service", "force-smoke.timer", "force-smoke.service", "force-tmux.service"])
+           "force.service", "force-smoke.timer", "force-smoke.service", LINK_UNIT, "force-tmux.service"])
         for unit in list(Path.home().glob(".config/systemd/user/force*.service")) \
                 + list(Path.home().glob(".config/systemd/user/force*.timer")):
             try:

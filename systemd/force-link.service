@@ -1,0 +1,15 @@
+[Unit]
+Description=Force direct link (reaches remotes over QUIC when it can, SPEC §56.2)
+Documentation=file://%h/.local/share/force/app/SPEC.md
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/share/force/app/share/tmux-bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/force link-daemon
+Restart=always
+RestartSec=3
+# `force link-daemon` exits 0 only when the directLink setting is off: then it stays down
+RestartPreventExitStatus=0
+
+[Install]
+WantedBy=default.target
