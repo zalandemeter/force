@@ -372,6 +372,12 @@ question in the pane, as for a new session there; declining it leaves the moved 
 
 Exit 0 on success, 1 on user error with a one-line message on stderr, 2 on environment error.
 
+Start time: every key, menu item, dialog and forwarded command (§40) starts a `force`, here and on a remote, so
+`import force.cli` loads only what most commands use; the network (`urllib`, `http.client`), OpenCode's API, the
+automation commands, the daemon, doctor, MCP and the API are imported by the commands that use them. argparse builds
+only the subcommand named on the command line (the whole parser for help, `--` and an unknown command, so those read
+as before). `tests/test_startup.py` checks which modules a fresh interpreter loads (never a timing).
+
 | command | behaviour |
 |---|---|
 | `force` / `force attach [NAME]` | ensure services: if `systemctl --user is-active force.service` is not active → `systemctl --user start force-tmux.service force.service`; wait ≤10 s for the tmux server. If `$TMUX` points at the force socket → error "already inside force". If no non-archived sessions → run `force new` interactively first. Then `os.execvp tmux -L S attach -t TARGET` where TARGET = NAME, else the session with the highest `last_seen_ms`, else lowest `order`. |
