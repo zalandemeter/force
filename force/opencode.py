@@ -16,7 +16,6 @@ message) and kept in the registry, so a restart resumes it with `--session`.
 """
 from __future__ import annotations
 
-import http.client
 import json
 import os
 import re
@@ -24,11 +23,10 @@ import shutil
 import socket
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import config
 from .activity import is_mid_turn_finding
 from .claude import AgentStatus
 
@@ -37,23 +35,22 @@ _TIMEOUT = 0.4
 _AVOID = {8000, 8080, 8787}
 
 
-# Force-managed copy (config opencode_managed): <home>/opencode/<version>/opencode, <home>/opencode/current
-_managed_root: "Path | None" = None
-
-
+# Force-managed copy (config opencode_managed): <home>/opencode/<version>/opencode, <home>/opencode/current. The
+# root lives in config.opencode_root, so the Cockpit can set it without importing this module (cli._use_opencode).
 def set_managed(root) -> None:
     """Use the Force-managed copy under `root` (None: the opencode on PATH). Set once per process from
     the config (Cockpit)."""
-    global _managed_root, _installed
-    _managed_root = Path(root) if root else None
+    global _installed
+    config.opencode_root = Path(root) if root else None
     _installed = (0.0, None)
 
 
 def installed() -> str | None:
     """Path of the opencode binary to run: the managed copy's current version when managed (None until
     the first `force opencode-update`), else the one on PATH."""
-    if _managed_root is not None:
-        cur = _managed_root / "current" / "opencode"
+    root = config.opencode_root
+    if root is not None:
+        cur = root / "current" / "opencode"
         return str(cur) if os.access(cur, os.X_OK) else None
     return shutil.which("opencode")
 
@@ -78,6 +75,9 @@ def argv(port: int, session: str | None, cwd: str, binary: str = "opencode") -> 
 
 
 def _get(port: int, path: str):
+    import http.client                  # here: a `force` command that never asks OpenCode does not load them
+    import urllib.error
+    import urllib.request
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=_TIMEOUT) as r:
             return json.loads(r.read().decode("utf-8", "replace"))

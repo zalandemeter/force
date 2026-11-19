@@ -14,7 +14,6 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from . import opencode as opencode_mod
 from .claude import find_transcript, global_memory_dir, memory_dir_for, project_slug
 from .config import Config, Paths
 from .registry import Entry, RegistryError, is_claude, is_opencode, is_shell, locked, valid_name
@@ -431,6 +430,7 @@ class Cockpit:
         """Move an OpenCode session into `new`'s project: OpenCode finds a session only in the project of
         the folder it runs in. `opencode export` in the old folder, `opencode import` in the new one (same
         session id, project and directory updated)."""
+        from . import opencode as opencode_mod
         binary = opencode_mod.installed()
         if binary is None:
             raise MoveError("OpenCode is not installed")

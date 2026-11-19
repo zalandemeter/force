@@ -12,9 +12,7 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 import force
@@ -70,6 +68,7 @@ def _tuple(version: str | None) -> tuple | None:
 
 def fetch_install(base: str, timeout: int) -> tuple[bytes | None, str | None]:
     """Fetch `<base>/install.sh` (<= 1 MB) -> (content, error). `content` None on any failure."""
+    import urllib.request                # here: only a check or an update loads urllib's http and ssl
     url = base.rstrip("/") + "/install.sh"
     try:
         # Force names itself: a site's bot check may refuse Python's default user agent ("Python-urllib")
@@ -415,6 +414,8 @@ def _fetch_conditional(base: str, timeout: int, etag: str | None, modified: str 
                        ) -> tuple[int, bytes | None, str | None, str | None]:
     """GET `<base>/install.sh` with If-None-Match / If-Modified-Since -> (status, content, etag, last_modified).
     status 304 = unchanged (content None), 200 = new content, 0 = any failure."""
+    import urllib.error
+    import urllib.request
     url = base.rstrip("/") + "/install.sh"
     headers = {"User-Agent": f"force/{current_version() or 'dev'}"}
     if etag:

@@ -535,6 +535,11 @@ def schema() -> dict:
     }
 
 
+# Force's own OpenCode copy for this process (SPEC §36): set from the settings with the Cockpit (cli._use_opencode),
+# read by force.opencode, which is imported only once an OpenCode session needs it
+opencode_root: "Path | None" = None
+
+
 def ensure_dirs(paths: Paths) -> None:
     """mkdir -p home, home/archive, state, state/header (mode 0700)."""
     for p in (paths.home, paths.home / "archive", paths.state, paths.state / "header"):

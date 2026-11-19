@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import re
@@ -18,14 +17,29 @@ import types
 import uuid
 from pathlib import Path
 
-from . import automation, claude, config, opencode, procinfo, registry, services, share, state
+from . import claude, config, procinfo, registry, state
 from .config import Config, Paths
+from .errors import CmdError, UsageError
 from . import remote as remote_mod
 from . import menus as menus_mod
 from .lifecycle import Cockpit, MoveError
 from .registry import RegistryError
 from .state import State
 from .tmux import Tmux, TmuxError
+
+# Imported where they are used, not here, so that `force` starts fast (SPEC §8): `cli.opencode`, `cli.services` …
+# still reach them (tests patch them so), through __getattr__ below.
+_LAZY = {"automation": ".automation", "opencode": ".opencode", "services": ".services", "share": ".share",
+         "getpass": "getpass"}
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        import importlib
+        mod = _LAZY[name]
+        return importlib.import_module(mod, __package__) if mod.startswith(".") else importlib.import_module(mod)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 SHARE = Path(__file__).resolve().parent.parent / "share"
 THEME_BG = config.THEME_BG   # the cockpit's dark background, painted by tmux's theme (SPEC §45)
@@ -41,8 +55,18 @@ def make_cockpit(env: dict[str, str] | None = None) -> Cockpit:
     # an instance's launcher (SPEC §2.1) names itself in FORCE_BIN; the live install is `force` on PATH
     cockpit_bin = os.environ.get("FORCE_BIN") or shutil.which("force") or str(Path.home() / ".local/bin/force")
     # OpenCode: Force's own copy when managed (SPEC §36), else the one on PATH
-    opencode.set_managed(paths.home / "opencode" if cfg.opencode_managed else None)
+    _use_opencode(paths.home / "opencode" if cfg.opencode_managed else None)
     return Cockpit(paths, cfg, tmux, cockpit_bin)
+
+
+def _use_opencode(root) -> None:
+    """Which OpenCode this process runs (opencode.set_managed), without importing force.opencode before an OpenCode
+    session needs it: the root waits in config.opencode_root, where the module reads it."""
+    oc = sys.modules.get(__package__ + ".opencode")
+    if oc is not None:
+        oc.set_managed(root)
+    else:
+        config.opencode_root = Path(root) if root else None
 
 
 def _inside_cockpit(cockpit: Cockpit) -> bool:
@@ -306,6 +330,7 @@ def attach_command(cockpit: Cockpit, name: str | None, no_intro: bool = False, g
 def _services_installed(any_units: bool = False) -> bool:
     """The host services are installed and their manager answers (systemd units, or launchd agents on macOS;
     never for a development instance): force/services.installed (SPEC §51)."""
+    from . import services
     return services.installed(any_units=any_units)
 
 
@@ -371,6 +396,7 @@ def _start_host(cockpit: Cockpit) -> bool:
     """This machine's host part (force-tmux + daemon) running; False when its tmux server does not come up.
     With systemd usable it starts the units as today; otherwise it starts the tmux server and the daemon itself
     (SPEC §1)."""
+    from . import services
     if _services_installed():
         if not services.is_active("daemon"):
             services.start("tmux", "daemon")
@@ -1218,6 +1244,7 @@ def _apply_link_setting(path: Path, key: str, run=None) -> None:
     """directLink and linkPort reach the link service at once (SPEC §56.2): on = enabled and (re)started with the
     new port, off = stopped and disabled. Where no service manager runs Force (a container, SPEC §46) the link
     daemon Force started itself is stopped and, with directLink on, started again; never for an instance."""
+    from . import services
     if key not in LINK_SETTINGS:
         return
     from . import link, services
@@ -1390,6 +1417,7 @@ def new_command(cockpit: Cockpit, name: str | None, cwd: str | None, no_switch: 
 def opencode_update_command(cockpit: Cockpit, version: str | None, check: bool) -> int:
     """`force opencode-update [--version V] [--check]`: install the latest OpenCode release (or V) into
     Force's own copy (config opencode_managed, SPEC §36). The daemon runs it every few hours."""
+    from . import opencode
     from . import opencode_update as ou
     if not cockpit.cfg.opencode_managed:
         print("force: opencodeManaged is off: OpenCode comes from PATH"
@@ -1625,6 +1653,7 @@ def remote_control_command(cockpit: Cockpit, name: str, action: str) -> int:
 
 def _upgrade_reason(cockpit: Cockpit, name: str) -> str | None:
     """None if the session should be upgraded, else a reason string."""
+    from . import opencode
     entry = registry.load(cockpit.paths.registry).get(name)
     if entry is not None and registry.is_shell(entry):
         return "a shell session"
@@ -1857,6 +1886,8 @@ def sidebar_toggle_command(cockpit: Cockpit) -> int:
 def share_command(cockpit: Cockpit, name: str, user: str, write_: bool) -> int:
     """`force share NAME --user USER [--write]`: share a LIVE registry session (shells allowed) with an
     existing account other than yourself. Stores mode "w" if --write else "r"; re-sharing changes the mode."""
+    import getpass
+    from . import share
     mode = "w" if write_ else "r"
     if not cockpit.cfg.sharing:
         print("force: sharing is disabled (force settings set sharing true enables it)", file=sys.stderr)
@@ -1947,6 +1978,7 @@ def shares_command(cockpit: Cockpit) -> int:
 
 def share_proxy_command(cockpit: Cockpit, name: str, user: str, mode: str) -> int:
     """`force share-proxy NAME USER MODE` (internal): serve guests for one (session, user) share until killed."""
+    from . import share
     return share.run_proxy(cockpit.tmux, name, user, mode, cockpit.paths.home, cockpit.paths.claude_dir)
 
 
@@ -2074,6 +2106,7 @@ def _uninstall_data(cockpit: Cockpit, purge: bool) -> None:
 def uninstall_command(cockpit: Cockpit, purge: bool, yes: bool) -> int:
     """`force uninstall [--purge] [--yes]`: stop Force, remove the launcher and PATH blocks and the
     app's files; without --purge keep the registry, snapshots, archive, config and state."""
+    from . import services
     data = cockpit.paths.home
     from . import net
     if net.net_file(cockpit.paths).exists():            # force net up opened a firewall port (SPEC §56.2)
@@ -2573,7 +2606,58 @@ def _attach_client_args(p: argparse.ArgumentParser, default=None) -> None:
                    help="show this remote host (force remote add); default: local sessions, else the last host used")
 
 
-def build_parser() -> argparse.ArgumentParser:
+class _OnlySub:
+    """The subcommands of `build_parser(only=…)`: only the one on the command line is built (an argparse parser
+    each, ~70 of them, cost more than the rest of a quick command). The others are `_Skipped`."""
+
+    def __init__(self, sub, only: str | None):
+        self._sub = sub
+        self._only = only
+        self.found = False
+
+    def wants(self, name: str) -> bool:
+        return self._only is None or name == self._only
+
+    def add_parser(self, name: str, **kw):
+        if self.wants(name):
+            self.found = True
+            return self._sub.add_parser(name, **kw)
+        return _Skipped()
+
+
+class _Skipped:
+    """A subcommand left out of the parser: whatever is called on it (add_argument, add_subparsers, …) does nothing."""
+
+    def __getattr__(self, name: str):
+        return self._nothing
+
+    def _nothing(self, *args, **kw):
+        return self
+
+
+_TOP_VALUE_OPTIONS = {"--glyphs", "--cell-aspect", "--remote"}
+
+
+def _command_word(words: list[str]) -> str | None:
+    """The subcommand a command line names, for `build_parser(only=…)`: its first word that is not an option or an
+    option's value; "" when there is none (`force`, `force --version`); None for the whole parser (help, `--`)."""
+    skip = False
+    for w in words:
+        if skip:
+            skip = False
+            continue
+        if w in ("-h", "--help", "--"):
+            return None
+        if w.startswith("-"):
+            skip = w in _TOP_VALUE_OPTIONS
+            continue
+        return w
+    return ""
+
+
+def build_parser(only: str | None = None) -> argparse.ArgumentParser:
+    """Force's argparse parser. `only`: build just that subcommand ("" none); `parser.only_found` says whether it
+    exists, else the caller builds the whole parser, so errors and help read the same."""
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]) or "force",
                                     description="Force — the code cockpit: your AI coding agent sessions in one terminal")
     parser.add_argument("--no-intro", action="store_true", help="attach without the startup intro")
@@ -2581,7 +2665,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"force {current_version() or '(development build)'}",
                         help="print the installed version and exit")
     _attach_client_args(parser)
-    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub = _OnlySub(parser.add_subparsers(dest="command", metavar="COMMAND"), only)
 
     p = sub.add_parser("attach", help="attach to the cockpit")
     p.add_argument("name", nargs="?", help="session name to attach to")
@@ -2812,8 +2896,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session", default="example", help="the session name the sample event names")
 
     sub.add_parser("skill", help="print the guide for agents that drive Force (also: force --skill)")
-    from . import support as support_mod
-    support_mod.add_parser(sub)
+    if sub.wants("support"):
+        from . import support as support_mod
+        support_mod.add_parser(sub)
     sub.add_parser("mcp", help="Force's local MCP server on stdin/stdout, for Chuck's session (SPEC §50)")
     sub.add_parser("api", help="the frontend API on stdin/stdout, JSON lines (SPEC §54)")
 
@@ -2871,6 +2956,7 @@ def build_parser() -> argparse.ArgumentParser:
     dsub.add_parser("archived", help="list archived sessions")
     dsub.add_parser("jump", help="jump to a session")
 
+    parser.only_found = sub.found or only == ""
     return parser
 
 
@@ -2964,17 +3050,23 @@ def _dispatch(args) -> int:
     if cmd == "terminals":
         return terminals_alias_command(args.args)
     if cmd == "prompt":
+        from . import automation
         return automation.prompt_command(cockpit, args)
     if cmd == "wait":
+        from . import automation
         return automation.wait_command(cockpit, args)
     if cmd == "read":
+        from . import automation
         return automation.read_command(cockpit, args)
     if cmd == "keys":
+        from . import automation
         return automation.keys_command(cockpit, args)
     if cmd == "report":
+        from . import automation
         return automation.report_command(cockpit, args)
     if cmd == "status":
         args.clear = False
+        from . import automation
         return automation.report_command(cockpit, args)
     if cmd == "notify-test":
         return notify_test_command(cockpit, args.event, args.session)
@@ -2990,6 +3082,7 @@ def _dispatch(args) -> int:
         from . import api as api_mod
         return api_mod.serve(cockpit)
     if cmd == "explain":
+        from . import automation
         return automation.explain_command(cockpit, args)
     if cmd == "import":
         return import_command(cockpit, args.dry_run, args.pid, args.name, args.session,
@@ -3092,20 +3185,22 @@ def main(argv: list[str] | None = None) -> int:
     if words[:1] == ["terminals"]:
         # the deprecated alias, with its leading options, goes straight through to fonts.sh's cleanup modes
         return terminals_alias_command(words[1:])
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    parser = build_parser(only=_command_word(words))
+    if not parser.only_found:
+        parser = build_parser()
+    args = parser.parse_args(words)
     try:
         return _dispatch(args)
     except RegistryError as e:
         print(f"force: {e}", file=sys.stderr)
         return 1
-    except automation.CmdError as e:
+    except CmdError as e:
         if getattr(args, "json", False):
             print(json.dumps({"error": e.code, "message": e.message}), file=sys.stderr)
         else:
             print(f"force: {e.message}", file=sys.stderr)
         return 1
-    except automation.UsageError as e:
+    except UsageError as e:
         print(f"force: {e.message}", file=sys.stderr)
         return 2
     except TmuxError as e:
