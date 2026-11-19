@@ -10,6 +10,8 @@ import socket
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -195,6 +197,62 @@ def test_link_peers_written_atomically(env):
     assert not [p for p in paths.config_file.parent.iterdir() if ".tmp" in p.name]
 
 
+def _fake_daemon(paths, answer=b"ok\n"):
+    """A link.sock that records each request line and answers `answer`. Returns (requests, stop)."""
+    try:
+        os.unlink(link.sock_file(paths))
+    except OSError:
+        pass
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(str(link.sock_file(paths)))
+    s.listen(4)
+    got = []
+
+    def serve():
+        while True:
+            try:
+                c, _ = s.accept()
+            except OSError:
+                return
+            with c:
+                got.append(c.makefile("rb").readline())
+                c.sendall(answer)
+
+    threading.Thread(target=serve, daemon=True).start()
+    return got, s.close
+
+
+def test_trust_and_untrust_ask_the_daemon_to_reload():
+    """SPEC §56.2 accepting: the peers file written, the local daemon is asked to take it at once."""
+    short = tempfile.mkdtemp(dir="/tmp")                     # unix socket paths are short
+    try:
+        paths = config.get_paths({"FORCE_STATE": short, "FORCE_CONFIG": short + "/settings.json",
+                                  "FORCE_HOME": short + "/home"})
+        got, stop = _fake_daemon(paths)
+        try:
+            link.trust(paths, "a" * 64, "laptop")
+            assert got == [b'{"v":1,"op":"reload"}\n']
+            assert link.untrust(paths, "laptop")
+            assert len(got) == 2
+            assert not link.untrust(paths, "laptop"), "nothing removed: nothing to reload"
+            assert len(got) == 2
+            assert link.ask_reload(paths) is True
+        finally:
+            stop()
+        # an older daemon answers ssh; none at all: the write stands all the same
+        got, stop = _fake_daemon(paths, b"ssh\n")
+        try:
+            assert link.ask_reload(paths) is False
+        finally:
+            stop()
+        os.unlink(link.sock_file(paths))
+        link.trust(paths, "b" * 64, "phone")
+        assert _peers(paths) == [{"id": "b" * 64, "name": "phone"}]
+        assert link.ask_reload(paths) is False
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+
+
 # --- 5. valid_card ---------------------------------------------------------------------------
 def test_valid_card_keeps_good_addrs():
     card = valid_card({"id": "a" * 64, "port": 47823,
@@ -317,8 +375,14 @@ def test_pair_trusts_remote_and_records_its_card(env, monkeypatch):
     assert got == "paired"
     assert run.calls == [remote.ssh_argv(paths, r, remote.REMOTE_FORCE, "link", "trust", "a" * 64, link.my_name())]
     lf = link.link_file(paths, "devbox")
-    assert json.loads(lf.read_text()) == {"id": "b" * 64, "addrs": ["192.0.2.2:47823"], "port": 47823}
+    data = json.loads(lf.read_text())
+    paired = data.pop("paired_ms")
+    assert data == {"id": "b" * 64, "addrs": ["192.0.2.2:47823"], "port": 47823}
+    assert abs(paired - time.time() * 1000) < 60_000, "when the id was recorded (the daemon's quick retries)"
     assert os.stat(lf).st_mode & 0o777 == 0o600
+    # a later hello with the same id keeps it
+    link.write_link(paths, "devbox", dict(card, addrs=["192.0.2.3:47823"]), now_ms=paired + 99_000)
+    assert json.loads(lf.read_text())["paired_ms"] == paired
 
 
 def test_pair_without_self_card_is_unpaired(env, monkeypatch):

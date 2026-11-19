@@ -136,6 +136,13 @@ impl PeersFile {
         PeersFile { path, every, last_check: None, loaded: false, stamp: None, peers: HashMap::new() }
     }
 
+    /// Reload now if the file changed, without waiting for the interval (`force link trust|untrust` asked through
+    /// link.sock). Returns what `refresh` returns.
+    pub fn refresh_now(&mut self, now: Instant) -> Option<String> {
+        self.last_check = None;
+        self.refresh(now)
+    }
+
     /// Reload when due and changed. Returns Some(message) when it reloaded (for the log), None otherwise.
     pub fn refresh(&mut self, now: Instant) -> Option<String> {
         if let Some(t) = self.last_check {
@@ -176,11 +183,13 @@ pub fn write_self(path: &Path, id: &PublicKey, port: u16, addrs: &[String]) -> i
     write_atomic(path, &serde_json::to_vec(&v).expect("json"))
 }
 
-/// The dialable part of a remote's `link.json` (written by the Python side): its id and addresses.
+/// The dialable part of a remote's `link.json` (written by the Python side): its id and addresses, and when this
+/// machine recorded that id (`paired_ms`, unix ms; none in a file from before it was written).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteCard {
     pub id: PublicKey,
     pub addrs: Vec<std::net::SocketAddr>,
+    pub paired_ms: Option<u64>,
 }
 
 /// Parse the `addrs` of a card: `"ip:port"` strings, or bare IPs combined with `port`. At most 16; others skipped.
@@ -216,7 +225,7 @@ pub fn card_or_reason(path: &Path) -> Result<RemoteCard, &'static str> {
     if addrs.is_empty() {
         return Err(NO_ADDRESSES);
     }
-    Ok(RemoteCard { id, addrs })
+    Ok(RemoteCard { id, addrs, paired_ms: v.get("paired_ms").and_then(|p| p.as_u64()) })
 }
 
 /// Read-modify-write `link.json`: set `state`, `reason`, `since_ms` and `fails` (dial timeouts in a row), keep
@@ -350,6 +359,12 @@ mod tests {
         assert!(pf.peers.contains_key(&b) && !pf.peers.contains_key(&a));
         // unchanged: no reload
         assert!(pf.refresh(t0 + Duration::from_secs(6)).is_none());
+        // asked to reload (link.sock `reload`): a change is seen at once, before the interval passed
+        write_peers(&p, &format!(r#"{{"peers":[{{"id":"{a}","name":"a"}},{{"id":"{b}","name":"bb"}}]}}"#), 0o600);
+        assert!(pf.refresh(t0 + Duration::from_millis(6100)).is_none());
+        assert!(pf.refresh_now(t0 + Duration::from_millis(6200)).is_some());
+        assert_eq!(pf.peers.len(), 2);
+        assert!(pf.refresh_now(t0 + Duration::from_millis(6300)).is_none(), "unchanged: nothing to reload");
         // removed: nobody
         fs::remove_file(&p).unwrap();
         pf.refresh(t0 + Duration::from_secs(9));
@@ -387,6 +402,9 @@ mod tests {
         let card = card_or_reason(&p).unwrap();
         assert_eq!(card.id, id);
         assert_eq!(card.addrs, vec!["127.0.0.1:5".parse().unwrap(), "10.0.0.1:47823".parse().unwrap()]);
+        assert_eq!(card.paired_ms, None, "a file from before paired_ms");
+        fs::write(&p, format!(r#"{{"id":"{id}","addrs":["127.0.0.1:5"],"paired_ms":1700000000000}}"#)).unwrap();
+        assert_eq!(card_or_reason(&p).unwrap().paired_ms, Some(1_700_000_000_000));
         fs::write(&p, r#"{"id":"nothex","addrs":["127.0.0.1:5"]}"#).unwrap();
         assert_eq!(card_or_reason(&p), Err(NOT_PAIRED));
         fs::remove_dir_all(&d).ok();

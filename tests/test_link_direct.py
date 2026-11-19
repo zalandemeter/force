@@ -115,13 +115,27 @@ class Host:
         self.peers.write_text(json.dumps(peers))
         os.chmod(self.peers, 0o600)
 
-    def pair_to(self, other: "Host", name: str = "devbox"):
-        """Record `other` as remote `name` here (hosts.json + link.json, as the watcher does)."""
+    def pair_to(self, other: "Host", name: str = "devbox", paired_ms=None):
+        """Record `other` as remote `name` here (hosts.json + link.json, as the watcher does; `paired_ms` as a
+        fresh pairing writes it)."""
         self.hosts.write_text(json.dumps({"hosts": [{"name": name, "ssh": name}]}))
         d = self.state / "remotes" / name
         d.mkdir(parents=True, exist_ok=True)
-        (d / "link.json").write_text(json.dumps({"id": other.id, "addrs": [f"127.0.0.1:{other.port}"],
-                                                 "port": other.port}))
+        card = {"id": other.id, "addrs": [f"127.0.0.1:{other.port}"], "port": other.port}
+        if paired_ms is not None:
+            card["paired_ms"] = paired_ms
+        (d / "link.json").write_text(json.dumps(card))
+
+    def paths(self):
+        """Force's paths on this host (for the Python side, force/link.py)."""
+        from force import config
+        return config.get_paths({"FORCE_STATE": str(self.state), "FORCE_CONFIG": str(self.config / "settings.json"),
+                                 "FORCE_HOME": str(self.home / ".local/share/force")})
+
+    def status(self):
+        p = subprocess.run([str(self.link_bin), "status", "--state", str(self.state), "--json"],
+                           capture_output=True, text=True, timeout=10)
+        return json.loads(p.stdout)
 
     def link_state(self, name="devbox"):
         return (read_json(self.state / "remotes" / name / "link.json") or {}).get("state")
@@ -317,6 +331,53 @@ def test_a_changed_id_is_refused_until_paired_again(paired, world):
     p = subprocess.run(laptop.exec_argv("~/.local/bin/force", "roundtrip"), capture_output=True, env=laptop.env(),
                        timeout=30)
     assert p.returncode == 42
+
+
+def test_trust_reloads_the_daemon_at_once_and_pairing_goes_direct(world):
+    """`force link trust` asks the daemon to reload (link.sock `reload`): the peer is accepted when it returns, not
+    at the next 2 s check, so the pairing host's first dial gets through (SPEC §56.2)."""
+    from force import link
+    laptop = world("laptop").start()
+    devbox = world("devbox").start()
+    assert devbox.status()["peers"] == 0
+    link.trust(devbox.paths(), laptop.id, "laptop")
+    assert devbox.status()["peers"] == 1, "reloaded before trust returned"
+    t0 = time.monotonic()
+    laptop.pair_to(devbox, paired_ms=int(time.time() * 1000))
+    wait_for(lambda: laptop.link_state() == "direct", 15, "the direct link")
+    assert time.monotonic() - t0 < 10
+    assert "refused unknown id" not in devbox.log.read_text()
+    assert link.untrust(devbox.paths(), "laptop")
+    assert devbox.status()["peers"] == 0, "reloaded before untrust returned"
+    wait_for(lambda: laptop.link_state() == "ssh", 20, "ssh after untrust")
+
+
+def test_a_refusal_right_after_pairing_is_retried_soon(world):
+    """The remote has not taken the new peer yet when the first dial arrives (an older Force there, no reload
+    request): the dial is refused, retried after 3 s, and the link comes up well before the 60 s schedule."""
+    laptop = world("laptop").start()
+    devbox = world("devbox").start()
+    t0 = time.monotonic()
+    laptop.pair_to(devbox, paired_ms=int(time.time() * 1000))
+    wait_for(lambda: (read_json(laptop.state / "remotes/devbox/link.json") or {}).get("reason") == "refused",
+             15, "the first dial refused")
+    devbox.trust(laptop)                                  # the file only: found by devbox's 2 s check
+    wait_for(lambda: laptop.link_state() == "direct", 20, "the direct link")
+    assert time.monotonic() - t0 < 20, "came up through a quick retry, not the 60 s redial"
+    assert "just paired: again in 3 s" in laptop.log.read_text()
+
+
+def test_an_old_refusal_waits_for_the_regular_schedule(world):
+    """No quick retries for a pairing older than 30 s (or a link.json without paired_ms)."""
+    laptop = world("laptop").start()
+    devbox = world("devbox").start()
+    laptop.pair_to(devbox, paired_ms=int(time.time() * 1000) - 60_000)
+    wait_for(lambda: (read_json(laptop.state / "remotes/devbox/link.json") or {}).get("reason") == "refused",
+             15, "the first dial refused")
+    devbox.trust(laptop)
+    time.sleep(6)
+    assert laptop.link_state() == "ssh"
+    assert "just paired" not in laptop.log.read_text()
 
 
 def test_untrust_closes_the_link(paired):

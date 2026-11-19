@@ -30,6 +30,13 @@ pub const REDIAL_EVERY: Duration = Duration::from_secs(60);
 pub const KEEPALIVE: Duration = Duration::from_secs(5);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const PEERS_CHECK: Duration = Duration::from_secs(2);
+/// A dial refused soon after this machine recorded the remote's id (a fresh pairing, or a changed id): the remote
+/// may not have reloaded its peers yet (an older Force there, or a reload that did not reach its daemon), so it is
+/// tried again after QUICK_RETRY, at most QUICK_RETRIES times, while the id is younger than FRESH_PAIRING_MS; then
+/// the REDIAL_EVERY schedule.
+pub const QUICK_RETRY: Duration = Duration::from_secs(3);
+pub const QUICK_RETRIES: u32 = 3;
+pub const FRESH_PAIRING_MS: u64 = 30_000;
 /// Incoming handshakes per source address and minute.
 pub const RATE_PER_MIN: u32 = 10;
 /// Channels a peer may have open on one connection.
@@ -129,6 +136,17 @@ struct Remote {
     since_ms: u64,
     /// dial timeouts in a row (SPEC §56.2 `fails`): two or more with reason `timeout` is the `force net up` hint
     fails: u32,
+    /// quick retries made for the current card (QUICK_RETRY), and when the next one is due
+    quick: u32,
+    retry_at: Option<Instant>,
+}
+
+/// Whether a dial that ended with `outcome` is tried again after QUICK_RETRY: a refusal while the remote's id was
+/// recorded less than FRESH_PAIRING_MS ago (`paired_ms`), at most QUICK_RETRIES times for that card.
+pub fn quick_retry(outcome: Dialed, paired_ms: Option<u64>, now_ms: u64, done: u32) -> bool {
+    outcome == Dialed::Refused
+        && done < QUICK_RETRIES
+        && paired_ms.is_some_and(|p| now_ms.saturating_sub(p) < FRESH_PAIRING_MS)
 }
 
 /// How a dial ended (SPEC §56.2 `reason`). A timeout is no answer at all (a firewall, no route); a refusal is an
@@ -175,6 +193,7 @@ struct Shared {
     opts: Opts,
     allow: Allow,
     peers: RwLock<HashMap<PublicKey, String>>,
+    peers_file: Mutex<PeersFile>,
     remotes: Mutex<HashMap<String, Remote>>,
     incoming: Mutex<Vec<(PublicKey, WeakConnectionHandle)>>,
     rate: Mutex<RateLimit>,
@@ -188,6 +207,19 @@ impl Shared {
     fn refusal(&self, msg: &str) {
         if self.refusals.lock().unwrap().take() {
             log(msg);
+        }
+    }
+
+    /// Reload link-peers.json when it changed: when due (every PEERS_CHECK), or `now` (a `reload` request on
+    /// link.sock from `force link trust|untrust`). Connections of ids no longer listed are closed.
+    fn reload_peers(&self, now: bool) {
+        let mut pf = self.peers_file.lock().unwrap();
+        let msg = if now { pf.refresh_now(Instant::now()) } else { pf.refresh(Instant::now()) };
+        if let Some(msg) = msg {
+            log(&msg);
+            *self.peers.write().unwrap() = pf.peers.clone();
+            drop(pf);
+            drop_untrusted(self);
         }
     }
 }
@@ -351,6 +383,7 @@ async fn main(opts: Opts) -> Result<(), String> {
         opts: opts.clone(),
         allow,
         peers: RwLock::new(peers.peers.clone()),
+        peers_file: Mutex::new(peers),
         remotes: Mutex::new(HashMap::new()),
         incoming: Mutex::new(Vec::new()),
         rate: Mutex::new(RateLimit::default()),
@@ -381,11 +414,7 @@ async fn main(opts: Opts) -> Result<(), String> {
             _ = term.recv() => break,
             _ = int.recv() => break,
         }
-        if let Some(msg) = peers.refresh(Instant::now()) {
-            log(&msg);
-            *shared.peers.write().unwrap() = peers.peers.clone();
-            drop_untrusted(&shared);
-        }
+        shared.reload_peers(false);
         manage_remotes(&ep, &shared);
     }
     // stopped: tell the peers at once (they go back to ssh now, not after the idle timeout), mark our remotes ssh
@@ -571,8 +600,13 @@ fn manage_remotes(ep: &Endpoint, shared: &Arc<Shared>) {
                     None => true,
                     Some(t) => now.duration_since(t) >= REDIAL_EVERY,
                 };
+                let retry = r.retry_at.is_some_and(|t| now >= t);
                 let changed = r.dialed_card.as_ref() != Some(k);
-                if r.conn.is_none() && !r.dialing && (due || changed || addrs_changed) {
+                if r.conn.is_none() && !r.dialing && (due || changed || addrs_changed || retry) {
+                    if changed {
+                        r.quick = 0;
+                    }
+                    r.retry_at = None;
                     r.dialing = true;
                     r.last_dial = Some(now);
                     r.dialed_card = Some(k.clone());
@@ -627,6 +661,7 @@ async fn dial(ep: Endpoint, shared: Arc<Shared>, name: String, card: identity::R
                 .unwrap_or_default();
             log(&format!("{name}: direct {via}"));
             r.conn = Some(conn);
+            r.quick = 0;
             r.dialed(Dialed::Up);
         }
         Ok(Ok(conn)) => {
@@ -635,8 +670,15 @@ async fn dial(ep: Endpoint, shared: Arc<Shared>, name: String, card: identity::R
             r.dialed(Dialed::WrongId);
         }
         Ok(Err(e)) => {
-            log(&format!("{name}: ssh ({e})"));
-            r.dialed(if e.starts_with("refused") { Dialed::Refused } else { Dialed::Failed });
+            let outcome = if e.starts_with("refused") { Dialed::Refused } else { Dialed::Failed };
+            if quick_retry(outcome, card.paired_ms, identity::now_ms(), r.quick) {
+                r.quick += 1;
+                r.retry_at = Some(Instant::now() + QUICK_RETRY);
+                log(&format!("{name}: ssh ({e}; just paired: again in {} s)", QUICK_RETRY.as_secs()));
+            } else {
+                log(&format!("{name}: ssh ({e})"));
+            }
+            r.dialed(outcome);
         }
         Err(_) => {
             log(&format!("{name}: ssh (dial timed out, {} in a row)", r.fails + 1));
@@ -678,11 +720,20 @@ async fn local(mut stream: UnixStream, ep: Endpoint, shared: Arc<Shared>) {
         _ => return,
     };
     if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-        if v.get("op").and_then(|o| o.as_str()) == Some("status") {
-            let mut s = serde_json::to_vec(&status(&ep, &shared)).unwrap_or_default();
-            s.push(b'\n');
-            let _ = stream.write_all(&s).await;
-            return;
+        match v.get("op").and_then(|o| o.as_str()) {
+            Some("status") => {
+                let mut s = serde_json::to_vec(&status(&ep, &shared)).unwrap_or_default();
+                s.push(b'\n');
+                let _ = stream.write_all(&s).await;
+                return;
+            }
+            // `force link trust|untrust` changed link-peers.json: take it now, not at the next check
+            Some("reload") => {
+                shared.reload_peers(true);
+                let _ = stream.write_all(b"ok\n").await;
+                return;
+            }
+            _ => {}
         }
     }
     let conn = Header::parse(&line).ok().and_then(|h| {
@@ -806,6 +857,20 @@ mod tests {
         r.fails = u32::MAX;
         r.dialed(Dialed::Timeout);
         assert_eq!(r.fails, u32::MAX, "saturates");
+    }
+
+    /// A refusal right after pairing is tried again soon, a few times; anything else waits for the 60 s schedule.
+    #[test]
+    fn quick_retry_only_for_a_fresh_refusal() {
+        let now = 1_700_000_000_000;
+        assert!(quick_retry(Dialed::Refused, Some(now - 1_000), now, 0));
+        assert!(quick_retry(Dialed::Refused, Some(now - 1_000), now, QUICK_RETRIES - 1));
+        assert!(!quick_retry(Dialed::Refused, Some(now - 1_000), now, QUICK_RETRIES), "at most QUICK_RETRIES");
+        assert!(!quick_retry(Dialed::Refused, Some(now - FRESH_PAIRING_MS), now, 0), "paired too long ago");
+        assert!(!quick_retry(Dialed::Refused, None, now, 0), "a link.json without paired_ms");
+        for o in [Dialed::Up, Dialed::Timeout, Dialed::Failed, Dialed::WrongId] {
+            assert!(!quick_retry(o, Some(now), now, 0), "{o:?}");
+        }
     }
 
     /// The manager's status for each remote reaches its link.json: reason and fails, the Python side's fields kept.

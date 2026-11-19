@@ -6,8 +6,8 @@ Files:
   ~/.config/force/link-peers.json    {"peers": [{"id", "name"}]}, 0600: who may connect here
   <state>/link/self.json             {"id", "port", "addrs"}: this host's card, written by the daemon
   <state>/link.sock                  the daemon's local socket
-  <state>/remotes/<name>/link.json   {"id", "addrs", "port"} (pairing, here) + {"state", "reason", "since_ms",
-                                     "fails"} (daemon)
+  <state>/remotes/<name>/link.json   {"id", "addrs", "port", "paired_ms"} (pairing, here) + {"state", "reason",
+                                     "since_ms", "fails"} (daemon)
 """
 from __future__ import annotations
 
@@ -85,6 +85,7 @@ def trust(paths, link_id: str, name: str) -> None:
     peers = [p for p in read_peers(paths) if p["name"] != name and p["id"] != link_id]
     peers.append({"id": link_id, "name": name})
     _write_private(peers_file(paths), {"peers": peers})
+    ask_reload(paths)
 
 
 def untrust(paths, who: str) -> bool:
@@ -94,7 +95,30 @@ def untrust(paths, who: str) -> bool:
     if len(keep) == len(peers):
         return False
     _write_private(peers_file(paths), {"peers": keep})
+    ask_reload(paths)
     return True
+
+
+def ask_reload(paths, timeout: float = 1.0) -> bool:
+    """Ask this host's link daemon to reload link-peers.json now (`{"op":"reload"}` on link.sock), so a peer just
+    trusted is accepted at once rather than at the daemon's next 2 s check. True when it answered `ok`. No daemon,
+    or an older one (it answers `ssh`), is fine: its check picks the file up."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(str(sock_file(paths)))
+        s.sendall(b'{"v":1,"op":"reload"}\n')
+        answer = b""
+        while not answer.endswith(b"\n") and len(answer) < 64:
+            chunk = s.recv(64)
+            if not chunk:
+                break
+            answer += chunk
+        return answer.strip() == b"ok"
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 def link_command(paths, action: str, args: list[str]) -> int:
@@ -338,10 +362,16 @@ def read_link(paths, name: str) -> dict:
         return {}
 
 
-def write_link(paths, name: str, card: dict) -> None:
-    """Record a remote's card: id, addrs, port. The daemon's state fields stay while the id is the same."""
+def write_link(paths, name: str, card: dict, now_ms: int | None = None) -> None:
+    """Record a remote's card: id, addrs, port. The daemon's state fields stay while the id is the same; a new id
+    starts afresh with `paired_ms` (when it was recorded, unix ms), which tells the daemon that a refused dial
+    may only mean the remote has not reloaded its peers yet (SPEC §56.2 dialing)."""
     old = read_link(paths, name)
-    data = dict(old) if old.get("id") == card["id"] else {}
+    if old.get("id") == card["id"]:
+        data = dict(old)
+    else:
+        import time
+        data = {"paired_ms": int(time.time() * 1000) if now_ms is None else now_ms}
     data.update({"id": card["id"], "addrs": card["addrs"], "port": card["port"]})
     if data != old:
         _write_private(link_file(paths, name), data)
