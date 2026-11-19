@@ -96,11 +96,23 @@ def test_report_without_a_tty(tmp_path):
 
 # --- a dropped connection (SPEC §40): the pane's terminal modes, echo and pending input -----------------------
 
+def _drain(master):
+    """Read what the pty echoed: a terminal setting applied with TCSADRAIN or TCSAFLUSH waits until the output is
+    read, and on macOS nothing else reads it (the test hung there)."""
+    while select.select([master], [], [], 0.05)[0]:
+        try:
+            if not os.read(master, 4096):
+                return
+        except OSError:
+            return
+
+
 def test_quiet_input_stops_echo_and_drops_what_arrived():
     master, slave = pty.openpty()
     try:
         os.write(master, b"junk\n")
         time.sleep(0.05)
+        _drain(master)
         attrs = cli._quiet_input(slave)
         assert attrs is not None
         lflag = termios.tcgetattr(slave)[3]
@@ -108,7 +120,7 @@ def test_quiet_input_stops_echo_and_drops_what_arrived():
         assert lflag & termios.ICANON, "otherwise as it was"
         assert select.select([slave], [], [], 0.1)[0] == [], "what arrived before is dropped"
         # a killed ssh left its raw mode: the same settings again
-        tty.setraw(slave)
+        tty.setraw(slave, termios.TCSANOW)
         assert cli._quiet_input(slave, attrs) == attrs
         lflag = termios.tcgetattr(slave)[3]
         assert lflag & termios.ICANON and not lflag & termios.ECHO
@@ -157,7 +169,7 @@ sys.stdout.flush()
 if n == 1:
     time.sleep(0.5)
     sys.exit(255)                                # the link drops: the client never turns them off
-time.sleep(60)
+time.sleep(30)
 '''
 
 
@@ -181,7 +193,7 @@ def test_a_dropped_connection_leaves_the_pane_clean_and_quiet(env, tmp_path):
                       sys.executable, "-P", "-m", "force.cli", "nested", "s1", "--remote", "devbox"])
     ui = ["tmux", "-L", env.paths.ui_socket]
     subprocess.run([*ui, "-f", str(env.tmp / "tmux-ui.conf"), "new", "-d", "-s", "ui", "-x", "80", "-y", "24", cmd],
-                   check=True)
+                   check=True, timeout=10)
 
     def tm(*a):
         return subprocess.run([*ui, *a], capture_output=True, text=True, timeout=10).stdout.strip()
@@ -193,8 +205,11 @@ def test_a_dropped_connection_leaves_the_pane_clean_and_quiet(env, tmp_path):
     assert wait_for(lambda: "connection to devbox ended" in tm("capture-pane", "-p", "-t", "ui:"))
     assert tm("display", "-p", "-t", "ui:", flags) == "0000000", "the remote client's modes are off again"
     assert tm("show", "-wqv", "-t", "ui:", "@force_nested") == "", "no nested client until the next one reports"
-    pane_tty = tm("display", "-p", "-t", "ui:", "#{pane_tty}")
-    assert "-echo" in subprocess.run(["stty", "-F", pane_tty, "-a"], capture_output=True, text=True).stdout.split()
+    fd = os.open(tm("display", "-p", "-t", "ui:", "#{pane_tty}"), os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        assert not termios.tcgetattr(fd)[3] & termios.ECHO, "the pane does not echo"
+    finally:
+        os.close(fd)
     tm("send-keys", "-t", "ui:", "-l", "junk")
     tm("send-keys", "-t", "ui:", "Enter")
     time.sleep(0.2)
