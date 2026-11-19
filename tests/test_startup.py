@@ -70,7 +70,9 @@ def test_unknown_command_reads_as_before(capsys):
         cli.main(["bogus"])
     assert e.value.code == 2
     err = capsys.readouterr().err
-    assert "invalid choice: 'bogus'" in err and "'list'" in err and "'dialog'" in err
+    # the wording differs between Python versions (quoted choices or not); every command is listed in each
+    assert "invalid choice" in err and "bogus" in err
+    assert all(c in err for c in ("list", "dialog", "nested-report", "support"))
 
 
 def test_the_dialogs_forward_the_same_commands():
