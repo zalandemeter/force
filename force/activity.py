@@ -271,25 +271,47 @@ _TASK_NOTICE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
 _TOOL_USE_ID = re.compile(r"<tool-use-id>([^<]+)</tool-use-id>", re.I)
 _TASK_STATUS = re.compile(r"<status>([^<]+)</status>", re.I)
 _ENDED_STATUSES = ("completed", "failed", "killed", "stopped", "expired")
+_TASK_ID = re.compile(r"<task-id>([^<]+)</task-id>", re.I)
+# a background agent that stopped while background work of its own still runs gets a notice with a final status but
+# resumes by itself (and notifies again): it has not ended
+_STILL_WAITING = re.compile(r"is waiting on its own background work|stopped with background work of its own still "
+                            r"running", re.I)
 
 
-def _ended_ids(record: dict) -> set[str]:
-    """The background tool-use ids a user record reports as ended (a final task-notification status)."""
+def _notice_text(record: dict) -> str:
+    """The text a record may carry task notices in: a user record's content (a notice that starts a turn), or a
+    `queued_command` attachment in `task-notification` mode (a notice that arrives while the agent works)."""
+    if record.get("type") == "attachment":
+        a = record.get("attachment")
+        if isinstance(a, dict) and a.get("type") == "queued_command" and a.get("commandMode") == "task-notification" \
+                and isinstance(a.get("prompt"), str):
+            return a["prompt"]
+        return ""
     message = record.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        text = "".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
-    else:
-        text = ""
-    ended = set()
+        return content
+    if isinstance(content, list):
+        return "".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+    return ""
+
+
+def _ended_ids(record: dict) -> tuple[set[str], set[str]]:
+    """What a user record reports as ended (a final task-notification status): (tool_use ids, task ids). A notice
+    names its launch by <tool-use-id>, or only by <task-id> (later notices of an agent that waited on its own work);
+    a notice saying the agent is still waiting on its own background work ends nothing."""
+    text = _notice_text(record)
+    ended, ended_tasks = set(), set()
     for block in _TASK_NOTICE.findall(text) or ([text] if text else []):
-        m = _TOOL_USE_ID.search(block)
         s = _TASK_STATUS.search(block)
-        if m and s and s.group(1).lower() in _ENDED_STATUSES:
+        if not s or s.group(1).lower() not in _ENDED_STATUSES or _STILL_WAITING.search(block):
+            continue
+        m = _TOOL_USE_ID.search(block)
+        if m:
             ended.add(m.group(1))
-    return ended
+        elif t := _TASK_ID.search(block):
+            ended_tasks.add(t.group(1))
+    return ended, ended_tasks
 
 
 def _launched_tasks(record: dict) -> list[Background]:
@@ -424,6 +446,7 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
     ended: set[str] = set()
     task_use: dict[str, str] = {}       # task id -> the tool_use id that launched it
     stopped: set[str] = set()           # task ids the agent stopped
+    ended_tasks: set[str] = set()       # task ids a notice without <tool-use-id> reported ended
     for line in reversed(lines):
         if not line.strip():
             continue
@@ -436,8 +459,15 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
         if record.get("type") == "user" and _is_prompt(record):
             tool_after = False          # walking back past a prompt: the tool calls seen belong to a later turn
             end_turn = False            # walking back past a prompt: the records seen belong to an older turn
+        if record.get("type") == "attachment":
+            ids, tasks = _ended_ids(record)
+            ended.update(ids)
+            ended_tasks.update(tasks)
+            continue
         if record.get("type") == "user":
-            ended.update(_ended_ids(record))
+            ids, tasks = _ended_ids(record)
+            ended.update(ids)
+            ended_tasks.update(tasks)
             task_use.update(_task_ids(record))
             continue
         if record.get("type") != "assistant":
@@ -476,9 +506,94 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
                     and is_finding(str(b.get("text") or "")):
                 end_reply_ms = _timestamp_ms(record.get("timestamp"))
     # oldest first (we walked backwards); drop the launched tasks a later notice reported ended, or the agent stopped
-    ended.update(task_use[t] for t in stopped if t in task_use)
+    ended.update(task_use[t] for t in stopped | ended_tasks if t in task_use)
     background = tuple(t for t in reversed(launched) if t.tool_use_id not in ended)
     return Scan(desc, model, effort, reply_ms, end_reply_ms, background, bool(launched))
+
+
+_BG_FIRST = 8 * 1024 * 1024            # the first read of a transcript's background records: its last 8 MiB
+_BG_KEEP_MS = 24 * 3600 * 1000         # launches older than this never count (SPEC §5): forgotten
+
+
+class BackgroundTracker:
+    """The background tasks of one transcript, followed across scans (SPEC §5). The 256 KiB tail `scan` reads
+    covers only minutes of a busy session, so a task launched an hour ago would fall out of it and the session would
+    look idle while its agent still waits on that work. The tracker reads the transcript's last 8 MiB once, then
+    only the bytes appended since, and keeps the launches, notices, task ids and stops it has seen."""
+
+    def __init__(self) -> None:
+        self.offset: int | None = None
+        self.ino: int | None = None
+        self._rest = b""
+        self.launched: dict[str, Background] = {}      # tool_use id -> launch (oldest first)
+        self.ended: set[str] = set()
+        self.ended_tasks: set[str] = set()
+        self.task_use: dict[str, str] = {}
+        self.stopped: set[str] = set()
+
+    def _reset(self) -> None:
+        self.__init__()
+
+    def _feed(self, line: bytes) -> None:
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(record, dict) or record.get("isSidechain"):
+            return
+        kind = record.get("type")
+        if kind in ("user", "attachment"):
+            ids, tasks = _ended_ids(record)
+            self.ended.update(ids)
+            self.ended_tasks.update(tasks)
+            if kind == "user":
+                self.task_use.update(_task_ids(record))
+        elif kind == "assistant":
+            message = record.get("message")
+            if record.get("isApiErrorMessage") or (
+                    isinstance(message, dict) and str(message.get("model", "")).startswith("<")):
+                return
+            for t in _launched_tasks(record):
+                self.launched.setdefault(t.tool_use_id, t)
+            self.stopped.update(_stopped_task_ids(record))
+
+    def update(self, transcript: Path, now_ms: int | None = None) -> tuple[Background, ...] | None:
+        """Read what was appended since the last call; the tasks still running (oldest first), or None when the
+        transcript cannot be read. A transcript that shrank or was replaced is read afresh."""
+        try:
+            st = transcript.stat()
+            if self.ino is not None and (st.st_ino != self.ino or st.st_size < (self.offset or 0)):
+                self._reset()
+            with open(transcript, "rb") as f:
+                if self.offset is None:
+                    start = max(0, st.st_size - _BG_FIRST)
+                    f.seek(start)
+                    buf = f.read()
+                    if start > 0:
+                        cut = buf.find(b"\n")
+                        buf = buf[cut + 1:] if cut >= 0 else b""      # drop the partial first line
+                else:
+                    f.seek(self.offset)
+                    buf = self._rest + f.read()
+                self.offset = f.tell()
+            self.ino = st.st_ino
+        except OSError:
+            return None
+        lines = buf.split(b"\n")
+        self._rest = lines.pop()            # a line still being written: kept for the next read
+        for line in lines:
+            if line.strip():
+                self._feed(line)
+        return self.running(now_ms)
+
+    def running(self, now_ms: int | None = None) -> tuple[Background, ...]:
+        ended = self.ended | {self.task_use[t] for t in self.stopped | self.ended_tasks if t in self.task_use}
+        if now_ms is not None:              # forget what can no longer count
+            old = [k for k, t in self.launched.items() if t.started_ms is not None
+                   and now_ms - t.started_ms > _BG_KEEP_MS]
+            for k in old:
+                del self.launched[k]
+        return tuple(t for k, t in self.launched.items() if k not in ended)
 
 
 def describe(transcript: Path, max_len: int = 60) -> str | None:
