@@ -127,6 +127,19 @@ struct Remote {
     state: &'static str,
     reason: String,
     since_ms: u64,
+    /// dial timeouts in a row (SPEC §56.2 `fails`): two or more with reason `timeout` is the `force net up` hint
+    fails: u32,
+}
+
+/// How a dial ended (SPEC §56.2 `reason`). A timeout is no answer at all (a firewall, no route); a refusal is an
+/// answer that refused our key (not paired there).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialed {
+    Up,
+    Timeout,
+    Refused,
+    WrongId,
+    Failed,
 }
 
 impl Remote {
@@ -136,6 +149,25 @@ impl Remote {
             self.reason = reason.to_string();
             self.since_ms = identity::now_ms();
         }
+    }
+
+    /// Record a dial's outcome: its state and reason, and `fails`, which counts timeouts in a row and goes back to
+    /// 0 on any other outcome.
+    fn dialed(&mut self, outcome: Dialed) {
+        self.fails = if outcome == Dialed::Timeout { self.fails.saturating_add(1) } else { 0 };
+        match outcome {
+            Dialed::Up => self.set("direct", ""),
+            Dialed::Timeout => self.set("ssh", "timeout"),
+            Dialed::Refused => self.set("ssh", "refused"),
+            Dialed::WrongId => self.set("ssh", "wrong id"),
+            Dialed::Failed => self.set("ssh", "dial failed"),
+        }
+    }
+
+    /// Nothing to dial (`not paired`, `no addresses`): ssh, and no timeouts to count.
+    fn undialable(&mut self, reason: &str) {
+        self.fails = 0;
+        self.set("ssh", reason);
     }
 }
 
@@ -357,7 +389,7 @@ async fn main(opts: Opts) -> Result<(), String> {
     for (name, r) in shared.remotes.lock().unwrap().iter_mut() {
         r.conn = None;
         r.set("ssh", "link daemon stopped");
-        let _ = identity::write_link_state(&link_json(&shared, name), r.state, &r.reason, r.since_ms);
+        let _ = identity::write_link_state(&link_json(&shared, name), r.state, &r.reason, r.since_ms, r.fails);
     }
     let _ = tokio::time::timeout(Duration::from_secs(2), ep.close()).await;
     Ok(())
@@ -508,14 +540,16 @@ fn manage_remotes(ep: &Endpoint, shared: &Arc<Shared>) {
     });
     for name in wanted {
         let path = link_json(shared, &name);
-        let card = identity::read_card(&path);
+        let read = identity::card_or_reason(&path);
+        let card = read.as_ref().ok().cloned();
         let r = remotes.entry(name.clone()).or_insert_with(|| Remote { state: "ssh", ..Default::default() });
         // a connection that ended, or to an id that is no longer the recorded one
         if let Some(c) = &r.conn {
             let gone = c.close_reason().map(|e| format!("closed: {e}"));
-            let other = match &card {
-                Some(k) if k.id == c.remote_id() => None,
-                _ => Some("not paired".to_string()),
+            let other = match &read {
+                Ok(k) if k.id == c.remote_id() => None,
+                Ok(_) => Some(identity::NOT_PAIRED.to_string()),
+                Err(why) => Some(why.to_string()),
             };
             if let Some(why) = gone.or(other) {
                 c.close(VarInt::from_u32(0), b"repaired");
@@ -525,11 +559,9 @@ fn manage_remotes(ep: &Endpoint, shared: &Arc<Shared>) {
             }
         }
         r.card = card.clone();
-        match &card {
-            None => {
-                r.set("ssh", "not paired");
-            }
-            Some(k) => {
+        match &read {
+            Err(why) => r.undialable(why),
+            Ok(k) => {
                 let due = match r.last_dial {
                     None => true,
                     Some(t) => now.duration_since(t) >= REDIAL_EVERY,
@@ -543,7 +575,7 @@ fn manage_remotes(ep: &Endpoint, shared: &Arc<Shared>) {
                 }
             }
         }
-        match identity::write_link_state(&path, r.state, &r.reason, r.since_ms) {
+        match identity::write_link_state(&path, r.state, &r.reason, r.since_ms, r.fails) {
             Ok(_) => {}
             Err(e) => log(&format!("{}: {e}", path.display())),
         }
@@ -590,20 +622,20 @@ async fn dial(ep: Endpoint, shared: Arc<Shared>, name: String, card: identity::R
                 .unwrap_or_default();
             log(&format!("{name}: direct {via}"));
             r.conn = Some(conn);
-            r.set("direct", "");
+            r.dialed(Dialed::Up);
         }
         Ok(Ok(conn)) => {
             conn.close(VarInt::from_u32(0), b"wrong id");
             log(&format!("{name}: ssh (answered with another id)"));
-            r.set("ssh", "wrong id");
+            r.dialed(Dialed::WrongId);
         }
         Ok(Err(e)) => {
             log(&format!("{name}: ssh ({e})"));
-            r.set("ssh", if e.starts_with("refused") { "refused" } else { "dial failed" });
+            r.dialed(if e.starts_with("refused") { Dialed::Refused } else { Dialed::Failed });
         }
         Err(_) => {
-            log(&format!("{name}: ssh (dial timed out)"));
-            r.set("ssh", "timeout");
+            log(&format!("{name}: ssh (dial timed out, {} in a row)", r.fails + 1));
+            r.dialed(Dialed::Timeout);
         }
     }
 }
@@ -740,6 +772,54 @@ mod tests {
         assert!(!r.allow(a, t + Duration::from_secs(30)));
         assert!(r.allow(b, t + Duration::from_secs(30)));
         assert!(r.allow(a, t + Duration::from_secs(61)));
+    }
+
+    /// `fails` counts dial timeouts in a row; the link coming up or any other outcome starts it again. A timeout
+    /// (no answer) and a refusal (an answer refusing our key) keep apart in `reason` (SPEC §56.2).
+    #[test]
+    fn fails_count_timeouts_in_a_row() {
+        let mut r = Remote { state: "ssh", ..Default::default() };
+        r.dialed(Dialed::Timeout);
+        assert_eq!((r.state, r.reason.as_str(), r.fails), ("ssh", "timeout", 1));
+        let since = r.since_ms;
+        r.dialed(Dialed::Timeout);
+        assert_eq!((r.reason.as_str(), r.fails), ("timeout", 2));
+        assert_eq!(r.since_ms, since, "the same state and reason: since stays");
+        r.dialed(Dialed::Up);
+        assert_eq!((r.state, r.reason.as_str(), r.fails), ("direct", "", 0), "back to 0 when the link comes up");
+        r.dialed(Dialed::Timeout);
+        r.dialed(Dialed::Refused);
+        assert_eq!((r.state, r.reason.as_str(), r.fails), ("ssh", "refused", 0), "a refusal is not a timeout");
+        r.dialed(Dialed::Timeout);
+        r.dialed(Dialed::Failed);
+        assert_eq!((r.reason.as_str(), r.fails), ("dial failed", 0));
+        r.dialed(Dialed::WrongId);
+        assert_eq!((r.reason.as_str(), r.fails), ("wrong id", 0));
+        r.dialed(Dialed::Timeout);
+        r.undialable(identity::NO_ADDRESSES);
+        assert_eq!((r.state, r.reason.as_str(), r.fails), ("ssh", "no addresses", 0));
+        r.fails = u32::MAX;
+        r.dialed(Dialed::Timeout);
+        assert_eq!(r.fails, u32::MAX, "saturates");
+    }
+
+    /// The manager's status for each remote reaches its link.json: reason and fails, the Python side's fields kept.
+    #[test]
+    fn link_json_gets_reason_and_fails() {
+        let d = std::env::temp_dir().join(format!("force-link-fails-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("link.json");
+        let id = SecretKey::generate().public();
+        std::fs::write(&p, format!(r#"{{"id":"{id}","addrs":["192.0.2.1:47823"],"port":47823}}"#)).unwrap();
+        let mut r = Remote { state: "ssh", ..Default::default() };
+        for _ in 0..2 {
+            r.dialed(Dialed::Timeout);
+            identity::write_link_state(&p, r.state, &r.reason, r.since_ms, r.fails).unwrap();
+        }
+        let v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!((v["state"].as_str(), v["reason"].as_str(), v["fails"].as_u64()), (Some("ssh"), Some("timeout"), Some(2)));
+        assert_eq!(v["id"].as_str(), Some(id.to_string().as_str()));
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]

@@ -203,21 +203,31 @@ pub fn parse_addrs(v: &Value) -> Vec<std::net::SocketAddr> {
     out
 }
 
-/// A remote's card from its `link.json`, when it has an id and at least one address.
-pub fn read_card(path: &Path) -> Option<RemoteCard> {
-    let v: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    let id = parse_id(v.get("id")?.as_str()?)?;
+/// Why a remote cannot be dialed (SPEC §56.2 `reason`): no id recorded, or an id with no address.
+pub const NOT_PAIRED: &str = "not paired";
+pub const NO_ADDRESSES: &str = "no addresses";
+
+/// A remote's card from its `link.json`: its id and addresses, else why there is none (`NOT_PAIRED`: no file or
+/// no valid id; `NO_ADDRESSES`: an id but nothing to dial).
+pub fn card_or_reason(path: &Path) -> Result<RemoteCard, &'static str> {
+    let v: Value = fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or(NOT_PAIRED)?;
+    let id = v.get("id").and_then(|i| i.as_str()).and_then(parse_id).ok_or(NOT_PAIRED)?;
     let addrs = parse_addrs(&v);
     if addrs.is_empty() {
-        return None;
+        return Err(NO_ADDRESSES);
     }
-    Some(RemoteCard { id, addrs })
+    Ok(RemoteCard { id, addrs })
 }
 
-/// Read-modify-write `link.json`: set `state`, `reason`, `since_ms`, keep everything else (id, addrs, port belong
-/// to the Python side). Nothing is written when the file is gone or not an object (the host was removed) or when
-/// the three values are already there.
-pub fn write_link_state(path: &Path, state: &str, reason: &str, since_ms: u64) -> io::Result<bool> {
+/// A remote's card from its `link.json`, when it has an id and at least one address.
+pub fn read_card(path: &Path) -> Option<RemoteCard> {
+    card_or_reason(path).ok()
+}
+
+/// Read-modify-write `link.json`: set `state`, `reason`, `since_ms` and `fails` (dial timeouts in a row), keep
+/// everything else (id, addrs, port belong to the Python side). Nothing is written when the file is gone or not an
+/// object (the host was removed) or when the four values are already there.
+pub fn write_link_state(path: &Path, state: &str, reason: &str, since_ms: u64, fails: u32) -> io::Result<bool> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -229,13 +239,15 @@ pub fn write_link_state(path: &Path, state: &str, reason: &str, since_ms: u64) -
     };
     let same = obj.get("state").and_then(|v| v.as_str()) == Some(state)
         && obj.get("reason").and_then(|v| v.as_str()) == Some(reason)
-        && obj.get("since_ms").and_then(|v| v.as_u64()) == Some(since_ms);
+        && obj.get("since_ms").and_then(|v| v.as_u64()) == Some(since_ms)
+        && obj.get("fails").and_then(|v| v.as_u64()) == Some(fails as u64);
     if same {
         return Ok(false);
     }
     obj.insert("state".into(), Value::from(state));
     obj.insert("reason".into(), Value::from(reason));
     obj.insert("since_ms".into(), Value::from(since_ms));
+    obj.insert("fails".into(), Value::from(fails));
     write_atomic(path, &serde_json::to_vec(&Value::Object(obj)).expect("json"))?;
     Ok(true)
 }
@@ -359,13 +371,21 @@ mod tests {
     fn link_state_keeps_the_python_fields() {
         let d = tmpdir("linkjson");
         let p = d.join("link.json");
-        assert!(!write_link_state(&p, "ssh", "x", 1).unwrap()); // no file: nothing written
+        assert!(!write_link_state(&p, "ssh", "x", 1, 0).unwrap()); // no file: nothing written
+        assert_eq!(card_or_reason(&p), Err(NOT_PAIRED));
         let id = SecretKey::generate().public();
+        fs::write(&p, format!(r#"{{"id":"{id}","addrs":[],"port":47823}}"#)).unwrap();
+        assert_eq!(card_or_reason(&p), Err(NO_ADDRESSES), "an id with nothing to dial");
         fs::write(&p, format!(r#"{{"id":"{id}","addrs":["127.0.0.1:5","10.0.0.1"],"port":47823,"extra":1}}"#)).unwrap();
-        assert!(write_link_state(&p, "direct", "", 42).unwrap());
-        assert!(!write_link_state(&p, "direct", "", 42).unwrap()); // unchanged: no write
+        assert!(write_link_state(&p, "ssh", "timeout", 42, 1).unwrap());
+        assert!(write_link_state(&p, "ssh", "timeout", 42, 2).unwrap(), "another timeout in a row is written");
+        let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+        assert_eq!((v["reason"].as_str(), v["fails"].as_u64()), (Some("timeout"), Some(2)));
+        assert!(write_link_state(&p, "direct", "", 42, 0).unwrap());
+        assert!(!write_link_state(&p, "direct", "", 42, 0).unwrap()); // unchanged: no write
         let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
         assert_eq!(v["state"], "direct");
+        assert_eq!(v["fails"], 0);
         assert_eq!(v["since_ms"], 42);
         assert_eq!(v["port"], 47823);
         assert_eq!(v["extra"], 1);
