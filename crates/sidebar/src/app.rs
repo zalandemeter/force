@@ -138,6 +138,12 @@ pub struct App {
     host_tmux_prefix: Option<String>,
     /// `@force_overlay` set: the main pane shows Chuck from this machine over a remote's list (SPEC §50)
     overlay: bool,
+    /// A SIGUSR1 came: whoever sent it published `@force_session` first (ui-key.sh after a switch) or changed
+    /// nothing about it (a resize, a tier), so a remote's shown session is read from there, without a round trip;
+    /// the regular poll asks the host (SPEC §40)
+    usr1_published: bool,
+    /// the host query found another shown session: SIGUSR1 to the header once it is published
+    signal_header: bool,
 
     items: Vec<Item>,
     offset: usize,
@@ -330,6 +336,8 @@ impl App {
             host_tmux: None,
             host_tmux_prefix: None,
             overlay: false,
+            usr1_published: false,
+            signal_header: false,
             items: Vec::new(),
             offset: 0,
             list_h: 0,
@@ -654,8 +662,24 @@ impl App {
                 .as_ref()
                 .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_overlay}"))
                 .map_or(false, |s| !s.is_empty());
+            let published = std::mem::take(&mut self.usr1_published) && !self.remote_host.is_empty() && !self.overlay;
             if let (Some(h), Some(nest)) = (&self.host_tmux, &self.nested) {
-                if let Some(c) = tmux::clients(h.as_ref()).into_iter().find(|c| &c.name == nest) {
+                let asked = if published {
+                    self.tmux_pane
+                        .as_ref()
+                        .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_session}"))
+                        .filter(|s| !s.is_empty())
+                } else {
+                    None
+                };
+                if let Some(s) = asked {
+                    self.host_own = Some(s);
+                } else if let Some(c) = tmux::clients(h.as_ref()).into_iter().find(|c| &c.name == nest) {
+                    if !self.remote_host.is_empty() && self.host_own.is_some() && self.host_own.as_deref() != Some(c.session.as_str()) {
+                        // the host says another session than we knew: the header follows now, not at its own poll
+                        // (it reads what we publish instead of asking the remote itself)
+                        self.signal_header = true;
+                    }
                     self.host_own = Some(c.session);
                 }
             } else if self.host_own.is_none() {
@@ -687,6 +711,21 @@ impl App {
         if self.host_own != prev {
             self.publish_force_session();
         }
+        if std::mem::take(&mut self.signal_header) {
+            self.signal_headers();
+        }
+    }
+
+    /// SIGUSR1 to this window's header (it re-reads `@force_session`).
+    fn signal_headers(&self) {
+        if let Some(pane) = &self.tmux_pane {
+            for pid in tmux::window_role_pids(self.tmux.as_ref(), pane, "header") {
+                // SAFETY: kill(2) with a pid read from tmux; window_role_pids only returns Force's own programs
+                unsafe {
+                    libc::kill(pid, libc::SIGUSR1);
+                }
+            }
+        }
     }
 
     /// `set-option -w -t <$TMUX_PANE> @force_session <host_own>` on the ui server (the sidebar always
@@ -706,6 +745,7 @@ impl App {
         self.set_now(now_ms);
         self.view_for(2000);
         self.force_own_once = true;
+        self.usr1_published = true;
         self.follow_own = true;
         self.seen_viewed = true;
         // SIGUSR1 also re-reads the auto glyph tier (and redraws if it changed).
@@ -741,14 +781,7 @@ impl App {
             return true;
         }
         self.own_cached_at = Some(std::time::Instant::now());
-        if let Some(pane) = &self.tmux_pane {
-            for pid in tmux::window_role_pids(self.tmux.as_ref(), pane, "header") {
-                // SAFETY: kill(2) with a pid read from tmux; window_role_pids only returns Force's own programs
-                unsafe {
-                    libc::kill(pid, libc::SIGUSR1);
-                }
-            }
-        }
+        self.signal_headers();
         false
     }
 
@@ -3302,6 +3335,47 @@ mod tests {
     }
 
     // --- split (ui) mode: detection, publish, switching, popup env -------------------
+    /// A remote shown (SPEC §40): a SIGUSR1 (ui-key.sh published the shown session first) is answered from
+    /// `@force_session` without a round trip; the regular poll asks the host.
+    #[test]
+    fn remote_sigusr1_reads_the_published_session_without_a_round_trip() {
+        let (mut tmux, _log) = FakeTmux::new();
+        tmux.nested = Some("/dev/pts/42".into());
+        tmux.session = Some("s2".into());                  // @force_session, just published
+        let (mut host, hlog) = FakeTmux::new();
+        host.clients_ = vec![Client { name: "/dev/pts/42".into(), session: "s1".into(), activity: 5 }];
+        let mut a = app_with(tmux);
+        a.tmux_pane = Some("%10".into());
+        a.remote_host = "devbox".into();
+        a.host_tmux = Some(host);
+        a.refresh_ui_mode();
+        assert_eq!(a.host_own.as_deref(), Some("s1"), "a poll asks the host");
+        let asked = |l: &Log| l.lock().unwrap().iter().filter(|e| e.first().map(String::as_str) == Some("list-clients")).count();
+        assert_eq!(asked(&hlog), 1);
+        a.sigusr1(1_000);
+        assert_eq!(a.host_own.as_deref(), Some("s2"), "what the sender published");
+        assert_eq!(asked(&hlog), 1, "no round trip for a SIGUSR1");
+        a.refresh_ui_mode();
+        assert_eq!(asked(&hlog), 2, "the next poll asks the host again");
+        assert_eq!(a.host_own.as_deref(), Some("s1"));
+    }
+
+    /// This machine shown: a SIGUSR1 still asks its tmux (no round trip to save).
+    #[test]
+    fn local_sigusr1_asks_the_host_tmux() {
+        let (mut tmux, _log) = FakeTmux::new();
+        tmux.nested = Some("/dev/pts/42".into());
+        tmux.session = Some("s2".into());
+        let (mut host, hlog) = FakeTmux::new();
+        host.clients_ = vec![Client { name: "/dev/pts/42".into(), session: "s1".into(), activity: 5 }];
+        let mut a = app_with(tmux);
+        a.tmux_pane = Some("%10".into());
+        a.host_tmux = Some(host);
+        a.sigusr1(1_000);
+        assert_eq!(a.host_own.as_deref(), Some("s1"));
+        assert_eq!(hlog.lock().unwrap().iter().filter(|e| e.first().map(String::as_str) == Some("list-clients")).count(), 1);
+    }
+
     #[test]
     fn ui_mode_detected_and_host_own_published_on_change() {
         let (mut tmux, log) = FakeTmux::new();

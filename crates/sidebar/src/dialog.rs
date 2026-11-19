@@ -1461,8 +1461,11 @@ impl Dialog {
         let new = self.rename_input.trim().to_string();
         match self.runner.cockpit(&["rename".to_string(), old.clone(), new.clone()]) {
             Err(e) => self.set_status(StatusKind::Error, e),
-            Ok(_) => {
-                if self.runner.tmux_ok(&["has-session".to_string(), format!("={}", old)]) {
+            Ok(out) => {
+                // `renamed OLD to NEW`: done, OLD's session is gone, so the host need not be asked (on a remote a
+                // round trip, SPEC §40); any other answer (it waits for the session to be idle): asked as before
+                let done = out.lines().last().is_some_and(|l| l.starts_with(&format!("renamed {} to ", old)));
+                if !done && self.runner.tmux_ok(&["has-session".to_string(), format!("={}", old)]) {
                     self.set_status(StatusKind::Ok, "renamed — applies when the session is idle");
                     self.exit_after_ms = Some(self.now_ms + 1500);
                 } else {
@@ -2551,6 +2554,22 @@ mod tests {
         assert!(d.done);
         let t = runner.logs.tmux.borrow();
         assert!(t.is_empty()); // tmux_ok doesn't log to tmux log
+    }
+
+    /// Done at once (`renamed OLD to NEW`): closes without asking the host whether OLD still runs (SPEC §40).
+    #[test]
+    fn rename_done_now_asks_nothing_more() {
+        let reg = tmp_file(r#"{"sessions":[]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let runner = FakeRunner::new();
+        let mut d = Dialog::new(Kind::Rename, Some("old".into()), &reg, &snap, Box::new(runner.clone()), Tier::Plain, 64, 12);
+        d.rename_input = "new".into();
+        d.validate_rename();
+        runner.logs.cockpit_resp.borrow_mut().push_back(Ok("renamed old to new".into()));
+        runner.logs.has.borrow_mut().push_back(true);    // would say "pending" if it were asked
+        d.action_submit_rename();
+        assert!(d.done);
+        assert_eq!(runner.logs.has.borrow().len(), 1, "has-session not asked");
     }
 
     #[test]

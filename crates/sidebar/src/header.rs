@@ -648,7 +648,20 @@ impl Header {
                 .as_ref()
                 .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_overlay}"))
                 .map_or(false, |s| !s.is_empty());
-            if let (Some(h), Some(nest)) = (&self.host_tmux, &self.nested) {
+            // a remote shown with a sidebar: the sidebar asks the host and publishes `@force_session` (and signals
+            // this header when it changes), so reading that is enough and costs no round trip (SPEC §40)
+            let published = if self.nested.is_some() && !self.shown_host.is_empty() && !self.overlay
+                && self.window_has_sidebar() {
+                self.tmux_pane
+                    .as_ref()
+                    .and_then(|p| tmux::pane_option(self.tmux.as_ref(), p, "#{@force_session}"))
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            };
+            if let Some(s) = published {
+                self.host_own = Some(s);
+            } else if let (Some(h), Some(nest)) = (&self.host_tmux, &self.nested) {
                 if let Some(c) = tmux::clients(h.as_ref()).into_iter().find(|c| &c.name == nest) {
                     self.host_own = Some(c.session);
                 }
@@ -1742,6 +1755,43 @@ mod tests {
         // ui select-pane of the main pane, and optimistic host own published when no sidebar is present
         assert!(log.lock().unwrap().iter().any(|e| *e == ["select-pane", "-t", "%12"]), "ui select-pane");
         assert_eq!(h.host_own.as_deref(), Some("demo"));
+    }
+
+    /// A remote shown with a sidebar (SPEC §40): the header reads the session the sidebar publishes instead of asking
+    /// the remote itself (one round trip per poll for the window, not two); without a sidebar, or this machine
+    /// shown, it asks the host.
+    #[test]
+    fn remote_with_a_sidebar_reads_the_published_session() {
+        let make = |sidebar: bool, remote: bool| {
+            let (mut tmux, _log) = FakeTmux::new();
+            tmux.nested = Some("/dev/pts/42".into());
+            tmux.session = Some("s2".into());           // @force_session, published by the sidebar
+            tmux.win = Some("@3".into());
+            if sidebar {
+                tmux.agent = Some("x
+sidebar".into()); // list-panes: an agent pane, then a pane with role sidebar
+            }
+            let (mut host, hlog) = FakeTmux::new();
+            host.clients_ = vec![Client { name: "/dev/pts/42".into(), session: "s1".into(), activity: 1 }];
+            let spawner: Box<dyn Spawner> = Box::new(FakeSpawner::default());
+            let mut h = Header::new(tmux, spawner, PathBuf::from("/nonexistent/snapshot.json"), PathBuf::from("/share"),
+                                    Some("%10".into()), GlyphArg::Fixed(Tier::Plain), 80);
+            if remote {
+                h.shown_host = "devbox".into();
+            }
+            h.host_tmux = Some(host);
+            (h, hlog)
+        };
+        let asked = |l: &Log| l.lock().unwrap().iter().filter(|e| e.first().map(String::as_str) == Some("list-clients")).count();
+        let (mut h, hlog) = make(true, true);
+        h.refresh_ui_mode();
+        assert_eq!((h.host_own.as_deref(), asked(&hlog)), (Some("s2"), 0), "remote + sidebar: the published session");
+        let (mut h, hlog) = make(false, true);
+        h.refresh_ui_mode();
+        assert_eq!((h.host_own.as_deref(), asked(&hlog)), (Some("s1"), 1), "no sidebar: asks the remote");
+        let (mut h, hlog) = make(true, false);
+        h.refresh_ui_mode();
+        assert_eq!((h.host_own.as_deref(), asked(&hlog)), (Some("s1"), 1), "this machine: asks its tmux");
     }
 
     #[test]
