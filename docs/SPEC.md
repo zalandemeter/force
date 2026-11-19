@@ -211,6 +211,7 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
     tool result named, `toolUseResult.backgroundTaskId`, `taskId` or `agentId`; a stopped task gets no notice). A
     Monitor also ends when its own `timeout_ms` has passed since it started. A task launched before this Claude process started (the
     pane's start) or more than 24 h ago does not count (it died with an earlier process, or its notice was lost).
+    A foreground call that Claude Code moved to the background itself (its tool_result says "moved to the background as task ID" for an MCP call, or "moved to the background (ID: ID)" for a Bash timeout) is a launch too, named by that task id.
     A Bash task counts as running only while the status is `shell` (Claude's own word that a shell runs).
   - **Endless commands** (`activity.is_endless(command)`, a pattern list) never make a session watching: servers
     and followers that run until stopped (`npm|pnpm|yarn|bun run dev|start|serve`, `vite` but not `vite build`,
