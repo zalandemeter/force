@@ -55,7 +55,7 @@ is optional.
 | `force/` | the app: the Python package behind the `force` command, the daemon and the cockpit |
 | `crates/sidebar/` | Rust: the sidebar, the header and the popup dialogs (`force-sidebar`, `force-header`, `force-dialog`) |
 | `crates/intro/` | Rust: the startup intro (`force-intro`) and the sources its film is made from |
-| `crates/link/` | Rust: the host link (`force-link`), ssh to a remote host |
+| `crates/link/` | Rust: the host link (`force-link`): a direct QUIC link to a remote host when it is up, ssh otherwise, and its daemon |
 | `share/` | files the app installs: tmux configs, helper scripts, the installer template, the agent guide (`skill.md`) |
 | `systemd/` | the user units |
 | `tests/` | the test suite (pytest) |
