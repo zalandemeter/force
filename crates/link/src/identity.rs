@@ -219,11 +219,6 @@ pub fn card_or_reason(path: &Path) -> Result<RemoteCard, &'static str> {
     Ok(RemoteCard { id, addrs })
 }
 
-/// A remote's card from its `link.json`, when it has an id and at least one address.
-pub fn read_card(path: &Path) -> Option<RemoteCard> {
-    card_or_reason(path).ok()
-}
-
 /// Read-modify-write `link.json`: set `state`, `reason`, `since_ms` and `fails` (dial timeouts in a row), keep
 /// everything else (id, addrs, port belong to the Python side). Nothing is written when the file is gone or not an
 /// object (the host was removed) or when the four values are already there.
@@ -389,11 +384,11 @@ mod tests {
         assert_eq!(v["since_ms"], 42);
         assert_eq!(v["port"], 47823);
         assert_eq!(v["extra"], 1);
-        let card = read_card(&p).unwrap();
+        let card = card_or_reason(&p).unwrap();
         assert_eq!(card.id, id);
         assert_eq!(card.addrs, vec!["127.0.0.1:5".parse().unwrap(), "10.0.0.1:47823".parse().unwrap()]);
         fs::write(&p, r#"{"id":"nothex","addrs":["127.0.0.1:5"]}"#).unwrap();
-        assert!(read_card(&p).is_none());
+        assert_eq!(card_or_reason(&p), Err(NOT_PAIRED));
         fs::remove_dir_all(&d).ok();
     }
 }
