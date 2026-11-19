@@ -209,8 +209,18 @@ def test_tty_round_trip_with_resize(paired):
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     before = termios.tcgetattr(slave)
     # the pty becomes the controlling terminal of a new session (SIGWINCH reaches the client), then force-link runs
-    ctty = ("import fcntl, os, sys, termios; fcntl.ioctl(0, termios.TIOCSCTTY, 0); "
-            "os.execv(sys.argv[1], sys.argv[1:])")
+    # in its foreground process group, as under a shell. The session leader waits for a line after force-link has
+    # exited: on macOS (and the BSDs) the leader's exit revokes its controlling terminal, and the test's descriptor
+    # of it then fails every ioctl (ENOTTY), so the mode is read while the session still stands.
+    ctty = ("import fcntl, os, sys, termios\n"
+            "fcntl.ioctl(0, termios.TIOCSCTTY, 0)\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    os.execv(sys.argv[1], sys.argv[1:])\n"
+            "code = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])\n"
+            "os.write(1, b'client exited %d\\n' % code)\n"
+            "sys.stdin.readline()\n"
+            "sys.exit(code)\n")
     env = dict(laptop.env(), TERM="xterm-256color")
     proc = subprocess.Popen([sys.executable, "-c", ctty, *laptop.exec_argv("~/.local/bin/force", "tty", tty=True)],
                             stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True)
@@ -237,16 +247,29 @@ def test_tty_round_trip_with_resize(paired):
         until("resized:40 120")
         os.write(master, b"hello\r")
         until("got:hello")
-        assert proc.wait(timeout=15) == 5
+        until("client exited 5")
         # raw mode was undone on the way out
         after = termios.tcgetattr(slave)
         assert after[3] & termios.ICANON and after[3] & termios.ECHO
         assert after == before
+        os.write(master, b"\n")
+        # keep reading: on macOS a session leader's exit waits until its terminal's output (the echo) is read
+        end = time.monotonic() + 15
+        while proc.poll() is None and time.monotonic() < end:
+            try:
+                os.read(master, 4096)
+            except OSError:
+                time.sleep(0.05)
+        assert proc.wait(timeout=1) == 5
     finally:
         if proc.poll() is None:
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)              # the leader and force-link under it
+            except OSError:
+                pass
+        os.close(master)                                         # nothing left to drain
+        if proc.poll() is None:
             proc.wait(timeout=10)
-        os.close(master)
         os.close(slave)
     assert not laptop.ssh_log.exists()
 
