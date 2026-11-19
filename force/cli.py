@@ -567,7 +567,10 @@ def nested_command(cockpit: Cockpit, target: str, remote_name: str | None = None
     if remote_name:
         return _nested_remote(cockpit, target, remote_name)
     if report:
+        # what is typed before the session shows neither echoes over the animation nor reaches the session
+        quiet = _quiet_input()
         _report_tty(cockpit.paths.state / "nested" / report)
+        _quiet_input(attrs=quiet)
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
     waiting = False
     while True:
@@ -610,20 +613,77 @@ def _nested_remote(cockpit: Cockpit, target: str, remote_name: str) -> int:
     rid = f"{socket.gethostname()}-{os.getpid()}"
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX_PANE",)}
     again = False
+    quiet = None
     while True:
+        quiet = _quiet_input(attrs=quiet)
         spinner = Connecting(r.name, again)
         child = subprocess.Popen(remote_mod.ssh_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, "nested", target,
                                                      "--report", rid, tty=True), env=env)
         _name_remote_client(cockpit, r, rid, pane, child, spinner)
         child.wait()
         spinner.stop()
+        _remote_client_gone(cockpit, pane)
         again = True
-        print(f"\x1b[2J\x1b[Hconnection to {r.name} ended; reconnecting…", flush=True)
+        print(f"{PANE_RESET}connection to {r.name} ended; reconnecting…", flush=True)
         time.sleep(2)
         try:                        # back to the session this window showed last, not the first one
             target = cockpit.ui_tmux.run("show", "-wqv", "-t", pane, "@force_session") or target
         except TmuxError:
             pass
+
+
+# The terminal modes a remote's tmux client turns on in the main pane (SPEC §40, connection dropped): the alternate
+# screen, mouse tracking, focus reports, bracketed paste, application cursor keys and keypad, extended keys. It
+# turns them off only when it ends cleanly; over a dropped link that never arrives, and the ui tmux went on writing
+# every click, wheel turn and focus change into the pane as input, which the reconnect loop does not read: the
+# tty echoed it over the animation (`^[[<0;31;11M`) and the next connection got it as typing.
+PANE_RESET = ("\x1b[?1049l"
+              "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"
+              "\x1b[?1004l\x1b[?2004l"
+              "\x1b[?1l\x1b>\x1b[>4;0m"
+              "\x1b[r\x1b[0m\x1b[2J\x1b[H\x1b[?25h")
+
+
+def _quiet_input(fd: int = 0, attrs: list | None = None) -> list | None:
+    """While no remote client reads the main pane (SPEC §40, connecting): the terminal does not echo, and what
+    arrived meanwhile (keys, clicks, a terminal's replies) is dropped, so it neither shows over the animation nor
+    reaches the next connection as typing. `attrs` (what an earlier call returned) is applied again as it is: ssh -t
+    restores the settings it found, but a killed one leaves its raw mode. Returns the settings applied, None when
+    `fd` is not a terminal."""
+    import termios
+    try:
+        if attrs is None:
+            attrs = termios.tcgetattr(fd)
+            attrs[3] &= ~(termios.ECHO | termios.ECHONL)
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIFLUSH)
+    except (termios.error, OSError, ValueError):
+        return None
+    return attrs
+
+
+def _signal_ui_panes(ui, pane: str) -> None:
+    """SIGUSR1 to the sidebar and header of `pane`'s ui window: re-read the window's options (@force_nested)."""
+    try:
+        for line in ui.run("list-panes", "-t", pane, "-F",
+                           "#{?#{m:force-*,#{pane_current_command}},#{@force_role},starting} #{pane_pid}").splitlines():
+            role, _, pid = line.partition(" ")
+            if role in ("sidebar", "header") and pid.isdigit():
+                os.kill(int(pid), signal.SIGUSR1)
+    except (TmuxError, OSError):
+        pass
+
+
+def _remote_client_gone(cockpit: Cockpit, pane: str) -> None:
+    """The connection ended: the window has no nested client until the next one reports (SPEC §40, connecting), so
+    the sidebar and header hold a click for it instead of switching a client that is gone over a dead link."""
+    if not pane:
+        return
+    try:
+        cockpit.ui_tmux.run("set-option", "-w", "-t", pane, "@force_nested", "")
+    except TmuxError:
+        return
+    _signal_ui_panes(cockpit.ui_tmux, pane)
 
 
 class Connecting:
@@ -715,13 +775,10 @@ def _name_remote_client(cockpit: Cockpit, r, rid: str, pane: str, child, spinner
                 ui = cockpit.ui_tmux
                 try:
                     ui.run("set-option", "-w", "-t", pane, "@force_nested", tty)
-                    for line in ui.run("list-panes", "-t", pane, "-F",
-                                       "#{?#{m:force-*,#{pane_current_command}},#{@force_role},starting} #{pane_pid}").splitlines():
-                        role, _, pid = line.partition(" ")
-                        if role in ("sidebar", "header") and pid.isdigit():
-                            os.kill(int(pid), signal.SIGUSR1)
-                except (TmuxError, OSError):
+                except TmuxError:
                     pass
+                else:
+                    _signal_ui_panes(ui, pane)
                 # a remote on an older Force attached at once, under the spinner: repaint its client
                 try:
                     subprocess.run([*remote_mod.ssh_argv(cockpit.paths, r, remote_mod.remote_tmux(cockpit.paths, r),
