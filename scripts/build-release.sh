@@ -5,7 +5,7 @@
 #                                           (default $FORCE_BUILD_ROOT/dist; the root defaults to build/out)
 #
 # Produces force-VERSION-linux-ARCH.tar.gz and its .sha256. Inside (force-VERSION/): the Python package (force/),
-# share/ (scripts, tmux configs, bin/ = static sidebar, header, dialog, intro; tmux-bin/tmux = Force's own
+# share/ (scripts, tmux configs, bin/ = static sidebar, header, dialog, intro, link; tmux-bin/tmux = Force's own
 # static tmux), terminfo/, systemd/, install.sh, VERSION, LICENSE, THIRD-PARTY-NOTICES.md, licenses/
 # (tmux, libevent, ncurses).
 # The binaries are built in the force-builder container (build/Dockerfile, Alpine/musl): no toolchain on the host.

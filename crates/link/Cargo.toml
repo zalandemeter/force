@@ -1,0 +1,6 @@
+[package]
+name = "force-link"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Force's single entry point to a remote host over ssh (SPEC §56.1, part A)"

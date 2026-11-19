@@ -8,7 +8,7 @@
 #
 # Produces force-VERSION-darwin-arm64.tar.gz and its .sha256, with the same layout as the Linux tarball
 # (scripts/build-release.sh; keep the two in step): the Python package, share/ (bin/ = sidebar, header, dialog,
-# intro; tmux-bin/tmux = Force's own tmux), terminfo/, install.sh, VERSION, LICENSE, THIRD-PARTY-NOTICES.md,
+# intro, link; tmux-bin/tmux = Force's own tmux), terminfo/, install.sh, VERSION, LICENSE, THIRD-PARTY-NOTICES.md,
 # licenses/ (tmux, libevent, ncurses, utf8proc). macOS links its system library dynamically only (no fully static
 # binaries there): libevent, ncurses and utf8proc are linked in, and the check below refuses any other dylib.
 # Needs: Xcode command line tools (clang, make), pkg-config, cargo, python3, curl.
@@ -83,7 +83,7 @@ if [[ "$TMUX_ONLY" == 1 ]]; then echo "$TMUX_PREFIX/bin"; exit 0; fi
 
 # --- the Rust programs ---------------------------------------------------------------------------------------
 echo "build-darwin: Rust programs"
-for crate in sidebar intro; do
+for crate in sidebar intro link; do
   CARGO_TARGET_DIR="$CACHE/target-$crate" MACOSX_DEPLOYMENT_TARGET=13.0 \
     cargo build --release --locked -q --manifest-path "$REPO/crates/$crate/Cargo.toml"
 done
@@ -100,6 +100,7 @@ python3 "$REPO/scripts/support-pack.py" --out "$R/share/support"
 mkdir -p "$R/share/bin" "$R/share/tmux-bin" "$R/share/terminfo" "$R/licenses"
 for b in force-sidebar force-header force-dialog; do cp "$CACHE/target-sidebar/release/$b" "$R/share/bin/"; done
 cp "$CACHE/target-intro/release/force-intro" "$R/share/bin/"
+cp "$CACHE/target-link/release/force-link" "$R/share/bin/"
 strip "$R"/share/bin/force-*
 cp "$TMUX_PREFIX/bin/tmux" "$R/share/tmux-bin/tmux"
 # terminfo for what Force's tmux tells programs inside it (TERM=tmux-256color): macOS has no tmux entries

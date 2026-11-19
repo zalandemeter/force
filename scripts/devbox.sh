@@ -38,6 +38,6 @@ exec docker run --rm "${TTY[@]}" --init \
   "$IMAGE" sh -c '
     # an account for this user id (Force reads its user name, as on any real machine)
     getent passwd "$(id -u)" >/dev/null || echo "$USER:x:$(id -u):$(id -g)::/home/dev:/bin/bash" >> /etc/passwd
-    # the crates both Cargo.lock files name, once (the notices test reads them offline); quiet when cached
-    for c in crates/sidebar crates/intro; do cargo fetch -q --locked --manifest-path "$c/Cargo.toml" 2>/dev/null; done
+    # the crates' Cargo.lock files, once (the notices test reads them offline); quiet when cached
+    for c in crates/sidebar crates/intro crates/link; do cargo fetch -q --locked --manifest-path "$c/Cargo.toml" 2>/dev/null; done
     exec "$@"' devbox "${@:-bash}"

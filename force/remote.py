@@ -115,6 +115,21 @@ def ssh_argv(paths, r: Remote, *remote_argv: str, tty: bool = False) -> list[str
     return ["ssh", *ssh_opts(paths), *(["-t"] if tty else []), r.ssh, cmd]
 
 
+def link_bin(paths) -> Path:
+    """The `force-link` program in the release (SPEC §56.1, same folder as force-sidebar)."""
+    return Path(paths.tmux_conf).parent / "bin" / "force-link"
+
+
+def link_argv(paths, r: Remote, *remote_argv: str, tty: bool = False) -> list[str]:
+    """`force-link exec … -- ARGV` when the release ships its binary (SPEC §56.1), else plain ssh_argv: a
+    dev checkout without a built binary keeps working, with exactly today's ssh command."""
+    bin_ = link_bin(paths)
+    if bin_.exists() and os.access(bin_, os.X_OK):
+        return [str(bin_), "exec", "--state", str(paths.state), "--hosts", str(remotes_file(paths)),
+                r.name, *(["--tty"] if tty else []), "--", *remote_argv]
+    return ssh_argv(paths, r, *remote_argv, tty=tty)
+
+
 REMOTE_TMUX_SOCKET = "force"                                   # a remote runs its live Force
 # where a remote's tmux is: Force's own when its release ships one (an install by the one-line installer may have no
 # other), else the one on PATH. Asked once over ssh and kept (an absolute path: tmux escapes `$` in option values,
