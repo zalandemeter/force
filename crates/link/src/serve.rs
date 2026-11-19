@@ -389,8 +389,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pipes_stdout_stderr_stdin_and_exit_code() {
+        // TERM as exported to the program (printenv), not $TERM: bash as sh (macOS) sets an unexported TERM=dumb
         let home = home_with_force("pipes", "echo \"args:$*\"; echo oops >&2; cat; \
-                                             echo \"home:$HOME path:$PATH term:${TERM-unset}\"; exit 3");
+                                             echo \"home:$HOME path:$PATH term:$(printenv TERM || echo unset)\"; \
+                                             exit 3");
         let mut c = open(&home, &header(&["~/.local/bin/force", "a b", "c"], false)).await;
         c.w.write_all(&frame::encode(frame::STDIN, b"from stdin\n")).await.unwrap();
         c.w.write_all(&frame::encode(frame::STDIN_EOF, b"")).await.unwrap();
