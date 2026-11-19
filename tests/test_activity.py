@@ -619,3 +619,112 @@ def test_monitor_past_its_own_timeout_has_ended(tmp_path):
 def test_monitor_timeout_must_be_a_positive_number(tmp_path, bad):
     p = write(tmp_path / "t.jsonl", [_launch("Monitor", "m1", 1, timeout_ms=bad)])
     assert scan(p).background[0].timeout_ms is None
+
+
+# --- agents waiting on their own work, notices that arrive mid-turn, long transcripts (SPEC §5) ---------------------
+
+def _agent_notice(body, kind="user"):
+    """A task notice as Claude Code records it: a user record (it starts a turn) or a queued_command attachment in
+    task-notification mode (it arrives while the agent works)."""
+    text = f"<task-notification>{body}</task-notification>"
+    if kind == "attachment":
+        return {"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "task-notification",
+                                                       "prompt": text}}
+    return {"type": "user", "message": {"content": text}}
+
+
+_WAITING = ("<status>completed</status><summary>Agent \"x\" is waiting on its own background work</summary>"
+            "<note>This agent stopped with background work of its own still running.</note>")
+
+
+def test_an_agent_waiting_on_its_own_work_has_not_ended(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        _launch("Agent", "u1", 1, run_in_background=True), _started("u1", "agentId", "ag1"),
+        _agent_notice(f"<task-id>ag1</task-id><tool-use-id>u1</tool-use-id>{_WAITING}"),
+    ])
+    assert [t.tool_use_id for t in scan(p).background] == ["u1"]
+
+
+def test_a_notice_naming_only_the_task_id_ends_it(tmp_path):
+    """Later notices of an agent that waited carry no <tool-use-id>: matched through the launch's agentId."""
+    p = write(tmp_path / "t.jsonl", [
+        _launch("Agent", "u1", 1, run_in_background=True), _started("u1", "agentId", "ag1"),
+        _agent_notice(f"<task-id>ag1</task-id><tool-use-id>u1</tool-use-id>{_WAITING}"),
+        _agent_notice("<task-id>ag1</task-id><status>completed</status><summary>Agent \"x\" finished</summary>"),
+    ])
+    s = scan(p)
+    assert s.background == () and s.launched_any is True
+
+
+def test_a_notice_arriving_mid_turn_as_an_attachment_ends_the_task(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        _launch("Bash", "u1", 1, run_in_background=True, command="pytest -q"),
+        _agent_notice("<task-id>b1</task-id><tool-use-id>u1</tool-use-id><status>completed</status>", "attachment"),
+    ])
+    assert scan(p).background == ()
+
+
+def test_other_attachments_end_nothing(tmp_path):
+    p = write(tmp_path / "t.jsonl", [
+        _launch("Bash", "u1", 1, run_in_background=True, command="pytest -q"),
+        {"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt",
+                                               "prompt": "<task-notification><tool-use-id>u1</tool-use-id>"
+                                                         "<status>completed</status></task-notification>"}},
+    ])
+    assert [t.tool_use_id for t in scan(p).background] == ["u1"]
+
+
+def _filler(n_bytes):
+    """Assistant text records adding up to about n_bytes (a busy session's reports and tool output)."""
+    chunk = "x" * 4000
+    return [assistant([{"type": "text", "text": chunk}]) for _ in range(n_bytes // 4000 + 1)]
+
+
+def test_tracker_keeps_a_task_launched_before_the_tail(tmp_path):
+    from force.activity import BackgroundTracker
+    p = write(tmp_path / "t.jsonl", [_launch("Agent", "u1", 1, run_in_background=True),
+                                     _started("u1", "agentId", "ag1"), *_filler(600_000)])
+    assert scan(p).background == ()                 # the 256 KiB tail no longer shows the launch
+    t = BackgroundTracker()
+    assert [b.tool_use_id for b in t.update(p)] == ["u1"]
+    with open(p, "a") as f:                         # its notice arrives later: read incrementally
+        f.write(json.dumps(_agent_notice("<task-id>ag1</task-id><status>completed</status>")) + "\n")
+    assert t.update(p) == ()
+
+
+def test_tracker_keeps_a_half_written_line_for_the_next_read(tmp_path):
+    from force.activity import BackgroundTracker
+    p = write(tmp_path / "t.jsonl", [_launch("Bash", "u1", 1, run_in_background=True, command="make")])
+    t = BackgroundTracker()
+    assert len(t.update(p)) == 1
+    line = json.dumps(_agent_notice("<tool-use-id>u1</tool-use-id><status>completed</status>")) + "\n"
+    with open(p, "a") as f:
+        f.write(line[:30])
+    assert len(t.update(p)) == 1                    # not a whole record yet
+    with open(p, "a") as f:
+        f.write(line[30:])
+    assert t.update(p) == ()
+
+
+def test_tracker_reads_a_replaced_or_shorter_transcript_afresh(tmp_path):
+    from force.activity import BackgroundTracker
+    p = write(tmp_path / "t.jsonl", [_launch("Bash", "u1", 1, run_in_background=True, command="make"),
+                                     *_filler(10_000)])
+    t = BackgroundTracker()
+    assert len(t.update(p)) == 1
+    write(tmp_path / "t.jsonl", [_launch("Bash", "u2", 2, run_in_background=True, command="make test")])
+    assert [b.tool_use_id for b in t.update(p)] == ["u2"]
+
+
+def test_tracker_forgets_launches_older_than_a_day(tmp_path):
+    from force.activity import BackgroundTracker
+    p = write(tmp_path / "t.jsonl", [_launch("Bash", "u1", 1, run_in_background=True, command="make")])
+    t = BackgroundTracker()
+    launched = t.update(p)[0].started_ms
+    assert t.update(p, now_ms=launched + 25 * 3600 * 1000) == ()
+    assert t.update(p) is None or t.update(p) == ()
+
+
+def test_tracker_unreadable(tmp_path):
+    from force.activity import BackgroundTracker
+    assert BackgroundTracker().update(tmp_path / "missing.jsonl") is None

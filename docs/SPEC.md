@@ -191,11 +191,10 @@ pane start time, pane dead status), Claude status file (or none), `last_seen_ms`
   loop, a CI watch, a long build or test run, a script, a background subagent, a Monitor. It is WORKING for
   everything that acts on states (`force wait`, `--until`, notifications, the §43 refusals, `force list` counts);
   only the cockpit shows it apart, because nothing happens there for minutes or hours.
-  - **Background tasks** come from the transcript tail (`activity.scan`): a `tool_use` with
+  - **Background tasks** come from the whole transcript, not only the 256 KiB tail `activity.scan` reads (which covers minutes of a busy session): `activity.BackgroundTracker`, one per session in the daemon, reads the transcript's last 8 MiB once, then only what was appended (a half-written last line waits for the next read; a replaced or shorter file is read afresh), and keeps launches, notices, task ids and stops. A launch is a `tool_use` with
     `input.run_in_background` true (Bash, Agent) or named `Monitor`, with its `description` (Bash/Agent/Monitor
-    all carry one) and, for Bash, its `command`. It has ended when a later user record's text holds
-    `<tool-use-id>ID</tool-use-id>` with a `<status>` of completed, failed, killed, stopped or expired (a Monitor's
-    event notices carry other words and do not end it), or when the agent stopped it (`TaskStop`, the older
+    all carry one) and, for Bash, its `command`. It has ended when a later notice names it with a `<status>` of completed, failed, killed, stopped or expired (a Monitor's
+    event notices carry other words and do not end it). A notice is a user record's text (a notice that starts a turn) or a `queued_command` attachment in `task-notification` mode (one that arrives while the agent works); it names its task by `<tool-use-id>ID</tool-use-id>`, or only by `<task-id>` (matched through the launch's task id, as for a stop). A notice saying the agent "is waiting on its own background work" ends nothing, whatever its status: the agent stopped while work of its own still runs, resumes by itself and notifies again. It has also ended when the agent stopped it (`TaskStop`, the older
     `KillShell`/`KillBash`: its `input.task_id` or `shell_id`, matched to the launch through the task id the launch's
     tool result named, `toolUseResult.backgroundTaskId`, `taskId` or `agentId`; a stopped task gets no notice). A
     Monitor also ends when its own `timeout_ms` has passed since it started. A task launched before this Claude process started (the

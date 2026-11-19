@@ -264,6 +264,7 @@ class Daemon:
         # session activity cache: session_id -> ((st_mtime_ns, st_size) | None, clock-time, value).
         # Recompute only when the transcript changed AND at least 3 s of clock time has passed (SPEC §15).
         self._activity: dict[str, tuple] = {}
+        self._background: dict[str, activity.BackgroundTracker] = {}     # session_id -> its background tasks
         self._reply: dict[str, int] = {}          # session_id -> newest reply_ms seen (SPEC §5, unread)
         self._oc_reply: dict[str, tuple] = {}     # OpenCode sessions: name -> (pid, opencode.reply_key) last read
         self._oc_meta: dict[str, object] = {}     # OpenCode sessions: name -> opencode.Meta (SPEC §36)
@@ -428,6 +429,14 @@ class Daemon:
             if now - _when < _ACTIVITY_MIN_INTERVAL:
                 return value         # changed, but within the 3 s throttle window
         value = activity.scan(path)
+        # background tasks from a tracker that follows the whole transcript, not only the tail scan reads (SPEC §5)
+        tracker = self._background.setdefault(session_id, activity.BackgroundTracker())
+        running = tracker.update(path, self._now_ms())
+        if running is not None:
+            # the tracker's view, plus anything the tail shows that the tracker has not seen (never one it saw end)
+            extra = tuple(t for t in value.background if t.tool_use_id not in tracker.launched)
+            value = value._replace(background=running + extra,
+                                   launched_any=value.launched_any or bool(tracker.launched))
         self._activity[session_id] = (key, now, value)
         return value
 
