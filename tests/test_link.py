@@ -33,13 +33,8 @@ ARGV_CASES = [
 
 
 @pytest.fixture(scope="module")
-def link_bin(tmp_path_factory):
-    """Build force-link once per session and return the path to the binary."""
-    target = tmp_path_factory.mktemp("linktarget")
-    env = dict(os.environ, CARGO_TARGET_DIR=str(target))
-    subprocess.run([CARGO, "build", "-q", "--manifest-path", str(ROOT / "crates/link/Cargo.toml")],
-                  check=True, env=env, cwd=ROOT)
-    return target / "debug" / "force-link"
+def link_bin(force_link_bin):
+    return force_link_bin
 
 
 def _hosts_with_devbox(env):

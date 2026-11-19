@@ -188,3 +188,17 @@ def _remove_test_sockets():
             sock.unlink()
         except OSError:
             pass
+
+
+@pytest.fixture(scope="session")
+def force_link_bin():
+    """Build crates/link once per test session (debug, its usual target folder, so later runs build only what
+    changed) and return the force-link binary. Skips without cargo."""
+    root = Path(__file__).resolve().parent.parent
+    cargo = shutil.which("cargo") or os.path.expanduser("~/.cargo/bin/cargo")
+    if not os.path.exists(cargo):
+        pytest.skip("no cargo")
+    target = Path(os.environ.get("CARGO_TARGET_DIR") or root / "crates" / "link" / "target")
+    subprocess.run([cargo, "build", "-q", "--manifest-path", str(root / "crates" / "link" / "Cargo.toml")],
+                   check=True, cwd=root)
+    return target / "debug" / "force-link"

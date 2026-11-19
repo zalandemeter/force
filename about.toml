@@ -11,6 +11,11 @@ accepted = [
     "Unicode-DFS-2016",
     "0BSD",
     "WTFPL",
+    # the direct link (crates/link: iroh, rustls, ring, the dalek crates, webpki-roots' CA data); all permissive
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CDLA-Permissive-2.0",
 ]
 # the platforms Force ships for (Linux; macOS on Apple Silicon, SPEC §51): crates for other targets (Windows, wasm, UEFI) are not compiled in
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin"]
