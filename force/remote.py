@@ -115,6 +115,21 @@ def ssh_argv(paths, r: Remote, *remote_argv: str, tty: bool = False) -> list[str
     return ["ssh", *ssh_opts(paths), *(["-t"] if tty else []), r.ssh, cmd]
 
 
+def link_bin(paths) -> Path:
+    """The `force-link` program in the release (SPEC §56.1, same folder as force-sidebar)."""
+    return Path(paths.tmux_conf).parent / "bin" / "force-link"
+
+
+def link_argv(paths, r: Remote, *remote_argv: str, tty: bool = False) -> list[str]:
+    """`force-link exec … -- ARGV` when the release ships its binary (SPEC §56.1), else plain ssh_argv: a
+    dev checkout without a built binary keeps working, with exactly today's ssh command."""
+    bin_ = link_bin(paths)
+    if bin_.exists() and os.access(bin_, os.X_OK):
+        return [str(bin_), "exec", "--state", str(paths.state), "--hosts", str(remotes_file(paths)),
+                r.name, *(["--tty"] if tty else []), "--", *remote_argv]
+    return ssh_argv(paths, r, *remote_argv, tty=tty)
+
+
 REMOTE_TMUX_SOCKET = "force"                                   # a remote runs its live Force
 # where a remote's tmux is: Force's own when its release ships one (an install by the one-line installer may have no
 # other), else the one on PATH. Asked once over ssh and kept (an absolute path: tmux escapes `$` in option values,
@@ -151,6 +166,17 @@ def host_tmux_prefix(paths, r: Remote) -> str:
     """The ui window option @force_host_tmux for a remote (whitespace-separated argv prefix): its own tmux, on its
     live server (`force`, also from a development instance here, SPEC §2.1)."""
     return " ".join(["ssh", *ssh_opts(paths), r.ssh, remote_tmux(paths, r), "-L", REMOTE_TMUX_SOCKET])
+
+
+def link_tmux_prefix(paths, r: Remote) -> str:
+    """The ui window option @force_host_tmux for a remote, via force-link when the release ships its binary (SPEC
+    §56.1), else `host_tmux_prefix` (a dev checkout without a built binary keeps today's ssh prefix). Same
+    --state/--hosts values as link_argv."""
+    bin_ = link_bin(paths)
+    if bin_.exists() and os.access(bin_, os.X_OK):
+        return " ".join([str(bin_), "exec", "--state", str(paths.state), "--hosts", str(remotes_file(paths)),
+                        r.name, "--", remote_tmux(paths, r), "-L", REMOTE_TMUX_SOCKET])
+    return host_tmux_prefix(paths, r)
 
 
 # --------------------------------------------------------------------------- the host side ------------
@@ -285,7 +311,7 @@ class Watcher:
         if self.alive() or now < self.next_try:
             return
         from . import messages
-        argv = ssh_argv(self.paths, self.r, REMOTE_FORCE, "watch")
+        argv = link_argv(self.paths, self.r, REMOTE_FORCE, "watch")
         try:
             self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, text=True, bufsize=1)

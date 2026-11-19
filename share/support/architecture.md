@@ -62,6 +62,7 @@ sockets `force-dev` / `force-dev-ui` (SPEC §2.1).
 |---|---|---|
 | `crates/sidebar` | `force-sidebar`, `force-header`, `force-dialog` | the sidebar (reads the snapshot; ratatui), the header bar, the popup dialogs (new, rename, move, archive, delete, jump, archived) |
 | `crates/intro` | `force-intro` | the startup intro film |
+| `crates/link` | `force-link` | the host link: ssh to a remote host (SPEC §56.1) |
 
 ## `share/` (shipped with every release)
 

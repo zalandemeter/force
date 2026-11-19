@@ -36,10 +36,15 @@ if [ -z "$nested" ] && [ -n "$host" ]; then
   sess=$(t display -p -t "$W" '#{@force_session}')
 fi
 # The session the nested client shows now, asked from its host (@force_session can lag a switch by a
-# sidebar poll); published to the window, and the sidebar and header poked to redraw. A remote's shell
-# reads the format, so it is quoted for it.
+# sidebar poll); published to the window, and the sidebar and header poked to redraw. Through plain ssh
+# the remote shell reads the format, so it is quoted there; over force-link (which quotes every word itself,
+# SPEC §56.1) or a local tmux it is passed unquoted.
 shown() {
-  if [ -n "$host" ]; then s=$($htmux display -p -c "$nested" "'#{client_session}'" 2>/dev/null)
+  if [ -n "$host" ]; then
+    case "$htmux" in
+      ssh\ *) s=$($htmux display -p -c "$nested" "'#{client_session}'" 2>/dev/null) ;;
+      *)      s=$($htmux display -p -c "$nested" '#{client_session}' 2>/dev/null) ;;
+    esac
   else s=$($htmux display -p -c "$nested" '#{client_session}' 2>/dev/null); fi
   if [ -n "$s" ] && [ "$s" != "$sess" ]; then
     t set-option -w -t "$W" @force_session "$s"

@@ -6,11 +6,12 @@ export CARGO_HOME_CACHE=/cache/cargo-home
 mkdir -p /out/bin /out/terminfo /out/licenses "$CARGO_HOME_CACHE"
 cp -r /opt/cargo/bin "$CARGO_HOME_CACHE/" 2>/dev/null || true
 export CARGO_HOME="$CARGO_HOME_CACHE" PATH="$CARGO_HOME_CACHE/bin:/opt/cargo/bin:$PATH"
-for crate in sidebar intro; do
+for crate in sidebar intro link; do
   CARGO_TARGET_DIR="/cache/target-$crate" cargo build --release --locked -q --manifest-path "/src/crates/$crate/Cargo.toml"
 done
 for b in force-sidebar force-header force-dialog; do cp "/cache/target-sidebar/release/$b" /out/bin/; done
 cp /cache/target-intro/release/force-intro /out/bin/
+cp /cache/target-link/release/force-link /out/bin/
 cp /opt/force-tmux/bin/tmux /out/bin/tmux
 strip /out/bin/force-* || true
 # terminfo for what Force's tmux tells programs inside it (TERM=tmux-256color): missing on minimal systems

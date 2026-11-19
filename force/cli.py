@@ -437,7 +437,7 @@ def build_ui_session(cockpit: Cockpit, target: str, name: str, cols: int, rows: 
     ui.run("set-option", "-w", "-t", main, "@force_nested", nested)
     ui.run("set-option", "-w", "-t", main, "@force_session", target)
     ui.run("set-option", "-w", "-t", main, "@force_host", host)
-    host_tmux = remote_mod.host_tmux_prefix(cockpit.paths, remote) if remote else f"tmux -L {cockpit.paths.tmux_socket}"
+    host_tmux = remote_mod.link_tmux_prefix(cockpit.paths, remote) if remote else f"tmux -L {cockpit.paths.tmux_socket}"
     ui.run("set-option", "-w", "-t", main, "@force_host_tmux", host_tmux)
     # the app path as given (normally the ~/.local/share/force/app symlink), not resolved: a resolved release
     # path kept the ui server's bindings on that release's scripts after every upgrade
@@ -532,7 +532,7 @@ def overlay_close(cockpit: Cockpit, window: str, target: str | None = None, wait
     nested_cmd = [cockpit.cockpit_bin, "nested", target] + (["--remote", host] if remote else [])
     ui.run("respawn-pane", "-k", "-t", main, "-e", f"FORCE_HOST={host}", shlex.join(nested_cmd))
     nested = "" if remote else ui.run("display", "-p", "-t", main, "#{pane_tty}")
-    host_tmux = back.get("host_tmux") or (remote_mod.host_tmux_prefix(cockpit.paths, remote) if remote
+    host_tmux = back.get("host_tmux") or (remote_mod.link_tmux_prefix(cockpit.paths, remote) if remote
                                          else f"tmux -L {cockpit.paths.tmux_socket}")
     for k, v in (("@force_nested", nested), ("@force_host", host), ("@force_session", target),
                  ("@force_host_tmux", host_tmux)):
@@ -588,6 +588,35 @@ def nested_command(cockpit: Cockpit, target: str, remote_name: str | None = None
         time.sleep(1)
 
 
+# the id `force nested --report ID` writes (SPEC §40): an id nested_command generates fits this
+_REPORT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def nested_report_command(state: Path, report: str, remove: bool = False) -> int:
+    """`force nested-report ID [--remove]` on a host (SPEC §40/§56.1): prints the tty the remote side of
+    `force nested --report ID` wrote to `<state>/nested/ID`, and (with --remove) deletes it. Exit 1 while there
+    is none; 2 with an invalid ID (which an older Force also reaches for any unknown command: the reader falls back
+    to the old file read over ssh)."""
+    if not _REPORT_RE.match(report):
+        print(f"force: bad nested-report id {report!r}", file=sys.stderr)
+        return 2
+    path = state / "nested" / report
+    if remove:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return 0
+    try:
+        v = path.read_text().strip()
+    except OSError:
+        return 1
+    if not v:
+        return 1
+    print(v)
+    return 0
+
+
 def _report_tty(path: Path, ttyname=os.ttyname, wait: float = 3.0) -> bool:
     """The remote side of `force nested --report` (SPEC §40): write this terminal's tty to `path`, then wait until
     the other side has read and removed it (at most `wait` s): it draws "connecting to HOST" on this terminal
@@ -614,12 +643,13 @@ def _nested_remote(cockpit: Cockpit, target: str, remote_name: str) -> int:
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX_PANE",)}
     again = False
     quiet = None
+    stale_read = {"old": False}          # the report of a remote too old for `nested-report` is read over ssh
     while True:
         quiet = _quiet_input(attrs=quiet)
         spinner = Connecting(r.name, again)
-        child = subprocess.Popen(remote_mod.ssh_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, "nested", target,
+        child = subprocess.Popen(remote_mod.link_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, "nested", target,
                                                      "--report", rid, tty=True), env=env)
-        _name_remote_client(cockpit, r, rid, pane, child, spinner)
+        _name_remote_client(cockpit, r, rid, pane, child, spinner, stale_read)
         child.wait()
         spinner.stop()
         _remote_client_gone(cockpit, pane)
@@ -742,10 +772,12 @@ class Connecting:
                 pass
 
 
-def _name_remote_client(cockpit: Cockpit, r, rid: str, pane: str, child, spinner: Connecting | None = None) -> None:
+def _name_remote_client(cockpit: Cockpit, r, rid: str, pane: str, child, spinner: Connecting | None = None,
+                       stale_read: dict | None = None) -> None:
     """Wait (in the background) until the remote side reported its tty, then stop the spinner, remove the
     report (the remote attaches then), name the nested client in this ui window and tell its sidebar and
-    header."""
+    header. The report is read with `force nested-report ID` (SPEC §56.1, over the link); a remote too old
+    for it (usage error, exit 2) is read the old way over plain ssh for the rest of this run (`stale_read`)."""
     def run():
         try:
             _run()
@@ -758,18 +790,41 @@ def _name_remote_client(cockpit: Cockpit, r, rid: str, pane: str, child, spinner
         for _ in range(150):
             if child.poll() is not None:
                 return
-            try:
-                p = subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, "sh", "-c", f'cat "{f}"'),
-                                   capture_output=True, text=True, timeout=20)
-            except subprocess.TimeoutExpired:
-                continue
+            stale = bool(stale_read and stale_read.get("old"))
+            if stale:
+                try:
+                    p = subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, "sh", "-c", f'cat "{f}"'),
+                                       capture_output=True, text=True, timeout=20)
+                except subprocess.TimeoutExpired:
+                    continue
+            else:
+                try:
+                    p = subprocess.run(remote_mod.link_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE,
+                                                           "nested-report", rid),
+                                       capture_output=True, text=True, timeout=20)
+                except subprocess.TimeoutExpired:
+                    continue
+                if p.returncode == 2 and stale_read is not None:
+                    # an old Force without the command: fall back to the file read over plain ssh
+                    stale_read["old"] = True
+                    try:
+                        p = subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, "sh", "-c", f'cat "{f}"'),
+                                           capture_output=True, text=True, timeout=20)
+                    except subprocess.TimeoutExpired:
+                        continue
             tty = p.stdout.strip()
             if p.returncode == 0 and tty:
                 if spinner is not None:
                     spinner.stop()
+                stale = bool(stale_read and stale_read.get("old"))
                 try:
-                    subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, "sh", "-c", f'rm -f "{f}"'),
-                                   capture_output=True, timeout=20)
+                    if stale:
+                        subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, "sh", "-c", f'rm -f "{f}"'),
+                                       capture_output=True, timeout=20)
+                    else:
+                        subprocess.run(remote_mod.link_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE,
+                                                           "nested-report", rid, "--remove"),
+                                       capture_output=True, timeout=20)
                 except subprocess.TimeoutExpired:
                     pass
                 ui = cockpit.ui_tmux
@@ -781,7 +836,7 @@ def _name_remote_client(cockpit: Cockpit, r, rid: str, pane: str, child, spinner
                     _signal_ui_panes(ui, pane)
                 # a remote on an older Force attached at once, under the spinner: repaint its client
                 try:
-                    subprocess.run([*remote_mod.ssh_argv(cockpit.paths, r, remote_mod.remote_tmux(cockpit.paths, r),
+                    subprocess.run([*remote_mod.link_argv(cockpit.paths, r, remote_mod.remote_tmux(cockpit.paths, r),
                                                          "-L", remote_mod.REMOTE_TMUX_SOCKET, "refresh-client",
                                                          "-c", tty)], capture_output=True, timeout=20)
                 except (subprocess.TimeoutExpired, OSError):
@@ -819,7 +874,7 @@ def _remote_target(cockpit: Cockpit, r) -> str | None:
         snap = json.loads((remote_mod.remote_dir(cockpit.paths, r.name) / "snapshot.json").read_text())
     except (OSError, ValueError):
         try:
-            p = subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, "list", "--json"),
+            p = subprocess.run(remote_mod.link_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, "list", "--json"),
                                capture_output=True, text=True, timeout=30)
             rows = json.loads(p.stdout or "[]")
             snap = {"sessions": rows if isinstance(rows, list) else rows.get("sessions", [])}
@@ -835,7 +890,7 @@ def _remote_target(cockpit: Cockpit, r) -> str | None:
 def _remote_shell(cockpit: Cockpit, r) -> str | None:
     """A remote with no sessions gets a shell session, as this machine does: its name, None when that fails."""
     try:
-        p = subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, "new", "shell",
+        p = subprocess.run(remote_mod.link_argv(cockpit.paths, r, remote_mod.REMOTE_FORCE, "new", "shell",
                                                "--kind", "shell", "--no-switch"),
                            capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
@@ -2418,7 +2473,7 @@ def _shown_session(cockpit: Cockpit, host: str, client: str) -> str | None:
         r = remote_mod.get(cockpit.paths, host)
         if r is None:
             return None
-        p = subprocess.run(remote_mod.ssh_argv(cockpit.paths, r, "tmux", "-L", cockpit.paths.tmux_socket, "display", "-p", "-c", client,
+        p = subprocess.run(remote_mod.link_argv(cockpit.paths, r, "tmux", "-L", cockpit.paths.tmux_socket, "display", "-p", "-c", client,
                                                "#{client_session}"), capture_output=True, text=True, timeout=15)
         return (p.stdout.strip() or None) if p.returncode == 0 else None
     except (TmuxError, OSError, subprocess.TimeoutExpired):
@@ -2432,7 +2487,7 @@ def dialog_command(cockpit: Cockpit, kind: str, name: str | None) -> int:
         # forwarded there by FORCE_HOST (_forward)
         r = remote_mod.get(cockpit.paths, host)
         if r is not None:
-            os.environ["FORCE_HOST_TMUX"] = remote_mod.host_tmux_prefix(cockpit.paths, r)
+            os.environ["FORCE_HOST_TMUX"] = remote_mod.link_tmux_prefix(cockpit.paths, r)
     client = os.environ.get("FORCE_CLIENT", "")
     if name and client and kind in ("rename", "archive", "delete", "move"):
         shown = _shown_session(cockpit, host, client)
@@ -2576,6 +2631,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name")
     p.add_argument("--remote", default=None)
     p.add_argument("--report", default=None)
+
+    p = sub.add_parser("nested-report", help="a remote's nested client reported its tty (internal, SPEC §40)")
+    p.add_argument("id")
+    p.add_argument("--remove", action="store_true", help="also delete the report")
 
     p = sub.add_parser("watch", help="this host's sessions as JSON lines, for a remote ui (SPEC §40)")
 
@@ -2803,6 +2862,8 @@ def _dispatch(args) -> int:
         return ui_command(cockpit, args.mode)
     if cmd == "nested":
         return nested_command(cockpit, args.name, args.remote, args.report)
+    if cmd == "nested-report":
+        return nested_report_command(cockpit.paths.state, args.id, args.remove)
     if cmd == "watch":
         return watch_command(cockpit)
     if cmd == "remote":
@@ -2902,7 +2963,7 @@ def _forward(argv: list[str]) -> int | None:
     if r is None:
         print(f"force: no host {host!r}", file=sys.stderr)
         return 1
-    return subprocess.call(remote_mod.ssh_argv(paths, r, remote_mod.REMOTE_FORCE, *argv))
+    return subprocess.call(remote_mod.link_argv(paths, r, remote_mod.REMOTE_FORCE, *argv))
 
 
 def _prepend_tmux_bin() -> None:

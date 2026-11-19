@@ -55,6 +55,7 @@ is optional.
 | `force/` | the app: the Python package behind the `force` command, the daemon and the cockpit |
 | `crates/sidebar/` | Rust: the sidebar, the header and the popup dialogs (`force-sidebar`, `force-header`, `force-dialog`) |
 | `crates/intro/` | Rust: the startup intro (`force-intro`) and the sources its film is made from |
+| `crates/link/` | Rust: the host link (`force-link`), ssh to a remote host |
 | `share/` | files the app installs: tmux configs, helper scripts, the installer template, the agent guide (`skill.md`) |
 | `systemd/` | the user units |
 | `tests/` | the test suite (pytest) |
@@ -115,6 +116,7 @@ Tests:
 python3 -m pytest -q                                              # ~2 minutes; tests never touch your live Force
 cargo test --manifest-path crates/sidebar/Cargo.toml
 cargo test --manifest-path crates/intro/Cargo.toml
+cargo test --manifest-path crates/link/Cargo.toml
 python3 website/tools/build.py /tmp/site                         # the website builds
 ```
 

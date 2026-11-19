@@ -78,6 +78,7 @@ CARGO="$(select_cargo)"
 # where cargo puts the binaries: CARGO_TARGET_DIR when set (scripts/devbox.sh), else each crate's target/
 SIDEBAR_TARGET="${CARGO_TARGET_DIR:-$REPO/crates/sidebar/target}"
 INTRO_TARGET="${CARGO_TARGET_DIR:-$REPO/crates/intro/target}"
+LINK_TARGET="${CARGO_TARGET_DIR:-$REPO/crates/link/target}"
 
 if [[ "${1:-}" != "--no-test" ]]; then
   if ! "$PY" -c 'import pytest' >/dev/null 2>&1; then
@@ -120,6 +121,15 @@ if [[ -f "$REPO/crates/intro/Cargo.toml" ]]; then
     || { echo "deploy: intro does not build, not deployed" >&2; rm -rf "$dest"; exit 1; }
   mkdir -p "$dest/share/bin"
   cp "$INTRO_TARGET/release/force-intro" "$dest/share/bin/force-intro"
+fi
+
+# The host link (SPEC §56.1): built from crates/link/ and shipped as share/bin/force-link.
+if [[ -f "$REPO/crates/link/Cargo.toml" ]]; then
+  echo "deploy: building the host link"
+  (cd "$REPO/crates/link" && nice -n 10 "$CARGO" build --release -q) \
+    || { echo "deploy: host link does not build, not deployed" >&2; rm -rf "$dest"; exit 1; }
+  mkdir -p "$dest/share/bin"
+  cp "$LINK_TARGET/release/force-link" "$dest/share/bin/force-link"
 fi
 
 # Force's own static tmux (SPEC §46), when scripts/build-release.sh has built it here: the release then runs
