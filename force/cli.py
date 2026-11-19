@@ -1753,7 +1753,9 @@ def _current_session(cockpit: Cockpit, client: str | None) -> str | None:
 
 
 def switch_command(cockpit: Cockpit, name: str | None, index: int | None,
-                  next_: bool, prev_: bool, client: str | None) -> int:
+                  next_: bool, prev_: bool, client: str | None, print_: bool = False) -> int:
+    """`--print`: then print the session the client shows (ui-key.sh switching a remote: the switch and the answer
+    in one round trip, SPEC §40)."""
     # the session list (Alt+N, next, previous): without Chuck (SPEC §50), who opens from his own button
     live = [e.name for e in registry.load(cockpit.paths.registry).live() if not registry.is_support(e)]
     if name:
@@ -1778,6 +1780,8 @@ def switch_command(cockpit: Cockpit, name: str | None, index: int | None,
         print("force: switch needs NAME, --index, --next or --prev", file=sys.stderr)
         return 1
     cockpit.tmux.switch_client(target, client)
+    if print_:
+        print(cockpit.tmux.run("display", "-p", "-c", client, "#{client_session}") if client else target)
     return 0
 
 
@@ -2750,6 +2754,7 @@ def build_parser(only: str | None = None) -> argparse.ArgumentParser:
     p.add_argument("--next", action="store_true")
     p.add_argument("--prev", action="store_true")
     p.add_argument("--client", default=None)
+    p.add_argument("--print", dest="print_", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("forget", help="forget an archived session")
     p.add_argument("name")
@@ -3000,7 +3005,7 @@ def _dispatch(args) -> int:
     if cmd == "list":
         return list_command(cockpit, args.all_, args.json)
     if cmd == "switch":
-        return switch_command(cockpit, args.name, args.index, args.next, args.prev, args.client)
+        return switch_command(cockpit, args.name, args.index, args.next, args.prev, args.client, args.print_)
     if cmd == "delete":
         return delete_command(cockpit, args.name, args.force, args.yes)
     if cmd == "forget":
