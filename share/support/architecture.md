@@ -18,8 +18,9 @@ your terminal ── tmux client
 force daemon (systemd unit force.service; without systemd started by `force`):
    every second reads tmux + the agents' status files, computes each session's state, writes the snapshot,
    restarts crashed sessions, sends notifications, watches remote hosts (`ssh HOST force watch`)
-force-link daemon (systemd unit force-link.service, with the directLink setting on): the direct link to the
-   remotes over QUIC (UDP linkPort); `force-link exec HOST` takes it when it is up, ssh otherwise (SPEC §56.2)
+force-link daemon (systemd unit force-link.service or launchd agent, with the directLink setting on; without a service
+   manager started by `force` and the daemon): the direct link to the remotes over QUIC (UDP linkPort);
+   `force-link exec HOST` takes it when it is up, ssh otherwise (SPEC §56.2)
 classic layout: no ui server; sidebar and header panes live next to the agent pane on the host server
 ```
 
@@ -50,7 +51,7 @@ sockets `force-dev` / `force-dev-ui` (SPEC §2.1).
 | `tmux.py` | a thin wrapper over the tmux CLI |
 | `config.py` | paths (env overrides, instances) and the settings table |
 | `remote.py` | remote hosts: hosts.json, ssh options, `force watch`, the watchers |
-| `link.py` | the direct link's Python side: pairing over ssh, `force link trust\|untrust`, `force link-daemon` |
+| `link.py` | the direct link's Python side: pairing over ssh, `force link trust\|untrust`, `force link-daemon`, starting and stopping it without a service manager |
 | `services.py` | the one place that talks to systemd / launchd |
 | `automation.py`, `report.py` | `force prompt`, `wait`, `read`, `keys`, `status`, `explain`, reported states |
 | `doctor.py` | `force doctor [--fix]` |

@@ -352,6 +352,16 @@ def _start_daemon(cockpit: Cockpit) -> None:
             pass
 
 
+def _start_link(cockpit: Cockpit) -> None:
+    """Without a service manager, the link daemon too (SPEC §46, §56.2): `force link-daemon` detached, with
+    directLink on, when the release has force-link and none runs (its lock). Never for a development instance
+    (SPEC §2.1): it would want the live install's UDP port."""
+    if config.instance() is not None:
+        return
+    from . import link
+    link.start_daemon(cockpit.paths, cockpit.cfg, _launcher())
+
+
 def _app_dir(cockpit: Cockpit) -> str:
     """The release this cockpit runs (<app>, the parent of share/tmux.conf): tmux's @force_app."""
     return os.path.abspath(Path(cockpit.paths.tmux_conf).parent.parent)
@@ -374,6 +384,7 @@ def _start_host(cockpit: Cockpit) -> bool:
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if not _daemon_lock_held(cockpit):
             _start_daemon(cockpit)
+        _start_link(cockpit)
     deadline = time.time() + 10
     while not cockpit.tmux.server_running():
         if time.time() > deadline:
@@ -1205,11 +1216,16 @@ LINK_SETTINGS = ("directLink", "linkPort")
 
 def _apply_link_setting(path: Path, key: str, run=None) -> None:
     """directLink and linkPort reach the link service at once (SPEC §56.2): on = enabled and (re)started with the
-    new port, off = stopped and disabled. Nothing where no service manager runs Force (an instance, a container)."""
+    new port, off = stopped and disabled. Where no service manager runs Force (a container, SPEC §46) the link
+    daemon Force started itself is stopped and, with directLink on, started again; never for an instance."""
     if key not in LINK_SETTINGS:
         return
-    from . import services
-    services.apply_link(config.load_config(path).direct_link, run=run)
+    from . import link, services
+    cfg = config.load_config(path)
+    if services.apply_link(cfg.direct_link, run=run) is None and config.instance() is None:
+        paths = config.get_paths()
+        link.stop_daemon(paths)
+        link.start_daemon(paths, cfg, _launcher())
 
 
 def settings_command(cockpit: Cockpit, action: str | None, key: str | None, value: str | None,
@@ -2091,6 +2107,12 @@ def uninstall_command(cockpit: Cockpit, purge: bool, yes: bool) -> int:
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _stop_daemon(cockpit)
         services.remove_launch_agents()     # macOS: agents written, but launchd does not answer here (ssh)
+    # the direct link (SPEC §56.2): a link daemon Force started itself (no service manager) stops too, and this
+    # host's link identity and socket go; the peers file and each remote's link.json stay with the settings
+    from . import link
+    link.stop_daemon(cockpit.paths)
+    if not purge:
+        link.forget_local(cockpit.paths)
     subprocess.call(["tmux", "-L", cockpit.paths.ui_socket, "kill-server"],
                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

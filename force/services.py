@@ -132,14 +132,24 @@ def _launchd_path(home: Path) -> str:
     return f"{app}/share/tmux-bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 
+# The link agent's command: `force link-daemon`, but only while the live release has the direct link (its
+# force-link and force/link.py). An older release switched to later (a rollback) has neither or no `link-daemon`
+# command (a usage error, exit 2, which KeepAlive would restart every few seconds): then it exits 0 and stays down,
+# as the systemd unit's Conditions do (SPEC §12, §51.1). `exec`: launchd's job is force-link itself.
+LINK_AGENT_SH = ('a="$HOME/.local/share/force/app"; '
+                 '[ -x "$a/share/bin/force-link" ] && [ -f "$a/force/link.py" ] || exit 0; '
+                 'exec "$HOME/.local/bin/force" link-daemon')
+
+
 def link_plist(home) -> bytes:
     """The link daemon's LaunchAgent (SPEC §56.2), loaded only with directLink on. Kept alive unless it exits 0
-    (`force link-daemon` with directLink off). Pure: tests check it on any platform."""
+    (`force link-daemon` with directLink off, or a live release without the direct link). Pure: tests check it on
+    any platform."""
     home = Path(home)
     log = home / ".local" / "state" / "force" / "link.log"
     return plistlib.dumps({
         "Label": LINK_LABEL,
-        "ProgramArguments": [f"{home}/.local/bin/force", "link-daemon"],
+        "ProgramArguments": ["/bin/sh", "-c", LINK_AGENT_SH],
         "EnvironmentVariables": {"PATH": _launchd_path(home)},
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
@@ -242,21 +252,23 @@ def _systemd_link(run, on: bool, restart: bool) -> None:
         run(["systemctl", "--user", "restart", LINK_UNIT])
 
 
-def apply_link(on: bool, run=None) -> None:
+def apply_link(on: bool, run=None) -> str | None:
     """The directLink / linkPort settings changed (SPEC §56.2): start (or restart, for a new port) the link service,
-    or stop it. Nothing without a service manager (an instance, a container: the user runs it)."""
+    or stop it. Returns the service manager; nothing without one (an instance, a container: the caller handles
+    a link daemon Force started itself)."""
     r = _real_run if run is None else run
     b = backend(run=r)
     if b == "systemd":
         _systemd_link(r, on, restart=True)
     elif b == "launchd":
         _launchd_link(Path.home(), r, on, restart=True)
+    return b
 
 
-def _install_launchd(home, run, self_test, link: bool = False) -> None:
+def _install_launchd(home, run, self_test, link: bool = False) -> str | None:
     if backend(run=run) != "launchd":
         _say("no launchd session here: force starts its services itself")
-        return
+        return None
     home = Path(home)
     agents = home / "Library" / "LaunchAgents"
     # launchd opens the daemon's log itself and does not create its folder: without it the job never starts
@@ -278,6 +290,7 @@ def _install_launchd(home, run, self_test, link: bool = False) -> None:
         run(["launchctl", "bootstrap", f"gui/{uid}", str(path)])
     # the link daemon: restarted on every setup, so a new release's force-link runs (SPEC §56.2)
     _launchd_link(home, run, link, restart=True)
+    return "launchd"
 
 
 def _wait_unloaded(uid, run, label, sleep=None, tries: int = 50) -> None:
@@ -299,17 +312,18 @@ def _linger(run, user) -> None:
         _say(f"note: sessions stop when you log out (ask an admin for: loginctl enable-linger {user})")
 
 
-def install(rel, home, run, self_test, user, link: bool = False) -> None:
+def install(rel, home, run, self_test, user, link: bool = False) -> str | None:
     """Install (or refresh) the host services. Linux: systemd units + linger, exactly as before. macOS: LaunchAgents.
-    `link`: the directLink setting, whether the link service runs (SPEC §56.2)."""
+    `link`: whether the link service runs (the directLink setting, and the release has the direct link; SPEC §56.2).
+    Returns the service manager used ("systemd" / "launchd"), None when there is none (Force starts its services
+    itself, SPEC §46)."""
     rel = Path(rel)
     if sys.platform == "darwin":
-        _install_launchd(home, run, self_test, link)
-        return
+        return _install_launchd(home, run, self_test, link)
     # --- systemd (Linux): today's setup_services body --------------------------------------------
     if run(["systemctl", "--user", "show-environment"]).returncode != 0:
         _say("no systemd here: force starts its services itself")
-        return
+        return None
     user_sys = home / ".config" / "systemd" / "user"
     user_sys.mkdir(parents=True, exist_ok=True)
     units = sorted((rel / "systemd").glob("*.service")) + sorted((rel / "systemd").glob("*.timer"))
@@ -336,6 +350,7 @@ def install(rel, home, run, self_test, user, link: bool = False) -> None:
     # the link daemon: restarted when it ran, so a new release's force-link runs (SPEC §56.2)
     _systemd_link(run, link, restart=True)
     _linger(run, user)
+    return "systemd"
 
 
 def _atomic_write(path: Path, content: str, mode: int = 0o644) -> None:

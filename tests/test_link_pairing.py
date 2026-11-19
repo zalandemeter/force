@@ -100,7 +100,8 @@ def test_link_daemon_off(monkeypatch, capsys):
 def test_link_daemon_missing_binary(env, monkeypatch, capsys):
     missing = env.tmp / "no-such-force-link"
     monkeypatch.setattr(link.remote, "link_bin", lambda paths: missing)
-    assert link.link_daemon_command(env.paths, Config()) == 1
+    # exit 0: the service stays down instead of restarting a program that is not there (SPEC §12)
+    assert link.link_daemon_command(env.paths, Config()) == 0
     assert "missing" in capsys.readouterr().err
 
 

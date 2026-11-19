@@ -196,16 +196,137 @@ def daemon_argv(paths, cfg) -> list[str]:
 
 
 def link_daemon_command(paths, cfg) -> int:
-    """`force link-daemon` (the service's command): exec the link daemon with this install's paths and settings."""
+    """`force link-daemon` (the service's command): exec the link daemon with this install's paths and settings.
+    Exit 0 (the service then stays down, SPEC §12) with directLink off and in a release without force-link."""
     if not cfg.direct_link:
         print("force: directLink is off: no link daemon (force settings set directLink true)")
         return 0
     argv = daemon_argv(paths, cfg)
     if not os.access(argv[0], os.X_OK):
         print(f"force: {argv[0]} is missing: this release has no direct link", file=sys.stderr)
-        return 1
+        return 0
     os.execv(argv[0], argv)
     return 1                                                         # not reached
+
+
+# ------------------------------------------------- the link daemon without a service manager (SPEC §46) --
+def lock_file(paths) -> Path:
+    """The daemon's lock (crates/link): held while it runs, its pid inside."""
+    return paths.state / "link" / "lock"
+
+
+def log_file(paths) -> Path:
+    return paths.state / "link.log"
+
+
+def release_has_link(rel) -> bool:
+    """The release ships the link daemon: its force-link program and the `force link-daemon` command."""
+    rel = Path(rel)
+    return os.access(rel / "share" / "bin" / "force-link", os.X_OK) and (rel / "force" / "link.py").is_file()
+
+
+def _lock_held(path: Path) -> bool:
+    """Another process holds the flock on `path`. Never creates the file and never blocks."""
+    import fcntl
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def daemon_pid(paths) -> int | None:
+    """The running link daemon's pid (the one in its lock file), else None. A daemon that wrote no pid (older
+    force-link) is found by its command line: this user's `force-link daemon --state <state> …`."""
+    lock = lock_file(paths)
+    if not _lock_held(lock):
+        return None
+    try:
+        text = lock.read_text().strip()
+    except OSError:
+        text = ""
+    if text.isdigit():
+        return int(text)
+    from . import procinfo
+    state = str(paths.state)
+    for pid in procinfo.pids():
+        if procinfo.uid(pid) != os.getuid():
+            continue
+        argv = procinfo.cmdline(pid) or []
+        if len(argv) >= 4 and os.path.basename(argv[0]) == "force-link" and argv[1] == "daemon" \
+                and "--state" in argv and argv[argv.index("--state") + 1:argv.index("--state") + 2] == [state]:
+            return pid
+    return None
+
+
+def start_daemon(paths, cfg, launcher: str) -> bool:
+    """Start `force link-daemon` detached (output appended to <state>/link.log) where no service manager runs it:
+    with directLink on, when the release has force-link and no link daemon runs yet (its lock is free; a second
+    one would exit at once anyway). True when one was started."""
+    if not cfg.direct_link or not os.access(remote.link_bin(paths), os.X_OK) or _lock_held(lock_file(paths)):
+        return False
+    try:
+        paths.state.mkdir(parents=True, exist_ok=True)
+        log = open(log_file(paths), "a")
+    except OSError:
+        log = subprocess.DEVNULL
+    try:
+        subprocess.Popen([launcher, "link-daemon"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        return True
+    except OSError:
+        return False
+    finally:
+        if log is not subprocess.DEVNULL:
+            log.close()
+
+
+def stop_daemon(paths, wait: float = 5.0, sleep=None) -> bool:
+    """Stop the running link daemon (SIGTERM to the pid in its lock) and wait up to `wait` seconds for its lock to
+    be free. True when none runs afterwards."""
+    import signal
+    import time
+    pid = daemon_pid(paths)
+    if pid is None:
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    nap = time.sleep if sleep is None else sleep
+    for _ in range(max(1, int(wait / 0.1))):
+        if not _lock_held(lock_file(paths)):
+            return True
+        nap(0.1)
+    return not _lock_held(lock_file(paths))
+
+
+def restart_unmanaged(paths, cfg, launcher: str, on: bool) -> str:
+    """Setup without a service manager (an update, SPEC §46): a link daemon Force started itself is restarted, so
+    the new release's force-link runs (stopped for good with `on` false). One that does not run is left for
+    `force` to start. Returns "restarted" | "stopped" | "none"."""
+    if daemon_pid(paths) is None:
+        return "none"
+    stop_daemon(paths)
+    if on and start_daemon(paths, cfg, launcher):
+        return "restarted"
+    return "stopped"
+
+
+def forget_local(paths) -> None:
+    """`force uninstall`: this host's link identity and socket go (<state>/link/, <state>/link.sock)."""
+    import shutil
+    shutil.rmtree(paths.state / "link", ignore_errors=True)
+    try:
+        sock_file(paths).unlink()
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------------------------- pairing --

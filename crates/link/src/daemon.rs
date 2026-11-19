@@ -281,14 +281,19 @@ fn bound_port(ep: &Endpoint) -> u16 {
 }
 
 /// An exclusive lock on `<state>/link/lock`, held for the daemon's life: a second daemon on the same state dir
-/// refuses to start.
+/// refuses to start. It holds the daemon's pid (as `force daemon`'s daemon.lock does), so Force can stop a link
+/// daemon it started itself where no service manager runs it (SPEC §46).
 fn lock(path: &Path) -> Result<std::fs::File, String> {
+    use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).open(path)
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).open(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(format!("another force-link daemon runs on {}", path.parent().unwrap_or(path).display()));
     }
+    // ours now: replace whatever an earlier daemon wrote
+    f.set_len(0).and_then(|_| write!(f, "{}\n", std::process::id())).and_then(|_| f.flush())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(f)
 }
 
@@ -819,6 +824,20 @@ mod tests {
         let v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         assert_eq!((v["state"].as_str(), v["reason"].as_str(), v["fails"].as_u64()), (Some("ssh"), Some("timeout"), Some(2)));
         assert_eq!(v["id"].as_str(), Some(id.to_string().as_str()));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn lock_holds_the_pid_and_refuses_a_second() {
+        let d = std::env::temp_dir().join(format!("force-link-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("lock");
+        std::fs::write(&p, "999999999\nstale words from an earlier daemon\n").unwrap();
+        let held = lock(&p).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("{}\n", std::process::id()));
+        assert!(lock(&p).unwrap_err().contains("another force-link daemon"));
+        drop(held);
+        assert!(lock(&p).is_ok());
         std::fs::remove_dir_all(&d).ok();
     }
 

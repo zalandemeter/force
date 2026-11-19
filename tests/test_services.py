@@ -253,7 +253,7 @@ def test_link_plist_fields(tmp_path):
     home = tmp_path / "home"
     plist = plistlib.loads(services.link_plist(home))
     assert plist["Label"] == "cc.useforce.force-link"
-    assert plist["ProgramArguments"] == [f"{home}/.local/bin/force", "link-daemon"]
+    assert plist["ProgramArguments"] == ["/bin/sh", "-c", services.LINK_AGENT_SH]
     assert plist["KeepAlive"] == {"SuccessfulExit": False}
     assert plist["RunAtLoad"] is True
     assert plist["ThrottleInterval"] == 3
@@ -348,3 +348,63 @@ def test_uninstall_systemd_disables_link_too(monkeypatch, tmp_path):
     services.uninstall(run=fr)
     assert fr.calls[0][:4] == ["systemctl", "--user", "disable", "--now"]
     assert "force-link.service" in fr.calls[0]
+
+
+# --- the link agent's guard: a live release without the direct link stays down (SPEC §51.1) ---------------
+def _agent_home(tmp_path, binary=True, link_py=True):
+    home = tmp_path / "home"
+    app = home / ".local" / "share" / "force" / "app"
+    (app / "share" / "bin").mkdir(parents=True)
+    (app / "force").mkdir(parents=True)
+    if binary:
+        (app / "share" / "bin" / "force-link").write_text("#!/bin/sh\n")
+        (app / "share" / "bin" / "force-link").chmod(0o755)
+    if link_py:
+        (app / "force" / "link.py").write_text("")
+    launcher = home / ".local" / "bin" / "force"
+    launcher.parent.mkdir(parents=True)
+    out = tmp_path / "ran"
+    launcher.write_text(f'#!/bin/sh\necho "$@" > {out}\nexit 7\n')
+    launcher.chmod(0o755)
+    return home, out
+
+
+@pytest.mark.parametrize("binary,link_py", [(False, True), (True, False), (False, False)])
+def test_link_agent_without_the_direct_link_exits_0(tmp_path, binary, link_py):
+    import subprocess
+    home, out = _agent_home(tmp_path, binary, link_py)
+    argv = plistlib.loads(services.link_plist(home))["ProgramArguments"]
+    r = subprocess.run(argv, env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, timeout=10)
+    assert r.returncode == 0 and not out.exists()     # KeepAlive SuccessfulExit false: it stays down
+
+
+def test_link_agent_execs_force_link_daemon(tmp_path):
+    import subprocess
+    home, out = _agent_home(tmp_path)
+    argv = plistlib.loads(services.link_plist(home))["ProgramArguments"]
+    r = subprocess.run(argv, env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, timeout=10)
+    assert r.returncode == 7 and out.read_text().split() == ["link-daemon"]
+
+
+def test_force_link_unit_conditions():
+    text = (Path(__file__).resolve().parent.parent / "systemd" / "force-link.service").read_text()
+    lines = text.splitlines()
+    assert "ConditionPathExists=%h/.local/share/force/app/share/bin/force-link" in lines
+    assert "ConditionPathExists=%h/.local/share/force/app/force/link.py" in lines
+    assert "RestartPreventExitStatus=0 2" in lines
+
+
+# --- install says which manager runs the services (setup starts the link daemon itself without one) --------
+def test_install_returns_the_manager(tmp_path, monkeypatch):
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    none = FakeRun()
+    none.handle(lambda a, k: R(1) if a[2:3] == ["show-environment"] else None)
+    assert services.install(tmp_path, tmp_path / "home", none, False, "u") is None
+    (tmp_path / "systemd").mkdir()
+    fr = FakeRun()
+    fr.handle(lambda a, k: R(0, "Linger=yes") if a[0] == "loginctl" else None)
+    assert services.install(tmp_path, tmp_path / "home", fr, False, "u", link=False) == "systemd"
+    monkeypatch.setattr(services.sys, "platform", "darwin")
+    no_gui = FakeRun()
+    no_gui.handle(lambda a, k: R(1) if a[:2] == ["launchctl", "print"] else None)
+    assert services.install(tmp_path, tmp_path / "home", no_gui, False, "u") is None

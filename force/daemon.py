@@ -622,6 +622,7 @@ class Daemon:
                 ("remotes", self._step_remotes, False),
                 ("tiers", self._step_tiers, False),
                 ("opencode_update", self._step_opencode_update, False),
+                ("link", self._step_link, False),
                 ("auto_update", self._step_auto_update, False),
                 ("reload", self._step_reload, False),
             ]
@@ -1048,6 +1049,29 @@ class Daemon:
             log.close()
         except OSError as e:
             _log("opencode_update", e)
+
+    # --- the link daemon without a service manager (SPEC §46, §56.2) --------
+    _LINK_EVERY = 30.0
+
+    def _step_link(self) -> None:
+        """Where no service manager runs Force (this daemon was started by `force`), keep the link daemon running
+        as this daemon keeps the tmux server: every 30 s, start `force link-daemon` when directLink is on, the
+        release has force-link and none runs. Never under systemd or launchd (the unit or agent runs it), never for
+        a development instance."""
+        if not self.cfg.direct_link or services.under_service_manager() or config.instance() is not None:
+            return
+        now = time.monotonic()
+        last = getattr(self, "_link_at", None)
+        if last is not None and now - last < self._LINK_EVERY:
+            return
+        self._link_at = now
+        from . import link as link_mod
+        if link_mod.daemon_pid(self.paths) is not None or not os.access(remote_mod.link_bin(self.paths), os.X_OK):
+            return
+        if services.installed():
+            return                      # the service manager's link service (stopped on purpose, or restarting)
+        if link_mod.start_daemon(self.paths, self.cfg, self.cockpit.cockpit_bin):
+            print("force: started the direct link daemon", file=sys.stderr)
 
     # --- glyph tiers (SPEC §28) ---------------------------------------------
     _TIER_EVERY = 5.0
