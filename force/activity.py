@@ -362,6 +362,54 @@ def _task_ids(record: dict) -> dict[str, str]:
     return {task: use_ids[0]} if task and len(use_ids) == 1 else {}
 
 
+# a foreground call Claude Code moved to the background itself: only its tool_result says so (SPEC §5)
+# Claude Code's own full sentences, so output that merely mentions the words (a grep over transcripts) is no launch
+_AUTO_BG = (re.compile(r'MCP tool "[^"\n]+" is still running after \d+s\. It was moved to the background as task (\w+)'),
+            re.compile(r"Command did not complete within its [^\n]{1,20}? timeout and was moved to the background"
+                       r"(?: by the harness)? \(ID: (\w+)\)"))
+_TOOL_KEEP = 2000       # the tracker's map of recent tool_use ids -> (name, input, timestamp)
+
+
+def _auto_backgrounded(record: dict) -> dict[str, str]:
+    """tool_use id -> task id, from a user record's tool_results that say Claude Code moved the call to the
+    background by itself (an MCP call "as task ID", a Bash timeout "(ID: ID)")."""
+    message = record.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else None
+    out: dict[str, str] = {}
+    for b in blocks if isinstance(blocks, list) else ():
+        if not isinstance(b, dict) or b.get("type") != "tool_result" or not b.get("tool_use_id"):
+            continue
+        c = b.get("content")
+        if isinstance(c, list):
+            c = "".join(str(x.get("text") or "") for x in c if isinstance(x, dict))
+        if not isinstance(c, str):
+            continue
+        for pat in _AUTO_BG:
+            m = pat.search(c)
+            if m:
+                out[str(b["tool_use_id"])] = m.group(1)
+                break
+    return out
+
+
+def _auto_launch(use_id: str, name: str, inp, ts: int | None) -> Background:
+    """The Background for a tool_use Claude Code moved to the background itself."""
+    inp = inp if isinstance(inp, dict) else {}
+    desc = str(inp.get("description") or "").strip()
+    if not desc and name.startswith("mcp__"):
+        desc = name[len("mcp__"):].replace("__", " ")
+    return Background(use_id, name, desc, str(inp.get("command") or "") if name == "Bash" else "", ts, None)
+
+
+def _tool_uses(record: dict) -> list[tuple[str, str, object]]:
+    """(id, name, input) of an assistant record's tool_use blocks."""
+    message = record.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else None
+    return [(str(b.get("id") or ""), str(b.get("name") or ""), b.get("input"))
+            for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")] \
+        if isinstance(blocks, list) else []
+
+
 def _stopped_task_ids(record: dict) -> set[str]:
     """The task ids an assistant record stops (TaskStop / KillShell / KillBash)."""
     message = record.get("message")
@@ -447,6 +495,7 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
     task_use: dict[str, str] = {}       # task id -> the tool_use id that launched it
     stopped: set[str] = set()           # task ids the agent stopped
     ended_tasks: set[str] = set()       # task ids a notice without <tool-use-id> reported ended
+    auto: dict[str, str] = {}           # tool_use id -> task id, for calls Claude Code moved to the background
     for line in reversed(lines):
         if not line.strip():
             continue
@@ -469,6 +518,9 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
             ended.update(ids)
             ended_tasks.update(tasks)
             task_use.update(_task_ids(record))
+            for use_id, task in _auto_backgrounded(record).items():
+                auto[use_id] = task
+                task_use.setdefault(task, use_id)
             continue
         if record.get("type") != "assistant":
             continue
@@ -478,7 +530,12 @@ def scan(transcript: Path, max_len: int = 60) -> Scan:
         if record.get("isApiErrorMessage") or (
                 isinstance(message, dict) and str(message.get("model", "")).startswith("<")):
             continue
-        launched.extend(_launched_tasks(record))
+        found = _launched_tasks(record)
+        launched.extend(found)
+        seen = {t.tool_use_id for t in found}
+        for use_id, name, inp in _tool_uses(record):
+            if use_id in auto and use_id not in seen:
+                launched.append(_auto_launch(use_id, name, inp, _timestamp_ms(record.get("timestamp"))))
         stopped.update(_stopped_task_ids(record))
         if not newest:
             newest = True
@@ -530,6 +587,7 @@ class BackgroundTracker:
         self.ended_tasks: set[str] = set()
         self.task_use: dict[str, str] = {}
         self.stopped: set[str] = set()
+        self.tool_uses: dict[str, tuple[str, object, int | None]] = {}   # recent tool_use id -> (name, input, ts)
 
     def _reset(self) -> None:
         self.__init__()
@@ -548,6 +606,11 @@ class BackgroundTracker:
             self.ended_tasks.update(tasks)
             if kind == "user":
                 self.task_use.update(_task_ids(record))
+                for use_id, task in _auto_backgrounded(record).items():
+                    self.task_use.setdefault(task, use_id)
+                    if use_id in self.tool_uses and use_id not in self.launched:
+                        name, inp, ts = self.tool_uses[use_id]
+                        self.launched[use_id] = _auto_launch(use_id, name, inp, ts)
         elif kind == "assistant":
             message = record.get("message")
             if record.get("isApiErrorMessage") or (
@@ -555,6 +618,12 @@ class BackgroundTracker:
                 return
             for t in _launched_tasks(record):
                 self.launched.setdefault(t.tool_use_id, t)
+            ts = _timestamp_ms(record.get("timestamp"))
+            for use_id, name, inp in _tool_uses(record):
+                self.tool_uses.pop(use_id, None)
+                self.tool_uses[use_id] = (name, inp, ts)
+            while len(self.tool_uses) > _TOOL_KEEP:
+                del self.tool_uses[next(iter(self.tool_uses))]
             self.stopped.update(_stopped_task_ids(record))
 
     def update(self, transcript: Path, now_ms: int | None = None) -> tuple[Background, ...] | None:

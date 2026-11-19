@@ -1664,3 +1664,19 @@ def test_the_update_check_thread_starts_with_its_event_in_place(env, monkeypatch
     Daemon(env.make_cockpit(), FakeClock())
     assert ran.wait(5), f"the check never ran: {errors}"
     assert errors == []
+
+
+def test_idle_with_auto_backgrounded_mcp_call_is_watching(env, monkeypatch):
+    """SPEC §5: a call Claude Code moved to the background itself (MCP tool) counts with status idle."""
+    cockpit = env.make_cockpit()
+    add_live(cockpit, "portal")
+    task = Background("u1", "mcp__tracker__release", "tracker release", "", None)
+    monkeypatch.setattr("force.daemon.activity.scan",
+                      lambda path, max_len=60: Scan(None, None, None, None, None, (task,), True))
+    d = Daemon(cockpit, FakeClock())
+    d.tick()
+    assert wait_for(lambda: current_status(cockpit, "portal") is not None)
+    d.tick()
+    v = _view(env, "portal")
+    assert v.state is State.WORKING and v.watching is True
+    assert v.activity == "waiting · tracker release"

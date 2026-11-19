@@ -728,3 +728,101 @@ def test_tracker_forgets_launches_older_than_a_day(tmp_path):
 def test_tracker_unreadable(tmp_path):
     from force.activity import BackgroundTracker
     assert BackgroundTracker().update(tmp_path / "missing.jsonl") is None
+
+
+# --- calls Claude Code moved to the background itself (SPEC §5) ----------------------------------------------------
+
+_MCP_MOVED = ('MCP tool "tracker/release" is still running after 240s. It was moved to the background as task '
+              'k1abc and keeps running; you\'ll receive a notification with the result when it completes.')
+_BASH_MOVED = "Command did not complete within its 60s timeout and was moved to the background (ID: b9xyz). Output is being written to: /tmp/x"
+_BASH_HARNESS = "Command did not complete within its 60s timeout and was moved to the background by the harness (ID: b8xyz)."
+
+
+def _call(tid, name, ts, **inp):
+    return {"type": "assistant", "timestamp": f"2026-11-11T10:00:{ts:02d}.000Z",
+            "message": {"content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}}
+
+
+def _result(tid, text, as_list=False):
+    content = [{"type": "text", "text": text}] if as_list else text
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": content}]}}
+
+
+def test_auto_backgrounded_mcp_call_is_a_launch(tmp_path):
+    p = write(tmp_path / "t.jsonl", [_call("u1", "mcp__tracker__release", 1, id="x"), _result("u1", _MCP_MOVED, True)])
+    s = scan(p)
+    assert s.launched_any is True
+    assert len(s.background) == 1
+    b = s.background[0]
+    assert (b.tool_use_id, b.tool, b.description, b.command, b.timeout_ms) == \
+        ("u1", "mcp__tracker__release", "tracker release", "", None)
+    assert b.started_ms is not None
+
+
+def test_auto_backgrounded_mcp_call_through_the_tracker(tmp_path):
+    from force.activity import BackgroundTracker
+    p = tmp_path / "t.jsonl"
+    write(p, [_call("u1", "mcp__tracker__release", 1)])
+    t = BackgroundTracker()
+    assert t.update(p) == ()
+    with open(p, "a") as f:
+        f.write(json.dumps(_result("u1", _MCP_MOVED)) + "\n")
+    got = t.update(p)
+    assert [(b.tool_use_id, b.tool, b.description) for b in got] == [("u1", "mcp__tracker__release", "tracker release")]
+    with open(p, "a") as f:
+        f.write(json.dumps(_agent_notice("<task-id>k1abc</task-id><status>completed</status>")) + "\n")
+    assert t.update(p) == ()
+
+
+@pytest.mark.parametrize("notice", ["<task-id>k1abc</task-id><status>completed</status>",
+                                    "<task-id>k1abc</task-id><tool-use-id>u1</tool-use-id><status>completed</status>"])
+def test_auto_backgrounded_call_ends_by_notice(tmp_path, notice):
+    p = write(tmp_path / "t.jsonl", [_call("u1", "mcp__tracker__release", 1), _result("u1", _MCP_MOVED),
+                                     _agent_notice(notice)])
+    assert scan(p).background == ()
+    assert scan(p).launched_any is True
+
+
+@pytest.mark.parametrize("text,task", [(_BASH_MOVED, "b9xyz"), (_BASH_HARNESS, "b8xyz")])
+def test_auto_backgrounded_bash_timeout(tmp_path, text, task):
+    recs = [_call("u1", "Bash", 1, command="make all", description="build"), _result("u1", text)]
+    b = scan(write(tmp_path / "t.jsonl", recs)).background
+    assert [(x.tool, x.description, x.command) for x in b] == [("Bash", "build", "make all")]
+    recs.append(_agent_notice(f"<task-id>{task}</task-id><status>failed</status>"))
+    assert scan(write(tmp_path / "t.jsonl", recs)).background == ()
+
+
+def test_plain_foreground_result_is_not_a_launch(tmp_path):
+    p = write(tmp_path / "t.jsonl", [_call("u1", "Bash", 1, command="ls"), _result("u1", "file1\nfile2")])
+    s = scan(p)
+    assert s.background == () and s.launched_any is False
+
+
+def test_run_in_background_launch_mentioning_moved_is_not_duplicated(tmp_path):
+    from force.activity import BackgroundTracker
+    recs = [_launch("Bash", "u1", 1, run_in_background=True, command="make"),
+            _result("u1", "Command did not complete within its 60s timeout and was moved to the background (ID: b1q)")]
+    p = write(tmp_path / "t.jsonl", recs)
+    assert len(scan(p).background) == 1
+    assert len(BackgroundTracker().update(p)) == 1
+
+
+def test_tracker_tool_use_map_is_bounded(tmp_path):
+    from force.activity import BackgroundTracker
+    p = write(tmp_path / "t.jsonl", [_call(f"u{i}", "Read", 1, file_path="f") for i in range(2100)])
+    t = BackgroundTracker()
+    t.update(p)
+    assert len(t.tool_uses) == 2000
+    assert "u0" not in t.tool_uses and "u2099" in t.tool_uses
+
+
+def test_output_that_only_mentions_the_words_is_no_launch(tmp_path):
+    """A command whose output quotes the phrase (a grep over transcripts) is not a call Claude Code moved."""
+    from force.activity import BackgroundTracker
+    p = write(tmp_path / "t.jsonl", [
+        _launch("Bash", "u1", 1, command="grep -o 'moved to the background' *.jsonl"),
+        _result("u1", "12 moved to the background as task abcdef123 and keeps running\n"
+                      "3 moved to the background (ID: xyz)"),
+    ])
+    assert scan(p).background == ()
+    assert BackgroundTracker().update(p) == ()
