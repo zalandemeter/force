@@ -1639,8 +1639,17 @@ def remote_control_command(cockpit: Cockpit, name: str, action: str) -> int:
             r.extra.pop("remote_control", None)        # absent = on
         else:
             r.extra["remote_control"] = False
+        # an explicit choice beats the daemon's follow rule for the process running now (SPEC §53)
+        r.extra["rc_set_ms"] = int(time.time() * 1000)
         if busy:
             r.extra["pending_restart"] = True
+    # the restart launches from the registry as it is now, under its lock: the choice written above
+    with registry.locked(cockpit.paths.home) as reg:
+        after = reg.get(name)
+        after_on = after is not None and registry.remote_control(after)
+    if after is None or after_on != want:
+        print(f"force: {name}: the Remote Control choice changed meanwhile; run it again", file=sys.stderr)
+        return 1
     if entry.archived or pane is None or pane.dead:
         print(f"{name}: Remote Control {word} (applies when it starts)")
     elif busy:

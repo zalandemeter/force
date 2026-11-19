@@ -83,9 +83,9 @@ def check(cockpit, *, systemd: bool = True) -> list[Problem]:
     # the last self-test against the real Claude Code / OpenCode (SPEC §37)
     from .smoke import read_last, reason as smoke_reason
     last = read_last(cockpit.paths.state / "smoke")
-    if last is not None and not last.get("ok"):
+    if last is not None and last.get("ok") is False:     # null: stopped by the usage limit, no failure
         failed = ", ".join(c["name"] for c in last.get("checks") or []
-                          if isinstance(c, dict) and not c.get("ok"))
+                          if isinstance(c, dict) and c.get("ok") is False)
         why = last.get("reason") or smoke_reason(last.get("checks")) or "self-test failed"
         problems.append(Problem("self-test", None,
                                f"last `force smoke` failed: {why} — {failed} (force smoke --last)", False))
@@ -371,12 +371,24 @@ def _fix_stray_windows(cockpit, name) -> None:
 
 
 # --- CLI driver ---------------------------------------------------------
+def smoke_note(cockpit) -> str | None:
+    """An info line, not a problem: the last self-test stopped at the plan's usage limit (SPEC §37)."""
+    from .smoke import USAGE_LIMIT, read_last
+    last = read_last(cockpit.paths.state / "smoke")
+    if isinstance(last, dict) and "ok" in last and last["ok"] is None:
+        return f"· self-test: Claude Code {last.get('reason') or USAGE_LIMIT}; it runs again after the reset"
+    return None
+
+
 def run_doctor(cockpit, fix: bool = False, out=print, systemd: bool = True) -> int:
     def report(problems: list[Problem]) -> None:
         for prob in problems:
             where = prob.session or "-"
             out(f"{'!' if prob.warning else '✗'} {where} {prob.code}: {prob.detail}")
 
+    note = smoke_note(cockpit)
+    if note:
+        out(note)
     problems = check(cockpit, systemd=systemd)
     faults = [p for p in problems if not p.warning]
     report(problems)

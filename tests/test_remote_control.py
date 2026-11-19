@@ -243,3 +243,120 @@ def test_list_json_carries_the_choice_and_the_connection(env):
     by = {s["name"]: s for s in json.loads(json.dumps(cli._read_fresh_snapshot(cockpit).to_json()))["sessions"]}
     assert by["on1"]["remote_control"] is True and by["off1"]["remote_control"] is False
     assert by["on1"]["rc_connected"] is False
+
+
+# --- an explicit choice beats the follow rule (the race of a real machine) -------------------------------------------
+def test_explicit_on_survives_a_tick_before_the_restart(env, monkeypatch, capsys):
+    """The old process was seen connected, then disconnected for more than 60 s (the rule turned the choice off).
+    `force remote-control NAME on` writes on; a daemon tick before the restart, still on the old process, must not
+    write off again, and the relaunch carries `--remote-control NAME`."""
+    from force import kinds
+    cockpit = env.make_cockpit()
+    _live(cockpit, "s")
+    _ctl(cockpit, "s", status="idle")
+    assert _wait(lambda: _status(cockpit, "s").get("status") == "idle")
+    old_pid = cockpit.agent_pane("s").pid
+    clock = _Clock()
+    clock.t = time.time() - 300
+    d = Daemon(cockpit, clock)
+    live = {"connected": True}
+    monkeypatch.setattr(d, "_rc_connected", lambda pi: live["connected"])
+    pi = SimpleNamespace(pane_pid=old_pid, pane_started_ms=int((clock.t - 600) * 1000))
+    now = lambda: int(clock.t * 1000)            # noqa: E731
+    d._follow_rc(load(env.paths.registry).get("s"), pi, now())          # seen connected
+    live["connected"] = False
+    d._follow_rc(load(env.paths.registry).get("s"), pi, now())
+    clock.t += 61
+    assert d._follow_rc(load(env.paths.registry).get("s"), pi, now())[1] == "remote control: turned off in the session"
+    assert _extra(env, "s")["remote_control"] is False
+
+    stale = load(env.paths.registry).get("s")       # a tick that read the registry before the user's choice
+    monkeypatch.setattr(cockpit, "restart", lambda name: None)          # the restart has not happened yet
+    assert cli.remote_control_command(cockpit, "s", "on") == 0
+    assert capsys.readouterr().out.strip() == "s: Remote Control on (restarting)"
+    assert isinstance(_extra(env, "s").get("rc_set_ms"), int)
+    clock.t = time.time() + 1                       # the daemon's next ticks, still on the old process
+    assert d._follow_rc(stale, pi, now()) == (False, None)
+    assert d._follow_rc(load(env.paths.registry).get("s"), pi, now()) == (False, None)
+    clock.t += 120
+    assert d._follow_rc(load(env.paths.registry).get("s"), pi, now()) == (False, None)
+    assert "remote_control" not in _extra(env, "s"), "the explicit on stays"
+    e = load(env.paths.registry).get("s")
+    argv, _env = kinds.of(e).exec_argv(cockpit, e)
+    assert argv[argv.index("--remote-control") + 1] == "s", "the relaunch carries the flag"
+
+    # the new process (started after the choice) is followed as usual again
+    new_pi = SimpleNamespace(pane_pid=old_pid + 100000, pane_started_ms=now())
+    live["connected"] = True
+    d._follow_rc(load(env.paths.registry).get("s"), new_pi, now())
+    live["connected"] = False
+    d._follow_rc(load(env.paths.registry).get("s"), new_pi, now())
+    clock.t += 61
+    assert d._follow_rc(load(env.paths.registry).get("s"), new_pi, now())[1] == \
+        "remote control: turned off in the session"
+
+
+def test_explicit_off_is_not_undone_by_the_old_process_still_connected(env, monkeypatch):
+    cockpit = env.make_cockpit()
+    clock = _Clock()
+    clock.t = time.time() - 60
+    d = Daemon(cockpit, clock)
+    with locked(env.paths.home) as reg:
+        e = reg.add("s", str(uuid.uuid4()), "/tmp")
+        e.extra["remote_control"] = False
+        e.extra["rc_set_ms"] = int(time.time() * 1000)
+    monkeypatch.setattr(d, "_rc_connected", lambda pi: True)
+    pi = SimpleNamespace(pane_pid=77, pane_started_ms=int((clock.t - 600) * 1000))
+    assert d._follow_rc(load(env.paths.registry).get("s"), pi, int(clock.t * 1000)) == (True, None)
+    assert _extra(env, "s")["remote_control"] is False
+
+
+def test_nothing_is_followed_while_a_restart_is_pending(env, monkeypatch):
+    cockpit = env.make_cockpit()
+    clock = _Clock()
+    d = Daemon(cockpit, clock)
+    with locked(env.paths.home) as reg:
+        e = reg.add("s", str(uuid.uuid4()), "/tmp")
+        e.extra["pending_restart"] = True
+    live = {"connected": True}
+    monkeypatch.setattr(d, "_rc_connected", lambda pi: live["connected"])
+    pi = SimpleNamespace(pane_pid=5)
+    d._follow_rc(load(env.paths.registry).get("s"), pi, int(clock.t * 1000))
+    live["connected"] = False
+    d._follow_rc(load(env.paths.registry).get("s"), pi, int(clock.t * 1000))
+    clock.t += 600
+    assert d._follow_rc(load(env.paths.registry).get("s"), pi, int(clock.t * 1000)) == (False, None)
+    assert "remote_control" not in _extra(env, "s")
+
+
+# --- remoteControlAtStartup (Claude Code's own setting) ----------------------------------------------------------------
+def test_a_session_without_remote_control_turns_off_remote_control_at_startup(env):
+    """With the user's `remoteControlAtStartup` on, Claude registers every session it starts under an automatic name;
+    `--settings` outranks the user's settings, so an off choice passes it false (SPEC §4, §53)."""
+    from force import kinds
+    cockpit = env.make_cockpit()
+    with locked(env.paths.home) as reg:
+        reg.add("on1", str(uuid.uuid4()), "/tmp")
+        reg.add("off1", str(uuid.uuid4()), "/tmp").extra["remote_control"] = False
+
+    def launch(name):
+        e = load(env.paths.registry).get(name)
+        argv, _ = kinds.of(e).exec_argv(cockpit, e)
+        return argv, json.loads(argv[argv.index("--settings") + 1])
+
+    argv, settings = launch("off1")
+    assert "--remote-control" not in argv and settings["remoteControlAtStartup"] is False
+    argv, settings = launch("on1")
+    assert argv[argv.index("--remote-control") + 1] == "on1" and "remoteControlAtStartup" not in settings
+
+
+def test_no_remote_control_env_also_turns_it_off(env, monkeypatch):
+    from force import kinds
+    cockpit = env.make_cockpit()
+    with locked(env.paths.home) as reg:
+        reg.add("s", str(uuid.uuid4()), "/tmp")
+    monkeypatch.setenv("FORCE_NO_REMOTE_CONTROL", "1")
+    e = load(env.paths.registry).get("s")
+    argv, _ = kinds.of(e).exec_argv(cockpit, e)
+    assert "--remote-control" not in argv
+    assert json.loads(argv[argv.index("--settings") + 1])["remoteControlAtStartup"] is False

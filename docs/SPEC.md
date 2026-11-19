@@ -143,6 +143,18 @@ checkout into the `dev` instance (`deploy.sh` with `FORCE_INSTANCE`) and writes 
   project-dir name is not needed: search `projects/*/<session_id>.jsonl`.
 - Running version of a process: basename of `os.readlink(f"/proc/{pid}/exe")`. Latest installed
   version: basename of `os.path.realpath(FORCE_CLAUDE_BIN)`. Outdated ⇔ both known and different.
+- Logged-in account (2.1.328): Claude Code's global config `.claude.json` sits in `$CLAUDE_CONFIG_DIR` when that is
+  set, else in the home directory. Force reads `$FORCE_CLAUDE_DIR/.claude.json` when it exists, else the one next to
+  `$FORCE_CLAUDE_DIR` (`~/.claude.json`). The account is `oauthAccount.accountUuid` + `organizationUuid`; no
+  `oauthAccount` = logged out. The file is a few hundred KB and rewritten often (parse ≈ 6 ms). Force keeps only
+  `sha256("<accountUuid>:<organizationUuid>")`, its first 16 hex digits, never the ids or the e-mail (`force/account.py`).
+- `remoteControlAtStartup` (2.1.328), a user or policy setting: every session Claude starts registers for Remote
+  Control, under an automatic name (`<host>-<adjective>-<noun>`) unless `--remote-control NAME` names it. The value is
+  taken from policy, then `--settings` (flag), then user settings, so `--settings '{"remoteControlAtStartup":false}'`
+  turns it off for one launch (§53). There is no `--no-remote-control` flag.
+- Usage limit (2.1.328): a request over the plan's limit ends the turn with "You've hit your session limit · resets
+  …" ("… your 5-hour limit", "… your weekly limit"; "Usage limit reached" in other places) on screen.
+- The status-line input (§21) carries `transcript_path`, the session's transcript; it is written on every request.
 
 ## 5. Session states (pure function, `force/state.py`)
 
@@ -286,6 +298,8 @@ Each step catches and logs its own exceptions; one bad session never stops the l
     Success → `source-file` the config if it changed; if code changed respawn every sidebar pane
     (`respawn-pane -k`, sidebars only), then `os.execv` the daemon (the lock fd is close-on-exec).
     Agent panes are never touched.
+12. **Account**: every tick, the logged-in Claude Code account (§4), parsed only when `.claude.json` changed
+    (mtime, size, inode); a change to another account sets off §21.1.
 
 ## 7. Session lifecycle (`force/tmux.py` + `force/lifecycle.py`)
 
@@ -626,6 +640,24 @@ writes only those two windows, atomically, 0600, only when changed. The daemon p
 "week" bars, reset times; amber ≥ 70 %, red ≥ 90 %; "new window" after resets_at; hidden with no data).
 Sessions pick this up when (re)started. No OAuth token or undocumented endpoint is used.
 
+### 21.1 Account change
+Every session reports the plan of the account it last made a request with, so after `/login` to another account the
+old processes keep reporting the old account's figures (a higher percentage of a window that resets later wins the
+merge, §27, and would stay for hours).
+
+- **Change**: the account (§4) goes from one known account to another. The first read after the daemon starts is
+  not a change, nor is logging in after being logged out of nothing; logged out and back in to the same account is
+  not one either (logged out → another account is).
+- On a change the daemon (§6.12), in this order: writes `<state>/account.json` = `{"account": <hash>, "since_ms"}`
+  (0600); deletes `usage.json` (the bars hide: no data); restarts the sessions with Remote Control (§53); starts the
+  self-test now where its schedule is installed (§37: `systemctl --user start --no-block force-smoke.service` when
+  the timer is enabled, `launchctl kickstart` when the agent is loaded); logs one line.
+- **Accept rule** (share/statusline.py, reading the tiny account.json next to usage.json): a write is dropped while
+  the session made no request since the change: its `transcript_path` is older than `since_ms` or does not exist
+  yet (no `transcript_path` in the input at all: accepted). An accepted write carries `"account"`; saved figures
+  of another account, or of none, are replaced whole, whatever their `resets_at`. Then the §27 merge resumes.
+- `force.usage.read_usage` treats a usage.json whose `"account"` is not account.json's as no data.
+
 ## 22. Rust sidebar
 
 `crates/sidebar/` (ratatui 0.30 + tachyonfx 0.25) renders the sidebar, header and popups, with short
@@ -689,7 +721,9 @@ mode: host and ui tmux servers), §40 (remote hosts) and §41 (a local Force on 
 - Usage merge: every session's status line writes the same usage.json, and an idle session
   reports the figure of its last request. share/statusline.py
   merges per window: same resets_at -> the higher percentage, a later resets_at (new window) replaces, an
-  earlier one is ignored, a missing window keeps the saved one.
+  earlier one is ignored, a missing window keeps the saved one. After a Claude Code account change the accept rule
+  of §21.1 comes first: no write from a session without a request since the change, and the first accepted write
+  replaces the other account's figures.
 
 ## 28. Glyph tiers: rich terminals, automatic plain fallback
 - Config `glyphs = "auto" | "rich" | "plain"` (default auto), passed as `--glyphs` to the Rust sidebar,
@@ -897,17 +931,30 @@ daemon on a separate tmux server (`forcetest-smoke-<pid>`) with its own registry
   state and tmux server are removed, and so are its Claude transcripts and every OpenCode session in the
   work folders.
 - Sessions use the `haiku` model (`ANTHROPIC_MODEL`, override `FORCE_SMOKE_MODEL`) and never register for
-  Remote Control (`FORCE_NO_REMOTE_CONTROL=1` drops `--remote-control`). The smoke daemon runs no sidebars.
-  `FORCE_SMOKE_FORCE` points the panes at another `force` (development).
+  Remote Control (`FORCE_NO_REMOTE_CONTROL=1` drops `--remote-control` and passes `remoteControlAtStartup: false`,
+  §53). The smoke daemon runs no sidebars. `FORCE_SMOKE_FORCE` points the panes at another `force` (development).
+- Its Claude session's status line writes this machine's live `usage.json` (`FORCE_USAGE_FILE`, honoured by the
+  Claude launch), through the §21.1 accept rule, so a run after an account change brings fresh bars. Nothing else of
+  a run touches live state.
 - Result: `<state>/smoke/last.json` (+ `history.jsonl`, logs in `log/`, 30 kept); `force smoke --last` prints it.
-  The daemon puts `{"ok", "at"}` (plus `reason` when it failed) into the snapshot (`smoke`); a failed run shows
+  The daemon puts `{"ok", "at"}` (plus `reason` when it failed or stopped at the usage limit, `ok` null) into the
+  snapshot (`smoke`); a failed run shows
   "✖ <reason>" (`×` in the plain tier) just above the sidebar's host chip (e.g. "✖ Claude Code logged out") and a `self-test` problem in
   `force doctor`, until a run passes.
 - The claude flow first checks `claude auth status`: logged out, it records a "claude: logged in" failure and stops
   at once (no session is created).
-- `force-smoke.timer` (hourly) runs `force smoke --if-due`: when the Claude Code, OpenCode or Force
-  version changed, a failed run is 6 h old, the last run is a day old, or a run that failed because Claude
-  is logged out is back in (it re-runs within the hour once logged in again). One run at a time (flock). ~1 min.
+- `force-smoke.timer` (hourly) runs `force smoke --if-due`: when the Claude Code account changed (last.json records
+  the account hash, §4), the Claude Code, OpenCode or Force version changed, a failed run is 6 h old, the last run
+  is a day old, a run that failed because Claude is logged out is back in (it re-runs within the hour once logged in
+  again), or a run stopped by the usage limit is past its `limit_resets_at` (unknown: 6 h). An account change also
+  starts it at once (§21.1). One run at a time (flock). ~1 min.
+- **Usage limit**: a Claude check that fails while Claude Code's screen (or the failure's detail) says the limit is
+  reached (case-insensitive "limit reached", "usage limit", "hit your … limit"; not "context limit"), or while the
+  live usage has a window at ≥ 100 % that has not reset, is no failure: the check and the run get `ok: null`,
+  `reason: "usage limit reached"`, and the run records `limit_resets_at` (that window's reset, else the 5 h one).
+  It shows no ✖, is no doctor problem (doctor prints an info line), and `--last` / the command exit 0. A scheduled
+  run (`--if-due`) is skipped, recording nothing, while the live usage has a window at ≥ 100 % that has not reset.
+  An earlier run's ✖ from another account clears when the run after the change passes.
 - Claude Code's binary: `FORCE_CLAUDE_BIN`, else `~/.local/bin/claude` (its own installer), else `claude`
   on PATH (a system package, e.g. `/usr/bin/claude`).
 - A Claude session at the "trust this folder?" question has no status file and would read as starting, then down;
@@ -1320,7 +1367,8 @@ A Claude Code session starts with Remote Control (`--remote-control NAME`, §7.2
 |---|---|
 | New dialog | a `Remote Control` chip under Folder (raised and lit with a check when on, flat and dim when off; a blank row before the status line; the popup is 64×20), shown only while the Claude Code chip is selected, checked by default. Focus order Kind → Name → Folder → Remote Control; Space toggles it when focused, Ctrl+R toggles it from any field, a click on its row toggles it; Enter on it creates |
 | `force new --no-remote-control` | the dialog passes it only when unchecked (a checked box sends nothing, so an older remote Force still works). Refused for OpenCode and shell sessions (they have no Remote Control) |
-| registry | `extra.remote_control: false` on the entry; absent means on. Kept for the session's life: restarts, upgrades, renames, moves and unarchive start it the same way |
+| registry | `extra.remote_control: false` on the entry; absent means on. Kept for the session's life: restarts, upgrades, renames, moves and unarchive start it the same way. `extra.rc_set_ms`: when the choice was last set explicitly (`force remote-control`) |
+| off means off | a session whose choice is off starts with `--settings` `remoteControlAtStartup: false` (§4), so the user's `remoteControlAtStartup` setting never registers it under an automatic name; the same for `FORCE_NO_REMOTE_CONTROL` |
 | title sync (§47) | a session without Remote Control does not wait for a connection: `/rename NAME` is typed once it is idle with an empty input line, so Claude Code's own name follows renames and automatic names (§49.6) |
 | MCP `session_new` | optional boolean `remote_control` (false = `--no-remote-control`) |
 | `FORCE_NO_REMOTE_CONTROL` | still drops it for every session (`force smoke`, §37) |
@@ -1328,7 +1376,8 @@ A Claude Code session starts with Remote Control (`--remote-control NAME`, §7.2
 | `force new --remote-control` | the opposite of `--no-remote-control`, for a host whose default is off |
 | `force remote-control NAME on\|off\|toggle\|status` | sets the session's choice. A change restarts it to apply, keeping its conversation: now when it is idle or your turn, after this turn when it works or needs you (`pending_restart`), at its next start when it is down or archived. Prints `NAME: Remote Control on\|off (restarting \| restarts after this turn \| applies when it starts)`, or `… already on\|off`. `status` prints `on`/`off` and `(connected)`/`(not connected)`. Refused (exit 1) for OpenCode and shell sessions. Forwarded to the shown host (`FORCE_HOST`) like the other session commands |
 | menu | `R` "Remote Control on/off": `force remote-control <the shown session> toggle`, its line shown as a tmux message (split: through `ui-key.sh rc`) |
-| follow Claude | `/remote-control` inside a session turns it on, and its panel's Disconnect turns it off; Claude's status file then has, or loses, `bridgeSessionId`. The daemon follows so a restart keeps it: connected while the choice is off -> on at once; not connected for 60 s in the same process after this process was seen connected, while the choice is on -> off (a short drop is not a choice; a session that never connected is left alone). A new process starts the watch afresh. Each change goes into the session's `why`; it never restarts anything |
+| follow Claude | `/remote-control` inside a session turns it on, and its panel's Disconnect turns it off; Claude's status file then has, or loses, `bridgeSessionId`. The daemon follows so a restart keeps it: connected while the choice is off -> on at once; not connected for 60 s in the same process after this process was seen connected, while the choice is on -> off (a short drop is not a choice; a session that never connected is left alone). A new process starts the watch afresh. Each change goes into the session's `why`; it never restarts anything. **An explicit choice wins**: a process whose watch or disconnection started before `rc_set_ms` (or that started at least 1 s before it) is not followed, nothing is followed while `pending_restart` is set, and the choice is re-read under the registry lock before the rule writes (`force remote-control` then re-reads it under the lock before restarting, and the relaunch reads the registry). Without this the daemon's next tick saw the old process "disconnected for 60 s" and wrote off again between `on` and its restart |
+| account change (§21.1) | for 10 min after the logged-in Claude Code account changed (`account.json` `since_ms`, also after a daemon restart) the follow rule never turns a choice off: the bridges drop because of the change. Every live Claude Code session whose choice is on (not Chuck, not with `FORCE_NO_REMOTE_CONTROL`) restarts to register under the new account, like `force remote-control NAME on`: now when it is idle, your turn, stale or starting, after this turn when it works or needs you (`pending_restart`); conversation kept. Down sessions start on the new account anyway; sessions without Remote Control are not restarted. Its `why` says "account changed: Remote Control re-registers" for those 10 min |
 | shown | `force list --json`: `"remote_control"` (the choice) and `"rc_connected"` (live) for Claude Code sessions. The sidebar shows nothing for it |
 
 ## 54. Frontend API (`force api`)
