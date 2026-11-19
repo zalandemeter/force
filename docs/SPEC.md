@@ -463,9 +463,12 @@ sessions), `WantedBy=default.target`.
 `Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin`, `KillMode=process`,
 `WantedBy=default.target`.
 Restarting `force.service` must never kill agent sessions (they belong to the tmux unit's cgroup).
-`force-link.service` (the direct link, §56.2; enabled with `directLink` on, else stopped and disabled):
-`ExecStart=%h/.local/bin/force link-daemon`, `Restart=always`, `RestartSec=3`, `RestartPreventExitStatus=0`
-(`force link-daemon` exits 0 only with `directLink` off), the same PATH as `force.service`, `WantedBy=default.target`.
+`force-link.service` (the direct link, §56.2; enabled with `directLink` on in a release that has it, else stopped
+and disabled): `ExecStart=%h/.local/bin/force link-daemon`, `Restart=always`, `RestartSec=3`,
+`RestartPreventExitStatus=0 2` (`force link-daemon` exits 0 with `directLink` off or without force-link; 2 is a
+usage error), `ConditionPathExists=` `<app>/share/bin/force-link` and `<app>/force/link.py` (a live release without
+the direct link, such as an older one switched to by hand, leaves the unit down, never failing over and over), the
+same PATH as `force.service`, `WantedBy=default.target`.
 
 ## 13. Tests
 
@@ -1112,18 +1115,19 @@ production is easy.
 
 | Part | |
 |---|---|
-| release build | `scripts/build-release.sh [X.Y.Z]`: an Alpine/musl container (`build/Dockerfile`, pinned + checksummed tmux 3.4, libevent 2.1.12, ncurses 6.5 with the terminfo dirs of every common distro) builds static sidebar, header, dialog, intro and tmux; the tarball `force-VERSION-linux-ARCH.tar.gz` (+ `.sha256`) has the Python package, share/ (+ `bin/`, `tmux-bin/`, `terminfo/` with tmux/tmux-256color), systemd/, VERSION, licences. Output is a web root: `install.sh` + `releases/`. x86_64 here; aarch64 from CI later |
+| release build | `scripts/build-release.sh [X.Y.Z]`: an Alpine/musl container (`build/Dockerfile`, pinned + checksummed tmux 3.4, libevent 2.1.12, ncurses 6.5 with the terminfo dirs of every common distro) builds static sidebar, header, dialog, intro, link (`force-link`: iroh with ring, against musl; the build runs
+`force-link version`) and tmux; the tarball `force-VERSION-linux-ARCH.tar.gz` (+ `.sha256`) has the Python package, share/ (+ `bin/`, `tmux-bin/`, `terminfo/` with tmux/tmux-256color), systemd/, VERSION, licences. Output is a web root: `install.sh` + `releases/`. x86_64 here; aarch64 from CI later |
 | `install.sh` (published) | `share/get-force.sh`, POSIX sh, filled by `scripts/fill-installer.py` (VERSION, base, releases URL, SHA-256 per arch): Linux + x86_64/aarch64 + not root, curl or wget, download, verify, unpack into `<data>/releases/VERSION`, a Python ≥ 3.11 (the system's, else python-build-standalone 3.12.15 / 20261013, pinned and checksummed, into `<data>/python/`), then `force.setup`. Options `--no-fonts`, `--no-services` |
 | `force/setup.py` | checks the release, parses both tmux configs on a throwaway server, switches `<data>/app`, writes `~/.local/bin/force` (`#!PY -I`, the app path on sys.path), PATH blocks for bash (top of .bashrc, also for `ssh -t HOST force`), zsh (.zshenv), fish (conf.d), the units (enable --now force-tmux + force; restarts only force.service; never force-tmux), linger (a note when refused), the icon font on a desktop, hints (older install, no Claude Code), keeps 5 releases. A missing program is exit 127, never a crash. Dev releases (no VERSION) are named after their dir |
-| without systemd | `force` starts `tmux -L force -f conf start-server` and a detached `force daemon` (log `<state>/daemon.log`) when the daemon lock is free |
+| without systemd | `force` starts `tmux -L force -f conf start-server` and a detached `force daemon` (log `<state>/daemon.log`) when the daemon lock is free, and with `directLink` on (§56.2) a detached `force link-daemon` (log `<state>/link.log`) when the link lock (`<state>/link/lock`, which holds the link daemon's pid) is free and the release has force-link; never for a development instance. That daemon checks it every 30 s and starts it again the same way. Setup (an update) restarts a link daemon Force started, so the new release's force-link runs; `force settings set directLink\|linkPort` stops it and, with `directLink` on, starts it again |
 | first run | no prompt: a `shell` session in $HOME; once per machine a welcome line (`<state>/welcomed`) |
 | `force update [--check] [--here \| --host NAME]` | every host at once: first each enabled remote in `hosts.json`, in parallel, runs its own `force update --here` over Force's ssh (so it fetches its own platform's release; an older remote without `--here` is asked again without it), one line per host (`✓ devbox: 1.4.1 → 1.4.2`, `✓ pi: already 1.4.2`, `✗ lab: unreachable`; one failing never stops the others), then this machine, last because its update restarts the daemon and the connections. `--here`: this machine only; `--host NAME`: that remote only; `--check` asks the same hosts without installing. Exit 1 when any host failed. This machine: fetches `<base>/install.sh`, compares its `VERSION=` with `<app>/VERSION` and runs it when newer; dev builds and builds without a base say so. The daemon checks 2 min after it starts, then hourly, and soon after a terminal opens the cockpit (a tmux client name, host or ui server, not attached on the last tick), at most once per 10 min (`checkForUpdates`). Each check after the first sends the last `ETag` / `Last-Modified` (kept in `<state>/update.json`): an unchanged `install.sh` is a `304` with no body. The site caches `install.sh` for 10 min, so a release reaches installs within about an hour, usually sooner; nothing pushes it (no server). the snapshot carries `update` when this machine or any enabled remote (the version its last hello named, `status.json`, as `X.Y.Z` without a branch suffix) runs older than the newest release, and the sidebar footer shows `↑ Force X.Y.Z · force update` (below any error; the direct-link hints of §56.2 below it). A click on that note, or the menu's `U` "Update Force…", opens the update card (`force update --ui`, a 72×20 card popup, always on this machine, also in a window showing a remote): every host with the version it runs (this machine; each enabled remote from its last hello, `offline` when not connected), a live check, then `Force X.Y.Z is available` with Enter (Update all) and Esc, or that everything runs the newest, or why it could not check; Enter updates as `force update` does, one line per host as each finishes, then this machine's install.sh lines and installed or failed |
 | remote too old to update itself (§46) | a remote whose `force update --here` says it cannot (a build without a download address, or one older than `update`) gets this machine's live release instead, after this machine's own update (so the copy is the updated one), as `force host upgrade NAME` does (`… brian: too old to update itself: this machine's release goes there next`, then `✓ brian: 1.5.2 copied from this machine`); one at a time. Only between machines of one platform (`uname -sm`: a release holds compiled programs), never a development build; otherwise it fails with why. `--check` only says so; the update card does the same |
 | `autoUpdate` (§46) | the daemon installs a newer release by itself (`force update --here`, detached, output in `<state>/update.log`) once the hourly check found one and no terminal attached to the cockpit (host or ui server) has had a key or click for 10 min. One try per version every 6 h. Each remote's own daemon does the same for that remote; sessions keep running, as with any update. Off with `autoUpdate false` (or `checkForUpdates false`) |
-| `force uninstall [--purge] [--yes]` | stops and removes units, launcher, PATH blocks, releases, private Python, OpenCode copy; keeps registry, archive, settings unless `--purge` (then also the icon font); on WSL always removes the Windows Terminal profile (and the font with the last one, §45) |
+| `force uninstall [--purge] [--yes]` | stops and removes units, launcher, PATH blocks, releases, private Python, OpenCode copy; stops a link daemon Force started itself (the pid in its lock) and removes `<state>/link/` (the link key) and `<state>/link.sock`; keeps registry, archive, settings unless `--purge` (then also the icon font); on WSL always removes the Windows Terminal profile (and the font with the last one, §45) |
 | other machines | `force install-to HOST` / `force host upgrade NAME` copy the release and run its setup there with that machine's Python 3.11+ (or the private one) |
 | developer install | `./install.sh`: test venv `<data>/venv`, `./deploy.sh`, then setup |
-| tested | fresh Ubuntu 22.04 / 24.04, Debian 12, Fedora 41 containers as a normal user: install, then `force` shows the cockpit with services started without systemd |
+| tested | fresh Ubuntu 22.04 / 24.04, Debian 12, Fedora 41 containers as a normal user: install, then `force` shows the cockpit with services started without systemd, the link daemon among them (`force-link status --json` says running); after uninstall no force-link runs (`scripts/try-release.sh`) |
 
 ## 47. Phone names follow renames
 
@@ -1257,15 +1261,17 @@ macOS runners for every pull request; it was a beta until 1.2.0 had been used on
 | Host name (sidebar, header) | `gethostname()` | `gethostname()` |
 | Shell scripts | POSIX sh plus `flock(1)`, `timeout(1)`, `sha256sum` | no GNU tools assumed: the toggle lock is a mkdir lock, `timeout` is used only when present, `shasum -a 256` stands in for `sha256sum` |
 | Services | systemd user units, linger | launchd agents in `~/Library/LaunchAgents` (§51.1) |
-| Binaries | static musl, built in the Alpine container | built on a macOS runner: the Rust programs for `aarch64-apple-darwin`; tmux 3.4 with libevent and ncurses linked in (only the system library is dynamic); ad-hoc signed by the linker |
+| Binaries | static musl, built in the Alpine container | built on a macOS runner: the Rust programs (force-link among them) for `aarch64-apple-darwin`; tmux 3.4 with libevent and ncurses linked in (only the system library is dynamic); ad-hoc signed by the linker |
 | Python | the system's 3.11+, else python-build-standalone | macOS has 3.9 at most, so python-build-standalone `aarch64-apple-darwin` (same pin) |
 | Download | `force-X.Y.Z-linux-ARCH.tar.gz` | `force-X.Y.Z-darwin-arm64.tar.gz`; files fetched by curl carry no quarantine flag, so no notarisation |
 | Icon font | `~/.local/share/fonts`, fc-list | `~/Library/Fonts`; the rich tier as on Linux (kitty, Ghostty, WezTerm; a stated `--glyphs rich` for iTerm2 with the symbols font) |
 | Clipboard | OSC 52; wl-copy / xclip / clip-hold | OSC 52; `pbcopy` |
 
-CI runs the Python tests and both crates on `macos-26` for every pull request, and an end-to-end job installs the
-built darwin tarball as a user would, starts the services, opens a shell and an agent session (a stand-in `claude`),
-runs `force smoke`, updates from the previous release and uninstalls, keeping sidebar screenshots as artifacts. A
+CI runs the Python tests and the crates on `macos-26` for every pull request (and starts `force-link daemon` on a
+test state dir with `--port 0` for a few seconds, then stops it), and an end-to-end job installs the built darwin
+tarball as a user would, starts the services (`force-link status` must say running), opens a shell and an agent
+session (a stand-in `claude`), runs `force smoke`, updates from the previous release and uninstalls (no force-link
+left running), keeping sidebar screenshots as artifacts. A
 manual workflow opens an SSH session into a macOS runner for the maintainer's key only, for live debugging.
 
 ### 51.1 launchd services
@@ -1278,7 +1284,7 @@ manager does not answer. Three LaunchAgents in `~/Library/LaunchAgents`, written
 | `cc.useforce.force-tmux` | `tmux -L force -f <app>/share/tmux.conf -D` | RunAtLoad, KeepAlive, ThrottleInterval 3 |
 | `cc.useforce.force` | `~/.local/bin/force daemon`, `FORCE_SERVICE=launchd` | RunAtLoad, KeepAlive, AbandonProcessGroup (like KillMode=process), stdout/stderr to `<state>/daemon.log` |
 | `cc.useforce.force-smoke` | `force smoke --if-due` hourly (self-test only) | StartInterval 3600, Nice 10, ProcessType Background |
-| `cc.useforce.force-link` | `~/.local/bin/force link-daemon` (with `directLink` on only, §56.2) | RunAtLoad, KeepAlive SuccessfulExit false, ThrottleInterval 3, stdout/stderr to `<state>/link.log` |
+| `cc.useforce.force-link` | `/bin/sh -c`: exit 0 unless the live release has `share/bin/force-link` and `force/link.py`, else `exec ~/.local/bin/force link-daemon` (with `directLink` on only, §56.2; the guard does what the systemd unit's Conditions do, §12) | RunAtLoad, KeepAlive SuccessfulExit false, ThrottleInterval 3, stdout/stderr to `<state>/link.log` |
 
 They live in the `gui/<uid>` domain (`launchctl bootstrap` / `bootout` / `kickstart [-k]` / `print`), so they run
 while the user is logged in; there is no linger. Setup never reloads a loaded, unchanged tmux agent (it holds
@@ -1380,11 +1386,12 @@ programs); it is planned separately and not part of this section.
 
 CI (`.github/workflows/windows.yml`) builds the Linux tarball, then on a GitHub Windows runner sets up WSL (Ubuntu
 24.04, systemd, a non-root user), installs the tarball with install.ps1 from a `file://` web root, and from
-PowerShell and cmd runs `force --version`, opens a shell session and lists it, checks it is still there after a
-minute with no `wsl.exe` running, says hello through `force api` as the Minecraft mod starts it, and uninstalls.
+PowerShell and cmd runs `force --version`, checks that the link daemon runs under WSL's systemd (`force-link status
+--json`), opens a shell session and lists it, checks it is still there after a minute with no `wsl.exe` running,
+says hello through `force api` as the Minecraft mod starts it, and uninstalls (no force-link left running).
 
 ## 56. Host link: ssh always, a direct link when it can (plan)
-Status: A built; B built but for the release build (the daemon, identity, pairing, exec over QUIC, choosing, status files, the service and settings, `force net`, the hint and its card, doctor, the `link` column and API field). Everything that reaches a remote (§40, §52) goes through one entry point, the link, which
+Status: A built; B built: the core (the daemon, identity, pairing, exec over QUIC, choosing, status files, the service and settings), `force net`, the hint and its card, doctor, the `link` column and API field, and the release build (static Linux and macOS force-link, the service on every install path, notices). Everything that reaches a remote (§40, §52) goes through one entry point, the link, which
 carries it over ssh as today or, when the remote can be reached directly, over QUIC (iroh). ssh stays the way a host
 is added and the fallback whenever the direct link is not up, so a remote works whenever ssh works. Installing and
 running stay without sudo; the one optional step that uses sudo (`force net up`) runs a single firewall command under
@@ -1411,8 +1418,8 @@ prototype, 2026-11-19.
 ### 56.2 B: the direct link
 | Part | |
 |---|---|
-| `force-link daemon` | `--state DIR --hosts FILE --peers FILE --port N` (`--port 0`: ephemeral, tests). A user service on every install with `directLink` on: systemd user unit `force-link.service` (`ExecStart=%h/.local/bin/force link-daemon`, `Restart=always`, `RestartSec=3`, `RestartPreventExitStatus=0`, force.service's PATH; §12), on macOS the launchd agent `cc.useforce.force-link` (§51.1). No root: it binds UDP `linkPort` (≥ 1024) on all IPv4 and (when the host has it) IPv6 addresses and dials out. One per state dir (an exclusive lock on `<state>/link/lock`; a second one exits 1). Logs to stderr (journal, `<state>/link.log` under launchd): start, dial results, refusals, never channel data. SIGTERM: closes its connections (peers go back to ssh at once), marks its remotes `ssh`, exits 143 |
-| `force link-daemon` | resolves Force's paths and settings and `exec`s `force-link daemon --state <state> --hosts <hosts.json> --peers <link-peers.json> --port <linkPort>`; with `directLink` off it prints a note and exits 0 (the services then stay down) |
+| `force-link daemon` | `--state DIR --hosts FILE --peers FILE --port N` (`--port 0`: ephemeral, tests). A user service on every install with `directLink` on: systemd user unit `force-link.service` (`ExecStart=%h/.local/bin/force link-daemon`, `Restart=always`, `RestartSec=3`, `RestartPreventExitStatus=0 2`, force.service's PATH; §12), on macOS the launchd agent `cc.useforce.force-link` (§51.1), and without a service manager started by `force` and its daemon (§46). No root: it binds UDP `linkPort` (≥ 1024) on all IPv4 and (when the host has it) IPv6 addresses and dials out. One per state dir (an exclusive lock on `<state>/link/lock`, which holds its pid; a second one exits 1). Logs to stderr (journal, `<state>/link.log` under launchd): start, dial results, refusals, never channel data. SIGTERM: closes its connections (peers go back to ssh at once), marks its remotes `ssh`, exits 143 |
+| `force link-daemon` | resolves Force's paths and settings and `exec`s `force-link daemon --state <state> --hosts <hosts.json> --peers <link-peers.json> --port <linkPort>`; with `directLink` off it prints a note and exits 0 (the services then stay down), and so it does when the release has no force-link |
 | local socket | `<state>/link.sock`, 0600 (a stale one is removed at start); the caller's uid must be the daemon's. Serves `force-link exec` and `force-link status` |
 | iroh | `iroh` 1.5 with default features off (`tls-ring` only): `presets::Minimal` (the crypto provider only), no relay (`RelayMode::Disabled`), no address lookup (never the n0 preset, pkarr or DNS lookup, which publish or look up the host at n0), no port mapping, no net report probes, ALPN `force-link/1`. The daemon refuses to start if its endpoint has an address lookup service or a relay. Nothing goes to any server but the two hosts |
 | identity | each install has a link key, `<state>/link/key` (32 bytes, 0600, made on first start, never replaced; a key that group or other may read, or not this user's, is refused). Its public half is the host's link id, written as iroh shows it: 64 lowercase hex digits. `<state>/link/self.json` `{id, port, addrs}` (addrs `ip:port`): written atomically at start and whenever the host's addresses change |
@@ -1432,14 +1439,14 @@ prototype, 2026-11-19.
 | settings | `directLink` off: setup and `force settings set directLink false` stop and disable the service (nothing listens), on: enable and start it; a changed `linkPort` restarts it. Setup restarts a running link service (a new release's force-link). Uninstall removes it |
 | versions | a remote without link support (no `link` in its hello) is ssh only, silently, with no hint; `force update` brings it along |
 | security | a new way into every host, held to ssh's level: keys only, mutual, pinned by pairing over ssh, Force and its tmux only, never a shell; handshakes from unknown ids are dropped before any stream; rate-limited per address. It is not a sandbox: a peer reaches what `force` and `tmux -L force` can do (a tmux `run-shell` runs a command), which is what its ssh access already reaches. Reviewed before it ships |
-| size | `force-link` adds about 3 MB to each release download (prototype, iroh with default features off, size-optimised) |
+| size | `force-link` is 6.0 MB on Linux (static musl, x86_64; profile `opt-level "z"`, fat LTO, one codegen unit, stripped) and adds 2.9 MB to the Linux release download (9.4 MB for 1.7.3, 12.3 MB with it). `panic = "abort"` would save 0.8 MB (0.4 MB compressed) but turn a panic in one connection's task into the whole daemon's end, so it is not set |
 | tests | crates/link: framing, the allowlist, the key file, the peers file and its reload, the serving side over in-memory streams (pipes, a pty, refusals, hang-up), the endpoint isolated (no lookup, no relay, a pinned id); `tests/test_link_direct.py`: two daemons on loopback with their own tmp homes, state dirs and ephemeral ports (never the live ones): stdout, stderr, stdin and exit code, a tty with resize, `not_allowed`, an unknown id refused, a changed id refused until paired again, untrust, ssh (a fake on PATH) once the other daemon stops; Python: settings, the service (injected run), trust/untrust, the hello, pairing (fake ssh), host remove; `tests/test_net.py`: `force net up/down/status` for ufw, firewalld, macOS, nftables only, none and WSL, as root and without a terminal (sudo and the firewalls faked), the hint's conditions one by one, `link_hints`, the card's Don't show again, doctor, `force host list`, the API field, uninstall's reminder; crates/link: `fails` and `reason` per dial outcome; crates/sidebar: the hint lines and their click. Later: `force smoke` gains `link: direct exec round trip` (loopback). CI on Linux and macOS |
 
 ### 56.3 Order of work
 1. A (56.1): force-link exec over ssh, every caller moved, `nested-report`; no visible change.
 2. B: daemon, identity, pairing, exec over QUIC, choosing, status files, the service (unit and agent) and the settings.
 3. B: `force net up/down/status`, the hint and its card, doctor, the `link` column and API field.
-4. B: release (Linux static build in the builder container, macOS), notices, website and README: still "nothing is sent anywhere else".
+4. B: release (Linux static build in the builder container, macOS; the service on install, update, uninstall and without a service manager; the release checks), notices (built); website and README: still "nothing is sent anywhere else".
 
 ### 56.4 Later: C, relays (opt in)
 Reaching a host that is neither directly reachable nor opened by `force net up` (behind a router or carrier NAT) needs
