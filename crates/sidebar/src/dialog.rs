@@ -160,6 +160,14 @@ pub trait Runner {
     fn tmux_ok(&self, args: &[String]) -> bool;
 }
 
+/// The commands `force` forwards to the host a ui window shows (cli.py `_FORWARDED`, SPEC §40; a pytest keeps the
+/// two lists the same).
+pub const FORWARDED: &[&str] = &[
+    "new", "rename", "sync-titles", "delete", "archive", "unarchive", "restart", "upgrade", "list", "switch",
+    "remote-control", "forget", "move", "kinds", "dirs", "prompt", "wait", "read", "keys", "report", "status",
+    "explain", "import",
+];
+
 /// Real runner shelling out to the force binary and the tmux CLI on a named socket.
 pub struct RealRunner {
     cockpit_bin: String,
@@ -192,6 +200,24 @@ impl RealRunner {
             }
         }
     }
+    /// `force ARGS`: a command forwarded to a remote reached by force-link (the host prefix `force-link exec … NAME
+    /// -- TMUX -L force`) goes straight through the link, `force-link exec … NAME -- ~/.local/bin/force ARGS` (the argv
+    /// `force` here would forward it with), so no Python starts on this machine for it (SPEC §40); anything else
+    /// runs `<force-bin> ARGS` (which forwards by FORCE_HOST through plain ssh).
+    pub fn cockpit_argv(&self, args: &[String]) -> (String, Vec<String>) {
+        if let (Some(p), Some(cmd)) = (&self.host, args.first()) {
+            if let Some(sep) = p.iter().position(|w| w == "--") {
+                if sep > 0 && FORWARDED.contains(&cmd.as_str()) {
+                    let mut argv: Vec<String> = p[1..=sep].to_vec();
+                    argv.push("~/.local/bin/force".to_string());
+                    argv.extend(args.iter().cloned());
+                    return (p[0].clone(), argv);
+                }
+            }
+        }
+        (self.cockpit_bin.clone(), args.to_vec())
+    }
+
     fn exec(bin: &str, args: &[String]) -> Result<String, String> {
         let out = Command::new(bin)
             .args(args)
@@ -214,7 +240,8 @@ impl RealRunner {
 
 impl Runner for RealRunner {
     fn cockpit(&self, args: &[String]) -> Result<String, String> {
-        Self::exec(&self.cockpit_bin, args)
+        let (bin, argv) = self.cockpit_argv(args);
+        Self::exec(&bin, &argv)
     }
     fn tmux(&self, args: &[String]) -> Result<String, String> {
         let (bin, argv) = self.tmux_argv(args);
@@ -3220,6 +3247,23 @@ mod layout_tests {
         let r = RealRunner::new("force".into(), "force".into()).with_host_prefix(Some(""));
         let (bin, argv) = r.tmux_argv(&["ls".to_string()]);
         assert_eq!((bin.as_str(), argv), ("tmux", vec!["-L".to_string(), "force".to_string(), "ls".to_string()]));
+    }
+
+    #[test]
+    fn real_runner_forwards_through_force_link() {
+        let link = "/app/share/bin/force-link exec --state /s --hosts /h devbox -- /usr/bin/tmux -L force";
+        let r = RealRunner::new("/bin/force".into(), "force".into()).with_host_prefix(Some(link));
+        let s = |v: &[&str]| v.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(r.cockpit_argv(&s(&["rename", "a", "b"])),
+                   ("/app/share/bin/force-link".to_string(),
+                    s(&["exec", "--state", "/s", "--hosts", "/h", "devbox", "--", "~/.local/bin/force", "rename", "a", "b"])));
+        // this machine's own settings stay here (not forwarded)
+        assert_eq!(r.cockpit_argv(&s(&["settings", "--json"])), ("/bin/force".to_string(), s(&["settings", "--json"])));
+        // plain ssh, or no host: force with FORCE_HOST, as before
+        let ssh = RealRunner::new("/bin/force".into(), "force".into()).with_host_prefix(Some("ssh -S /tmp/c h tmux -L force"));
+        assert_eq!(ssh.cockpit_argv(&s(&["kinds", "--json"])), ("/bin/force".to_string(), s(&["kinds", "--json"])));
+        let here = RealRunner::new("/bin/force".into(), "force".into());
+        assert_eq!(here.cockpit_argv(&s(&["kinds"])), ("/bin/force".to_string(), s(&["kinds"])));
     }
 
     #[test]

@@ -71,3 +71,12 @@ def test_unknown_command_reads_as_before(capsys):
     assert e.value.code == 2
     err = capsys.readouterr().err
     assert "invalid choice: 'bogus'" in err and "'list'" in err and "'dialog'" in err
+
+
+def test_the_dialogs_forward_the_same_commands():
+    """force-dialog sends forwarded commands straight through force-link (SPEC §40): its list is cli._FORWARDED."""
+    import re
+    from force import cli
+    src = (ROOT / "crates" / "sidebar" / "src" / "dialog.rs").read_text()
+    body = re.search(r"pub const FORWARDED: &\[&str\] = &\[(.*?)\];", src, re.S).group(1)
+    assert set(re.findall(r'"([^"]+)"', body)) == cli._FORWARDED
