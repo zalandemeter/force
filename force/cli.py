@@ -1593,6 +1593,8 @@ def restart_command(cockpit: Cockpit, name: str | None, all_: bool = False) -> i
                 r = reg.get(n)
                 if r is not None:
                     r.extra["pending_restart"] = True
+                    r.extra.pop("pending_restart_reason", None)     # an explicit restart is never dropped (SPEC §53)
+                    r.extra.pop("pending_restart_rc", None)
             print(f"{n}: busy, restarts when idle")
         else:
             now.append(n)
@@ -1643,6 +1645,8 @@ def remote_control_command(cockpit: Cockpit, name: str, action: str) -> int:
         r.extra["rc_set_ms"] = int(time.time() * 1000)
         if busy:
             r.extra["pending_restart"] = True
+            r.extra["pending_restart_reason"] = "remote_control"
+            r.extra.pop("pending_restart_rc", None)
     # the restart launches from the registry as it is now, under its lock: the choice written above
     with registry.locked(cockpit.paths.home) as reg:
         after = reg.get(name)

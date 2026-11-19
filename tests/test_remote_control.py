@@ -360,3 +360,133 @@ def test_no_remote_control_env_also_turns_it_off(env, monkeypatch):
     argv, _ = kinds.of(e).exec_argv(cockpit, e)
     assert "--remote-control" not in argv
     assert json.loads(argv[argv.index("--settings") + 1])["remoteControlAtStartup"] is False
+
+
+# --- a pending restart that only applies a Remote Control choice (SPEC §53 "restart no longer needed") -----------------
+def _pending_step(env, monkeypatch, *, reason, choice_on, bridge, cmdline, pid=4711, rc_at_change=None):
+    """Run the daemon's pending-restart step for one idle session; return (restarted names, daemon)."""
+    from force import daemon as daemon_mod
+    cockpit = env.make_cockpit()
+    clock = _Clock()
+    d = Daemon(cockpit, clock)
+    with locked(env.paths.home) as reg:
+        e = reg.add("s", str(uuid.uuid4()), "/tmp")
+        e.extra["pending_restart"] = True
+        if reason:
+            e.extra["pending_restart_reason"] = reason
+        if rc_at_change is not None:
+            e.extra["pending_restart_rc"] = rc_at_change
+        if not choice_on:
+            e.extra["remote_control"] = False
+    sessions = env.paths.claude_dir / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    data = {"sessionId": str(uuid.uuid4())}
+    if bridge:
+        data["bridgeSessionId"] = "session_x"
+    (sessions / f"{pid}.json").write_text(json.dumps(data))
+    entry = load(env.paths.registry).get("s")
+    pane = SimpleNamespace(pid=pid, dead=False)
+    d._seen = {}
+    monkeypatch.setattr(d, "_live", lambda: [entry])
+    monkeypatch.setattr(d, "_per_tick", lambda: {"s": (pane, None, SimpleNamespace(pane_pid=pid), None)})
+    monkeypatch.setattr(daemon_mod, "compute_state", lambda *a, **k: State.IDLE)
+    monkeypatch.setattr(daemon_mod, "read_cmdline", lambda p: cmdline)
+    restarted = []
+    monkeypatch.setattr(cockpit, "restart_many", lambda names, timeout=15.0: (restarted.extend(names), [])[1])
+    d._step_pending_restart()
+    return restarted, d
+
+
+def _flags_gone(env):
+    x = _extra(env, "s")
+    return not any(k in x for k in ("pending_restart", "pending_restart_reason", "pending_restart_rc"))
+
+
+def test_remote_control_command_on_a_busy_session_records_the_reason(env, monkeypatch):
+    cockpit = env.make_cockpit()
+    _live(cockpit, "busy2")
+    monkeypatch.setattr(cli, "_current_state_for", lambda c, n: State.WORKING)
+    assert cli.remote_control_command(cockpit, "busy2", "off") == 0
+    assert _extra(env, "busy2")["pending_restart"] is True
+    assert _extra(env, "busy2")["pending_restart_reason"] == "remote_control"
+
+
+@pytest.mark.parametrize("reason", ["remote_control", "account"])
+def test_pending_restart_dropped_when_remote_control_already_on(env, monkeypatch, reason):
+    restarted, d = _pending_step(env, monkeypatch, reason=reason, choice_on=True, bridge=True, cmdline=None)
+    assert restarted == []
+    assert _flags_gone(env)
+    assert "restart no longer needed: Remote Control already on" in d._restart_dropped["s"][1]
+
+
+def test_pending_restart_proceeds_when_not_connected(env, monkeypatch):
+    restarted, _d = _pending_step(env, monkeypatch, reason="remote_control", choice_on=True, bridge=False, cmdline=[])
+    assert restarted == ["s"]
+    assert _flags_gone(env)
+
+
+def test_pending_restart_dropped_when_remote_control_already_off(env, monkeypatch):
+    restarted, d = _pending_step(env, monkeypatch, reason="remote_control", choice_on=False, bridge=False,
+                                 cmdline=["claude", "--resume", "x"])
+    assert restarted == []
+    assert _flags_gone(env)
+    assert d._restart_dropped["s"][1].endswith("already off")
+
+
+@pytest.mark.parametrize("cmdline, bridge", [
+    (["claude", "--remote-control", "s"], False),       # started with it
+    (None, False),                                      # command line unreadable (no /proc)
+    (["claude"], True),                                 # connected by hand
+])
+def test_pending_restart_proceeds_when_off_is_not_applied(env, monkeypatch, cmdline, bridge):
+    restarted, _d = _pending_step(env, monkeypatch, reason="remote_control", choice_on=False, bridge=bridge,
+                                  cmdline=cmdline)
+    assert restarted == ["s"]
+    assert _flags_gone(env)
+
+
+def test_pending_restart_without_a_reason_is_unchanged(env, monkeypatch):
+    restarted, _d = _pending_step(env, monkeypatch, reason=None, choice_on=True, bridge=True, cmdline=None)
+    assert restarted == ["s"]
+    assert _flags_gone(env)
+
+
+def test_pending_restart_activity_names_remote_control():
+    from force.daemon import pending_restart_activity as act
+    assert act(State.WORKING) == "restarts after this turn"
+    assert act(State.WORKING, "other") == "restarts after this turn"
+    assert act(State.WORKING, "remote_control") == "restarts after this turn · Remote Control"
+    assert act(State.WORKING, "account") == "restarts after this turn · Remote Control"
+    assert act(State.IDLE, "remote_control") is None
+
+
+def test_an_account_restart_waits_while_still_on_the_old_remote_control_session(env, monkeypatch):
+    """Right after an account change the status file can still name the old account's Remote Control session: that is
+    not re-registered, so the restart goes ahead."""
+    restarted, d = _pending_step(env, monkeypatch, reason="account", choice_on=True, bridge=True, cmdline=None,
+                                 rc_at_change="session_x")
+    assert restarted == ["s"]
+    assert _flags_gone(env)
+    assert "s" not in d._restart_dropped
+
+
+def test_an_account_restart_is_dropped_once_on_a_new_remote_control_session(env, monkeypatch):
+    restarted, d = _pending_step(env, monkeypatch, reason="account", choice_on=True, bridge=True, cmdline=None,
+                                 rc_at_change="session_old")
+    assert restarted == []
+    assert _flags_gone(env)
+
+
+def test_an_explicit_restart_clears_a_remote_control_reason(env, monkeypatch):
+    """`force restart --all` on a busy session schedules a restart that must never be dropped as already applied."""
+    cockpit = env.make_cockpit()
+    _live(cockpit, "busy3")
+    with locked(env.paths.home) as reg:
+        e = reg.get("busy3")
+        e.extra["pending_restart_reason"] = "remote_control"
+        e.extra["pending_restart_rc"] = "session_x"
+    monkeypatch.setattr(cli, "_current_state_for", lambda c, n: State.WORKING)
+    assert cli.restart_command(cockpit, None, all_=True) == 0
+    x = _extra(env, "busy3")
+    assert x.get("pending_restart") is True
+    assert "pending_restart_reason" not in x and "pending_restart_rc" not in x
