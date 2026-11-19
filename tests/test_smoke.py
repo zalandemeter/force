@@ -170,15 +170,20 @@ def test_claude_checks_skipped_without_claude(tmp_path):
     assert r.checks == [{"name": "claude", "ok": True, "s": 0, "detail": "not installed: skipped"}]
 
 
-def test_environment_sets_ui_socket(tmp_path):
-    """The smoke run sets its own ui tmux socket so split checks never touch the live ui server."""
+def test_environment_sets_ui_socket(tmp_path, monkeypatch):
+    """The smoke run sets its own ui tmux socket so split checks never touch the live ui server; its one live
+    file is the usage.json its Claude session's status line writes (SPEC §37)."""
     from types import SimpleNamespace
+    for k in ("FORCE_HOME", "FORCE_STATE", "FORCE_CONFIG", "FORCE_TMUX_SOCKET", "FORCE_UI_SOCKET", "FORCE_TMUX_CONF",
+              "FORCE_CLAUDE_DIR", "FORCE_CLAUDE_BIN", "FORCE_NO_REMOTE_CONTROL", "FORCE_USAGE_FILE",
+              "ANTHROPIC_MODEL"):
+        monkeypatch.setenv(k, os.environ.get(k, ""))      # restored after the test
     r = smoke.Run.__new__(smoke.Run)
     r.run_dir = tmp_path / "run"
     r.base = tmp_path
     r.work = tmp_path / "work"
     r.live = SimpleNamespace(home=tmp_path / "home", claude_dir=tmp_path / "claude",
-                           claude_bin=tmp_path / "claude-bin")
+                           claude_bin=tmp_path / "claude-bin", state=tmp_path / "live-state")
     r.opencode_managed = False
     saved = {}
     r.run_dir.mkdir()
@@ -186,6 +191,8 @@ def test_environment_sets_ui_socket(tmp_path):
     assert os.environ["FORCE_UI_SOCKET"] == f"forcetest-smoke-ui-{os.getpid()}"
     assert os.environ["FORCE_TMUX_SOCKET"] == f"forcetest-smoke-{os.getpid()}"
     assert (r.run_dir / "tmux-ui.conf").is_file()
+    assert os.environ["FORCE_USAGE_FILE"] == str(tmp_path / "live-state" / "usage.json")
+    assert os.environ["FORCE_STATE"] == str(r.run_dir / "state"), "everything else stays the run's own"
 
 
 def _splitcockpit_script(tmp, proto):
@@ -297,3 +304,206 @@ def test_trust_gives_up_without_pressing_enter(monkeypatch):
     with pytest.raises(smoke.SmokeFail):
         smoke.Run.trust(d, "s", "move")
     assert "Enter" not in d.keys
+
+
+# --- the plan's usage limit and account changes (SPEC §37) -------------------------------------------------------
+LIMIT_SCREEN = "❯ Reply with exactly PONG | ⎿ You've hit your session limit · resets 3pm (Europe/Paris) | ❯"
+
+
+@pytest.mark.parametrize("text, hit", [
+    (LIMIT_SCREEN, True),
+    ("You've hit your 5-hour limit", True),
+    ("YOU'VE HIT YOUR WEEKLY LIMIT · resets Mon", True),
+    ("Usage limit reached · continuing automatically at 3pm", True),
+    ("Claude usage limit reached|1791561000", True),
+    ("no WORKING within 90 s (states: IDLE)", False),
+    ("Context limit reached · /compact or /clear to continue", False),
+    ("", False),
+    (None, False),
+])
+def test_limit_text(text, hit):
+    assert smoke.limit_text(text) is hit
+
+
+def _limited_run(tmp_path, screen, usage=None):
+    from types import SimpleNamespace
+    state = tmp_path / "live-state"
+    state.mkdir(exist_ok=True)
+    if usage is not None:
+        (state / "usage.json").write_text(json.dumps(usage))
+    r = smoke.Run.__new__(smoke.Run)
+    r.live = SimpleNamespace(state=state, claude_dir=tmp_path / "claude")
+    r.checks, r.log = [], io.StringIO()
+    r.screen = lambda name: screen
+    return r
+
+
+def _no_reply():
+    raise smoke.SmokeFail("a turn (working): no WORKING within 90 s (states: IDLE)")
+
+
+def test_a_limit_screen_stops_the_check_without_failing(tmp_path):
+    r = _limited_run(tmp_path, LIMIT_SCREEN)
+    assert r.check("claude: turn", _no_reply) is False, "the flow stops there"
+    assert r.checks[0]["ok"] is None and r.checks[0]["detail"].startswith(smoke.USAGE_LIMIT)
+    assert smoke.reason(r.checks) is None, "not a failure"
+    # without the words on screen it is a plain failure
+    r = _limited_run(tmp_path, "❯ PONG")
+    r.check("claude: turn", _no_reply)
+    assert r.checks[0]["ok"] is False and smoke.reason(r.checks) == "Claude Code: no reply"
+    # an OpenCode check is never a Claude usage limit
+    r = _limited_run(tmp_path, LIMIT_SCREEN)
+    r.check("opencode: turn", _no_reply)
+    assert r.checks[0]["ok"] is False
+
+
+def test_live_usage_at_100_is_the_second_signal(tmp_path):
+    future = time.time() + 3600
+    r = _limited_run(tmp_path, "❯", usage={"five_hour": {"used_percentage": 100, "resets_at": future}})
+    r.check("claude: turn", _no_reply)
+    assert r.checks[0]["ok"] is None
+    r = _limited_run(tmp_path, "❯", usage={"five_hour": {"used_percentage": 100, "resets_at": time.time() - 5}})
+    r.check("claude: turn", _no_reply)
+    assert r.checks[0]["ok"] is False, "a window that has reset is no limit"
+
+
+def test_at_limit():
+    now = 1000.0
+    assert smoke.at_limit(None, now) is None
+    assert smoke.at_limit({"five_hour": {"used_percentage": 99.5, "resets_at": 2000}}, now) is None
+    assert smoke.at_limit({"five_hour": {"used_percentage": 100.0, "resets_at": 2000},
+                           "seven_day": {"used_percentage": 100.0, "resets_at": 9000}}, now) == 9000
+    assert smoke.at_limit({"five_hour": {"used_percentage": 100.0, "resets_at": 900}, "seven_day": None}, now) is None
+
+
+def _fake_run(monkeypatch, env, claude_flow):
+    monkeypatch.setattr(smoke.Run, "setup", lambda self: None)
+    monkeypatch.setattr(smoke.Run, "cleanup", lambda self: None)
+    monkeypatch.setattr(smoke.Run, "claude_flow", claude_flow)
+    monkeypatch.setattr(smoke.Run, "opencode_flow", lambda self: None)
+    monkeypatch.setattr(smoke.Run, "split_flow", lambda self: None)
+    monkeypatch.setattr(smoke, "versions", lambda paths: V)
+
+
+def test_a_run_stopped_by_the_limit_is_ok_null(env, monkeypatch):
+    from force import account
+    from force.daemon import Daemon
+    from force.doctor import check, run_doctor
+    from force.state import read_snapshot
+    (env.paths.claude_dir / ".claude.json").write_text(json.dumps(
+        {"oauthAccount": {"accountUuid": "acc-a", "organizationUuid": "org"}}))
+    reset = int(time.time()) + 3600
+    (env.paths.state / "usage.json").write_text(json.dumps(
+        {"five_hour": {"used_percentage": 100, "resets_at": reset}}))
+
+    def claude_flow(self):
+        self.screen = lambda name: LIMIT_SCREEN
+        self.check("claude: start", lambda: None)
+        self.check("claude: turn", _no_reply)
+    _fake_run(monkeypatch, env, claude_flow)
+    res = smoke.run(env.paths, env.cfg, log=io.StringIO())
+    assert res["ok"] is None and res["reason"] == smoke.USAGE_LIMIT
+    assert res["limit_resets_at"] == reset
+    assert res["account"] == account.current(env.paths.claude_dir) and len(res["account"]) == 16
+    last = smoke.read_last(env.paths.state / "smoke")
+    assert last["ok"] is None
+    # no ✖ in the sidebar (the snapshot's ok is not false), no doctor problem, an info line
+    cockpit = env.make_cockpit()
+    Daemon(cockpit).tick()
+    snap = read_snapshot(env.paths.snapshot).smoke
+    assert snap["ok"] is None and snap["reason"] == smoke.USAGE_LIMIT
+    assert not [p for p in check(cockpit, systemd=False) if p.code == "self-test"]
+    lines = []
+    run_doctor(cockpit, out=lines.append, systemd=False)
+    assert any("usage limit reached" in ln and not ln.startswith(("✓", "✗")) for ln in lines)
+    # --last says so and exits 0
+    assert smoke.command(env.paths, env.cfg, if_due=False, last=True) == 0
+
+
+def test_a_real_failure_wins_over_a_limit(env, monkeypatch):
+    def claude_flow(self):
+        self.screen = lambda name: LIMIT_SCREEN
+        self.check("claude: turn", _no_reply)
+        self.checks.append({"name": "opencode: move", "ok": False, "s": 1, "detail": "x"})
+    _fake_run(monkeypatch, env, claude_flow)
+    res = smoke.run(env.paths, env.cfg, log=io.StringIO())
+    assert res["ok"] is False and res["reason"] == "OpenCode: move failed"
+
+
+def test_due_after_a_limit_run_and_on_an_account_change():
+    now = 1_000_000.0
+    limited = {"ok": None, "at": now - 600, "versions": V, "account": "aaaa", "limit_resets_at": now + 100,
+               "reason": smoke.USAGE_LIMIT}
+    assert smoke.due(limited, V, now, account="aaaa") is None, "not before the reset"
+    assert smoke.due(limited, V, now + 100, account="aaaa") == "usage limit reset"
+    assert smoke.due(limited, V, now, account="bbbb") == "account changed"
+    unknown = dict(limited, limit_resets_at=None)
+    assert smoke.due(unknown, V, now) is None
+    assert smoke.due(dict(unknown, at=now - smoke.RETRY_FAILED_S), V, now) == "retry after the usage limit"
+    # a limit run is not a failure for the failure rules
+    assert smoke.due(dict(limited, at=now - smoke.RETRY_FAILED_S + 10), V, now, logged_in=lambda: True) is None
+    # the account rule: a failed run from another account (its ✖ clears once the new run passes)
+    failed = {"ok": False, "at": now - 60, "versions": V, "account": "aaaa",
+              "checks": [{"name": "claude: turn", "ok": False, "detail": "no WORKING"}]}
+    assert smoke.due(failed, V, now, account="bbbb") == "account changed"
+    assert smoke.due(failed, V, now, account="aaaa") is None
+    assert smoke.due(failed, V, now, account=None) is None, "logged out: no account to compare"
+    assert smoke.due({"ok": True, "at": now - 60, "versions": V}, V, now, account="bbbb") is None, \
+        "a run from before the account was recorded"
+
+
+def _if_due(env, monkeypatch, last, usage=None):
+    base = env.paths.state / "smoke"
+    base.mkdir(exist_ok=True)
+    (base / "last.json").write_text(json.dumps(last))
+    if usage is not None:
+        (env.paths.state / "usage.json").write_text(json.dumps(usage))
+    ran = []
+    monkeypatch.setattr(smoke, "versions", lambda paths: V)
+    monkeypatch.setattr(smoke, "run", lambda *a, **k: (ran.append(1), {"ok": True})[1])
+    rc = smoke.command(env.paths, env.cfg, if_due=True, last=False)
+    return rc, ran, (base / "last.json").read_text()
+
+
+def test_a_scheduled_run_is_skipped_at_the_limit(env, monkeypatch, capsys):
+    old = {"ok": True, "at": time.time() - smoke.DUE_AFTER_S - 1, "versions": V}
+    rc, ran, after = _if_due(env, monkeypatch, old, usage={
+        "five_hour": {"used_percentage": 40, "resets_at": int(time.time()) + 600},
+        "seven_day": {"used_percentage": 100, "resets_at": int(time.time()) + 86400}})
+    assert rc == 0 and ran == [], "skipped while a window is at 100 %"
+    assert json.loads(after) == old, "and nothing recorded"
+    assert "skipped: usage limit reached" in capsys.readouterr().out
+    rc, ran, _ = _if_due(env, monkeypatch, old, usage={
+        "five_hour": {"used_percentage": 100, "resets_at": int(time.time()) - 1}})
+    assert ran == [1], "a window that has reset does not hold it back"
+
+
+def test_an_account_change_makes_it_due(env, monkeypatch):
+    (env.paths.claude_dir / ".claude.json").write_text(json.dumps(
+        {"oauthAccount": {"accountUuid": "acc-b", "organizationUuid": "org"}}))
+    recent = {"ok": False, "at": time.time() - 60, "versions": V, "account": "0123456789abcdef",
+              "checks": [{"name": "claude: turn", "ok": False, "detail": "no WORKING"}]}
+    rc, ran, _ = _if_due(env, monkeypatch, recent)
+    assert ran == [1]
+
+
+def test_start_smoke_uses_the_installed_schedule(monkeypatch):
+    from force import services
+    from subprocess import CompletedProcess
+    calls = []
+
+    def fake(enabled):
+        def run(argv, **kw):
+            calls.append(argv)
+            if argv[:3] == ["systemctl", "--user", "is-enabled"]:
+                return CompletedProcess(argv, 0 if enabled else 1, "enabled\n" if enabled else "disabled\n", "")
+            return CompletedProcess(argv, 0, "", "")
+        return run
+    monkeypatch.setattr(services, "backend", lambda env=None, run=None: "systemd")
+    assert services.start_smoke(run=fake(True)) is True
+    assert calls[-1] == ["systemctl", "--user", "start", "--no-block", "force-smoke.service"]
+    calls.clear()
+    assert services.start_smoke(run=fake(False)) is False
+    assert all("start" not in c for c in calls), "no self-test schedule installed: nothing started"
+    monkeypatch.setattr(services, "backend", lambda env=None, run=None: None)
+    assert services.start_smoke(run=fake(True)) is False

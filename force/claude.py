@@ -181,8 +181,11 @@ def build_argv(claude_bin: Path, claude_dir: Path, name: str, session_id: str,
         settings["autoMemoryDirectory"] = memory_dir
     if extra_settings:          # Chuck, the support session (SPEC §50): his own context and MCP permissions
         settings.update(extra_settings)
+    if not remote_control:
+        # the user's `remoteControlAtStartup` would register it anyway, under an automatic name (SPEC §4, §53)
+        settings["remoteControlAtStartup"] = False
     argv += ["-n", name]
-    if remote_control:       # off only for `force smoke` (its sessions must not show up in claude.ai)
+    if remote_control:       # off for a session without it and for `force smoke` (never in claude.ai)
         argv += ["--remote-control", name]
     argv += ["--settings", json.dumps(settings, separators=(",", ":"))]
     argv += list(extra_args or [])

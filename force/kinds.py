@@ -79,8 +79,10 @@ class Claude(Kind):
         return os.access(paths.claude_bin, os.X_OK) or shutil.which("claude") is not None
 
     def exec_argv(self, cockpit, entry):
+        # FORCE_USAGE_FILE: `force smoke` points its session's status line at the live usage.json (SPEC §37)
+        usage_file = os.environ.get("FORCE_USAGE_FILE") or cockpit.paths.state / "usage.json"
         statusline = claude_mod.statusline_command(Path(cockpit.paths.tmux_conf).parent / "statusline.py",
-                                                   cockpit.paths.state / "usage.json")
+                                                   Path(usage_file))
         extra_settings, extra_args = None, None
         if entry.extra.get("role") == "support":       # Chuck (SPEC §50)
             from . import support

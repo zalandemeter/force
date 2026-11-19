@@ -16,8 +16,9 @@ state and tmux server are thrown away, and so are the Claude transcripts and Ope
 The result goes to <state>/smoke/last.json (shown by the sidebar when a check failed) and history.jsonl.
 
 `--if-due` (the hourly timer) runs only when Claude Code, OpenCode or Force changed since the last run, the
-last run failed more than 6 h ago, or it is older than a day. Sessions use the `haiku` model
-(FORCE_SMOKE_MODEL) and never register for Remote Control.
+Claude Code account changed, the last run failed more than 6 h ago, a run stopped by the usage limit is past its
+reset, or it is older than a day; never while the plan's usage is at its limit. Sessions use the `haiku` model
+(FORCE_SMOKE_MODEL) and never register for Remote Control. A run that hits the usage limit is no failure: `ok` null.
 """
 from __future__ import annotations
 
@@ -39,6 +40,31 @@ RETRY_FAILED_S = 6 * 3600
 POLL_S = 0.5
 
 LOGGED_OUT = "Claude Code logged out"
+USAGE_LIMIT = "usage limit reached"
+
+# Claude Code's words when the plan's usage is used up (2.1.328): "You've hit your session limit · resets 3pm",
+# "You've hit your 5-hour limit", "Usage limit reached · …". Matched loosely, any case.
+_LIMIT_RE = re.compile(r"limit reached|usage limit|hit your (?:[\w'-]+ ){0,3}limit", re.IGNORECASE)
+
+
+def limit_text(text: str | None) -> bool:
+    """The screen (or a failed check's detail) says the plan's usage limit is reached."""
+    return bool(text) and _LIMIT_RE.search(text) is not None and "context limit" not in text.lower()
+
+
+def at_limit(usage: dict | None, now: float) -> int | None:
+    """A window of the live usage (force.usage.normalize) at 100 % that has not reset: the latest such resets_at,
+    else None."""
+    out = None
+    for w in (usage or {}).values():
+        if isinstance(w, dict) and w.get("used_percentage", 0) >= 100 and w.get("resets_at", 0) > now:
+            out = max(out or 0, w["resets_at"])
+    return out
+
+
+def _live_usage(paths) -> dict | None:
+    from .usage import read_usage
+    return read_usage(paths.state / "usage.json")
 
 # what the work folders hold (the move checks that the second folder's instructions apply)
 _CLAUDE_MD = "When asked for your codename, answer {code}.\n"
@@ -114,8 +140,8 @@ def reason(checks) -> str | None:
     if not isinstance(checks, list):
         return None
     for c in checks:
-        if not isinstance(c, dict) or c.get("ok"):
-            continue
+        if not isinstance(c, dict) or c.get("ok") or ("ok" in c and c["ok"] is None):
+            continue                                  # passed, or stopped by the usage limit (not a failure)
         detail = c.get("detail")
         if not isinstance(detail, str):
             detail = ""
@@ -158,18 +184,29 @@ def failed_phrase(name) -> str:
     return f"{label}: {_STEP_PHRASE.get(step.strip(), 'self-test failed')}"
 
 
-def due(last: dict | None, now_versions: dict, now: float, logged_in=None) -> str | None:
+def due(last: dict | None, now_versions: dict, now: float, logged_in=None, account: str | None = None) -> str | None:
     """Why a run is due (None: not due). `logged_in` is a no-arg callable returning bool|None, checked only
-    when the last run failed because Claude was logged out."""
+    when the last run failed because Claude was logged out. `account`: the Claude Code account logged in now
+    (force.account), compared with the one the last run recorded."""
     if not last:
         return "no earlier run"
+    if account is not None and last.get("account") not in (None, account):
+        return "account changed"
     if last.get("versions") != now_versions:
         return "versions changed"
     age = now - float(last.get("at", 0))
-    if not last.get("ok") and reason(last.get("checks")) == LOGGED_OUT and logged_in is not None \
+    failed = last.get("ok") is False
+    if "ok" in last and last["ok"] is None:          # stopped by the usage limit: again once it resets
+        resets = last.get("limit_resets_at")
+        if isinstance(resets, (int, float)) and not isinstance(resets, bool):
+            if now >= resets:
+                return "usage limit reset"
+        elif age >= RETRY_FAILED_S:
+            return "retry after the usage limit"
+    if failed and reason(last.get("checks")) == LOGGED_OUT and logged_in is not None \
             and logged_in() is True:
         return "logged in again"
-    if not last.get("ok") and age >= RETRY_FAILED_S:
+    if failed and age >= RETRY_FAILED_S:
         return "retry after a failure"
     if age >= DUE_AFTER_S:
         return "daily run"
@@ -243,6 +280,8 @@ class Run:
             "FORCE_UI_SOCKET": f"forcetest-smoke-ui-{os.getpid()}",
             "FORCE_CLAUDE_DIR": str(self.live.claude_dir), "FORCE_CLAUDE_BIN": str(self.live.claude_bin),
             "FORCE_NO_REMOTE_CONTROL": "1",
+            # the one live file it writes: its session's status line reports this machine's plan usage (SPEC §37)
+            "FORCE_USAGE_FILE": str(self.live.state / "usage.json"),
             "ANTHROPIC_MODEL": os.environ.get("FORCE_SMOKE_MODEL", "haiku"),
         })
 
@@ -262,6 +301,7 @@ class Run:
         self.cockpit = Cockpit(paths, cfg, Tmux(paths.tmux_socket, paths.tmux_conf), force)
         self.daemon = Daemon(self.cockpit, validator=lambda *a, **k: None, reexec=lambda *a, **k: None)
         self.daemon._step_sidebar = lambda: None     # no sidebar or header panes on the smoke server
+        self.daemon._step_account = lambda: None     # the live daemon follows account changes, not this one
         self.paths = paths
 
     # --- helpers -------------------------------------------------------------------------------------
@@ -353,10 +393,22 @@ class Run:
             ok, detail = False, str(e)
         except Exception as e:                        # a bug in the smoke code or Force itself
             ok, detail = False, f"{type(e).__name__}: {e}"
+        if not ok and name.startswith("claude:") and self.limited(detail):
+            ok, detail = None, f"{USAGE_LIMIT}: {detail}"
         dt = round(time.monotonic() - t0, 1)
         self.checks.append({"name": name, "ok": ok, "s": dt, "detail": detail})
-        self.say(f"  {name}: {'ok' if ok else 'FAILED'} ({dt} s){' - ' + detail if detail else ''}")
-        return ok
+        word = "ok" if ok else ("STOPPED (usage limit)" if ok is None else "FAILED")
+        self.say(f"  {name}: {word} ({dt} s){' - ' + detail if detail else ''}")
+        return bool(ok)
+
+    def limited(self, detail: str) -> bool:
+        """A Claude check failed because the plan's usage is used up: Claude Code says so on screen (or in the
+        failure's detail), or the live usage has a window at 100 % that has not reset."""
+        try:
+            screen = self.screen("smoke-claude")
+        except Exception:
+            screen = ""
+        return limit_text(screen) or limit_text(detail) or at_limit(_live_usage(self.live), time.time()) is not None
 
     def add_entry(self, name: str, cwd: Path, kind: str):
         from .registry import locked
@@ -749,7 +801,8 @@ def run(live_paths, live_cfg, log=sys.stdout) -> dict:
           f"{v.get('opencode')}, force {v.get('force')}")
     saved = {k: os.environ.get(k) for k in ("FORCE_HOME", "FORCE_STATE", "FORCE_CONFIG", "FORCE_TMUX_SOCKET",
                                              "FORCE_UI_SOCKET", "FORCE_TMUX_CONF", "FORCE_CLAUDE_DIR",
-                                             "FORCE_CLAUDE_BIN", "FORCE_NO_REMOTE_CONTROL", "ANTHROPIC_MODEL",
+                                             "FORCE_CLAUDE_BIN", "FORCE_NO_REMOTE_CONTROL", "FORCE_USAGE_FILE",
+                                             "ANTHROPIC_MODEL",
                                              "INVOCATION_ID", "FORCE_SERVICE")}
     try:
         r.setup()
@@ -768,16 +821,29 @@ def run(live_paths, live_cfg, log=sys.stdout) -> dict:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = val
-    result = {"ok": bool(r.checks) and all(c["ok"] for c in r.checks), "at": started,
+    failed = not r.checks or any(c["ok"] is False for c in r.checks)
+    limited = any(c["ok"] is None for c in r.checks)
+    ok = False if failed else (None if limited else True)
+    from . import account
+    result = {"ok": ok, "at": started,
               "duration_s": round(time.time() - started), "versions": v, "checks": r.checks,
-              "reason": reason(r.checks)}
+              "reason": reason(r.checks) if failed else (USAGE_LIMIT if limited else None),
+              "account": account.current(live_paths.claude_dir)}
+    if limited:
+        usage = _live_usage(live_paths)
+        five = (usage or {}).get("five_hour")
+        result["limit_resets_at"] = at_limit(usage, started) or (five["resets_at"] if isinstance(five, dict) else None)
     tmp = base / "last.json.tmp"
     tmp.write_text(json.dumps(result, indent=1))
     os.replace(tmp, base / "last.json")
     with open(base / "history.jsonl", "a") as f:
         f.write(json.dumps(result) + "\n")
-    r.say(f"force smoke: {'all checks passed' if result['ok'] else 'FAILED'} in {result['duration_s']} s")
+    r.say(f"force smoke: {_verdict(result['ok'])} in {result['duration_s']} s")
     return result
+
+
+def _verdict(ok) -> str:
+    return "all checks passed" if ok else (f"stopped: {USAGE_LIMIT}" if ok is None else "FAILED")
 
 
 def command(live_paths, live_cfg, if_due: bool, last: bool) -> int:
@@ -788,15 +854,18 @@ def command(live_paths, live_cfg, if_due: bool, last: bool) -> int:
             print("force: no smoke run yet (force smoke)")
             return 1
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(res.get("at", 0)))
-        print(f"last smoke run {when}: {'passed' if res.get('ok') else 'FAILED'} "
+        limit = "ok" in res and res["ok"] is None
+        verdict = "passed" if res.get("ok") else (f"stopped ({USAGE_LIMIT})" if limit else "FAILED")
+        print(f"last smoke run {when}: {verdict} "
               f"({res.get('duration_s')} s; {', '.join(f'{k} {v}' for k, v in (res.get('versions') or {}).items())})")
-        if not res.get("ok"):
+        if not res.get("ok") and not limit:
             why = res.get("reason") or reason(res.get("checks"))
             if why:
                 print(f"  reason: {why}")
         for c in res.get("checks") or []:
-            print(f"  {'ok    ' if c['ok'] else 'FAILED'} {c['name']}{' - ' + c['detail'] if c.get('detail') else ''}")
-        return 0 if res.get("ok") else 1
+            mark = "ok    " if c.get("ok") else ("limit " if "ok" in c and c["ok"] is None else "FAILED")
+            print(f"  {mark} {c['name']}{' - ' + c['detail'] if c.get('detail') else ''}")
+        return 0 if res.get("ok") or limit else 1
     base.mkdir(parents=True, exist_ok=True)
     with open(base / "lock", "w") as lock:
         try:
@@ -805,9 +874,16 @@ def command(live_paths, live_cfg, if_due: bool, last: bool) -> int:
             print("force: a smoke run is already going", file=sys.stderr)
             return 1
         if if_due:
+            from . import account
             why = due(read_last(base), versions(live_paths), time.time(),
-                     logged_in=lambda: claude_logged_in(live_paths.claude_bin))
+                     logged_in=lambda: claude_logged_in(live_paths.claude_bin),
+                     account=account.current(live_paths.claude_dir))
             if why is None:
+                return 0
+            until = at_limit(_live_usage(live_paths), time.time())
+            if until is not None:                     # the plan's usage is used up: a run could only stop there
+                print(f"force smoke: due ({why}), skipped: {USAGE_LIMIT} until "
+                      f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(until))}")
                 return 0
             print(f"force smoke: due ({why})")
         (base / "log").mkdir(exist_ok=True)
@@ -824,4 +900,4 @@ def command(live_paths, live_cfg, if_due: bool, last: bool) -> int:
             res = run(live_paths, live_cfg, Tee())
         for old in sorted((base / "log").glob("*.log"))[:-30]:
             old.unlink(missing_ok=True)
-        return 0 if res["ok"] else 1
+        return 1 if res["ok"] is False else 0

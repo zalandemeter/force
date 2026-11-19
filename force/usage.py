@@ -60,10 +60,17 @@ def normalize(raw: object) -> dict | None:
 
 
 def read_usage(path: Path) -> dict | None:
-    """Read + json.loads + normalize. Missing/unreadable/bad JSON -> None. Never raises."""
+    """Read + json.loads + normalize. Missing/unreadable/bad JSON -> None. Never raises.
+    After a Claude Code account change (<state>/account.json next to it, SPEC §21), figures saved for another
+    account, or for none, are no data."""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return normalize(json.load(f))
+            raw = json.load(f)
+        from .account import read_state
+        acct = read_state(Path(path).parent)
+        if acct is not None and (not isinstance(raw, dict) or raw.get("account") != acct["account"]):
+            return None
+        return normalize(raw)
     except Exception:
         return None
 

@@ -381,6 +381,24 @@ def uninstall(run=None) -> None:
     remove_launch_agents()
 
 
+def start_smoke(run=None) -> bool:
+    """Start the self-test's service once now, without waiting for it (SPEC §37: an account change makes it due),
+    where its hourly schedule is installed and enabled. It runs `force smoke --if-due`, which decides. Returns
+    whether it was started."""
+    r = _real_run if run is None else run
+    b = backend(run=r)
+    if b == "systemd":
+        if r(["systemctl", "--user", "is-enabled", "force-smoke.timer"]).stdout.strip() != "enabled":
+            return False
+        return r(["systemctl", "--user", "start", "--no-block", "force-smoke.service"]).returncode == 0
+    if b == "launchd":
+        uid, label = os.getuid(), LAUNCHD_LABELS["smoke"]
+        if not _launchd_loaded(uid, r, label):
+            return False
+        return r(["launchctl", "kickstart", f"gui/{uid}/{label}"]).returncode == 0
+    return False
+
+
 def remove_launch_agents() -> None:
     """macOS: delete Force's LaunchAgent files, even when launchd does not answer here (an ssh login): they would
     start Force at the next login. Never runs a command; nothing to do on Linux."""

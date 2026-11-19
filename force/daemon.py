@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import activity, kinds, report as report_mod, claude as claude_mod, opencode as opencode_mod, procinfo, remote as remote_mod, services, share as share_mod, updates, usage as usage_mod
+from . import account as account_mod, activity, kinds, report as report_mod, claude as claude_mod, opencode as opencode_mod, procinfo, remote as remote_mod, services, share as share_mod, updates, usage as usage_mod
 from . import config
 from . import notices as notices_mod
 from . import registry as registry_mod
@@ -288,8 +288,15 @@ class Daemon:
         self._auto_tried: dict[str, float] = {}
         self._auto_proc = None
         self._client_names: set[str] | None = None  # tmux clients attached on the last tick
-        # SPEC §53 follow Claude: name -> (pid, seen connected in this pid, disconnected since ms or None)
-        self._rc_seen: dict[str, tuple[int, bool, int | None]] = {}
+        # SPEC §53 follow Claude: name -> (pid, seen connected in this pid, disconnected since ms or None,
+        # ms this pid's watch started)
+        self._rc_seen: dict[str, tuple[int, bool, int | None, int]] = {}
+        # SPEC §21 account change: the logged-in Claude Code account, the last change (ms; Remote Control grace) and
+        # the sessions restarted for it (name -> ms), for their `why`
+        self._account: account_mod.Watch | None = None         # made on the first account step
+        st = account_mod.read_state(self.paths.state) if self.paths is not None else None
+        self._account_since_ms: int | None = st["since_ms"] if st else None
+        self._account_why: dict[str, int] = {}
         # current tick state
         self._registry = []
         self._skipping = False
@@ -618,6 +625,7 @@ class Daemon:
                 ("auto_name", self._step_auto_name, True),
                 ("crash", self._step_crash, True),
                 ("upgrade", self._step_upgrade, True),
+                ("account", self._step_account, True),
                 ("pending_rename", self._step_pending_rename, True),
                 ("title_sync", self._step_title_sync, True),
                 ("pending_restart", self._step_pending_restart, True),
@@ -901,20 +909,24 @@ class Daemon:
             return connected, None
         prev = self._rc_seen.get(entry.name)
         if prev is None or prev[0] != pid:
-            prev = (pid, False, None)           # a new process: watch afresh
-        _pid, seen, since = prev
+            prev = (pid, False, None, now_ms)   # a new process: watch afresh
+        _pid, seen, since, watch0 = prev
         if connected:
             seen, since = True, None
         elif since is None:
             since = now_ms
-        self._rc_seen[entry.name] = (pid, seen, since)
+        self._rc_seen[entry.name] = (pid, seen, since, watch0)
         choice = remote_control(entry)
         new = rc_follow(choice, connected, seen, None if since is None else now_ms - since)
-        if new is None:
+        if new is False and self._account_since_ms is not None \
+                and 0 <= now_ms - self._account_since_ms < account_mod.GRACE_MS:
+            new = None                          # the account changed: the drop is the change's, not a choice
+        if new is None or not self._rc_may_follow(entry.extra, pi, since, watch0):
             return connected, None
         with locked(self.paths.home) as reg:
             e = reg.get(entry.name)
-            if e is None:
+            # re-checked under the lock: an explicit choice made since this tick read the registry wins
+            if e is None or remote_control(e) != choice or not self._rc_may_follow(e.extra, pi, since, watch0):
                 return connected, None
             if new:
                 e.extra.pop("remote_control", None)
@@ -925,6 +937,85 @@ class Daemon:
         else:
             entry.extra["remote_control"] = False
         return connected, f"remote control: turned {'on' if new else 'off'} in the session"
+
+    @staticmethod
+    def _rc_may_follow(extra: dict, pi, since: int | None, watch0: int) -> bool:
+        """SPEC §53: an explicit choice (`force remote-control`, `rc_set_ms`) beats the follow rule for the process
+        that ran when it was made: a process whose watch or disconnection started before it (or that started a
+        clear second before it) is not followed, and nothing is followed while a restart is pending."""
+        if extra.get("pending_restart"):
+            return False
+        set_ms = extra.get("rc_set_ms")
+        if isinstance(set_ms, bool) or not isinstance(set_ms, int):
+            return True
+        started = getattr(pi, "pane_started_ms", None)
+        if isinstance(started, int) and not isinstance(started, bool) and started + 1000 <= set_ms:
+            return False
+        return watch0 > set_ms and (since is None or since > set_ms)
+
+    # --- SPEC §21: the Claude Code account changed --------------------------------------------------------------
+    ACCOUNT_WHY = "account changed: Remote Control re-registers"
+
+    def _step_account(self) -> None:
+        """A change from one logged-in Claude Code account to another (account.Watch): record it in
+        <state>/account.json, clear the usage bars, restart the sessions with Remote Control so they register under
+        the new account, and make the self-test due now."""
+        if self._account is None:
+            self._account = account_mod.Watch(self.paths.claude_dir)
+        change = self._account.poll()
+        if change is None:
+            return
+        now_ms = self._now_ms()
+        account_mod.write_state(self.paths.state, change[1], now_ms)     # before the clear: the status line reads it
+        self._account_since_ms = now_ms
+        try:
+            (self.paths.state / "usage.json").unlink()
+        except FileNotFoundError:
+            pass
+        now, later = self._account_restarts(now_ms)
+        try:
+            smoke = services.start_smoke()
+        except Exception as e:
+            _log("account", e)
+            smoke = False
+        print(f"force: Claude Code account changed: usage bars cleared; Remote Control re-registers "
+              f"({len(now)} restarting, {len(later)} after their turn); self-test "
+              f"{'started' if smoke else 'due'}", file=sys.stderr)
+
+    def _account_restarts(self, now_ms: int) -> tuple[list[str], list[str]]:
+        """SPEC §53 account change: every live Claude Code session whose choice is on restarts, keeping its
+        conversation, like `force remote-control NAME on`: now when it is idle or your turn, after this turn when it
+        works or needs you (`pending_restart`). Down sessions start on the new account anyway; Chuck has no Remote
+        Control."""
+        if os.environ.get("FORCE_NO_REMOTE_CONTROL"):
+            return [], []
+        now, later = [], []
+        seen = self._seen
+        for entry in self._live():
+            if not is_claude(entry) or is_support(entry) or not remote_control(entry):
+                continue
+            pane, status, pi, _ver = self._per_tick()[entry.name]
+            if pane is None or pane.dead:
+                continue
+            st = compute_state(entry, pi, status, seen.get(entry.name, Seen()), now_ms, self.cfg)
+            if st in (State.DOWN, State.ARCHIVED):
+                continue
+            self._account_why[entry.name] = now_ms
+            if st in (State.WORKING, State.NEEDS_YOU):
+                with locked(self.paths.home) as reg:
+                    e = reg.get(entry.name)
+                    if e is not None:
+                        e.extra["pending_restart"] = True
+                        entry.extra["pending_restart"] = True
+                later.append(entry.name)
+            else:
+                now.append(entry.name)
+        if now:
+            failed = self.cockpit.restart_many(now)
+            self._pinfo_dirty = True
+            for name in failed:
+                print(f"force: {name}: restart for the account change failed", file=sys.stderr)
+        return now, later
 
     def _clear_title_sync(self, name: str, why: str) -> None:
         with locked(self.paths.home) as reg:
@@ -937,12 +1028,14 @@ class Daemon:
     def _smoke_status(self) -> dict | None:
         """{"ok", "at"} (plus "reason" when it failed) of the last `force smoke` run (SPEC §37), None when
         there was none."""
-        from .smoke import read_last, reason
+        from .smoke import USAGE_LIMIT, read_last, reason
         last = read_last(self.paths.state / "smoke")
         if not isinstance(last, dict):
             return None
         if last.get("ok"):
             return {"ok": True, "at": last.get("at")}
+        if "ok" in last and last["ok"] is None:      # stopped by the usage limit: no failure, no ✖
+            return {"ok": None, "at": last.get("at"), "reason": last.get("reason") or USAGE_LIMIT}
         why = last.get("reason") or reason(last.get("checks"))
         return {"ok": False, "at": last.get("at"), "reason": why or "self-test failed"}
 
@@ -1247,6 +1340,9 @@ class Daemon:
                 rc_choice = remote_control(entry)
                 if rc_clause:
                     clauses.append(rc_clause)
+                at = self._account_why.get(name)
+                if at is not None and 0 <= now_ms - at < account_mod.GRACE_MS:
+                    clauses.append(self.ACCOUNT_WHY)
             note = None
             mark = None if is_shell(entry) else self.cockpit.restarted(name)
             if mark is not None:
@@ -1278,6 +1374,8 @@ class Daemon:
         ids, names = {e.session_id for e in self._registry}, {e.name for e in self._registry}
         for n in [n for n in self._rc_seen if n not in names]:
             self._rc_seen.pop(n)
+        for n in [n for n, at in self._account_why.items() if n not in names or now_ms - at >= account_mod.GRACE_MS]:
+            self._account_why.pop(n)
         for k in [k for k in self._reply if k not in ids]:
             del self._reply[k]
         for k in [k for k in self._oc_reply if k not in names]:

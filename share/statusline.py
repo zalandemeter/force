@@ -9,6 +9,11 @@ nothing, so Claude shows no status line. Standard library only; never fails (Cla
 Every session writes the same file, and an idle session still reports the usage of its last request, so a
 window is merged, not overwritten: within one window (same resets_at) usage only grows, so the higher
 percentage wins; a later resets_at is a new window and replaces it; an earlier one is stale and is ignored.
+
+After the Claude Code account changed (the daemon wrote <state>/account.json, next to usage.json), a session that
+made no request since then still reports the old account's figures: a write is dropped while its transcript
+(`transcript_path`) is older than the change. Accepted writes carry the account; the saved figures of another account
+(or of none) are replaced whole, whatever their resets_at, and the normal merge resumes from there.
 """
 import json
 import os
@@ -29,6 +34,21 @@ def _merge(old, new):
     return new if new["used_percentage"] >= old["used_percentage"] else old
 
 
+def _account(usage_path):
+    """<state>/account.json next to usage.json: {"account", "since_ms"}, or None (no change seen)."""
+    try:
+        with open(os.path.join(os.path.dirname(usage_path) or ".", "account.json")) as f:
+            d = json.loads(f.read(4096))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not isinstance(d.get("account"), str):
+        return None
+    since = d.get("since_ms")
+    if isinstance(since, bool) or not isinstance(since, (int, float)):
+        return None
+    return d
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         return 0
@@ -43,15 +63,27 @@ def main() -> int:
     if not any(isinstance(v, dict) for v in out.values()):
         return 0
     path = sys.argv[1]
+    acct = _account(path)
+    if acct is not None:
+        transcript = data.get("transcript_path")
+        if isinstance(transcript, str) and transcript:
+            try:
+                mtime_ms = os.stat(transcript).st_mtime * 1000
+            except OSError:
+                return 0                     # no request yet
+            if mtime_ms < acct["since_ms"]:
+                return 0                     # no request since the account changed: the old account's figures
     saved = ""
     try:
         with open(path) as f:
             saved = f.read()
         old = json.loads(saved)
-        if isinstance(old, dict):
+        if isinstance(old, dict) and (acct is None or old.get("account") == acct["account"]):
             out = {k: _merge(old.get(k), out[k]) for k in out}
     except (OSError, ValueError):
         pass
+    if acct is not None:
+        out["account"] = acct["account"]
     text = json.dumps(out, sort_keys=True)
     if text == saved:
         return 0                             # unchanged: no write
