@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end install check (SPEC §51), run by CI on a fresh macOS runner (works on Linux too): install a built
-# release from a local web root exactly as a user would, start the cockpit, open a shell session and an agent
-# session (tests/fake_claude.py standing in for Claude Code), capture the cockpit's screen, then uninstall.
+# release from a local web root exactly as a user would, check the services and the direct link daemon, start the
+# cockpit, open a shell session and an agent session (tests/fake_claude.py standing in for Claude Code), capture the
+# cockpit's screen, then uninstall (no link daemon left running).
 #
 #   scripts/e2e-install.sh DIST OUTDIR
 #
@@ -59,6 +60,16 @@ fi
 wait_for 30 "the host tmux server" "$HOME/.local/share/force/app/share/tmux-bin/tmux" -L force show -gv exit-empty
 wait_for 30 "the daemon's snapshot" test -s "$HOME/.local/state/force/snapshot.json"
 
+step "the direct link daemon (SPEC §56.2: its service runs with directLink on, the default)"
+L="$HOME/.local/share/force/app/share/bin/force-link"
+"$L" version
+link_running() { "$L" status --state "$HOME/.local/state/force" --json | grep -Eq '"running": ?true'; }
+if [[ "$(uname -s)" == Darwin ]]; then
+  launchctl print "gui/$(id -u)/cc.useforce.force-link" > "$OUT/launchd-link.txt" 2>&1 || true
+fi
+wait_for 30 "the link daemon" link_running
+"$L" status --state "$HOME/.local/state/force" > "$OUT/link-status.txt"
+
 step "sessions: a shell and an agent"
 "$F" new e2e-shell --shell --no-switch
 "$F" new e2e-agent --kind claude --no-switch
@@ -89,4 +100,7 @@ step "uninstall"
 if [[ "$(uname -s)" == Darwin ]]; then
   ! ls "$HOME"/Library/LaunchAgents/cc.useforce.* >/dev/null 2>&1 || { echo "e2e-install: launch agents left" >&2; exit 1; }
 fi
+# nothing of the direct link is left running, nor this host's link identity
+wait_for 10 "the link daemon to stop" sh -c "! pgrep -u $(id -u) -f 'force-lin[k] daemon'"
+[[ ! -e "$HOME/.local/state/force/link" ]] || { echo "e2e-install: <state>/link is still there" >&2; exit 1; }
 echo "e2e-install: ok"

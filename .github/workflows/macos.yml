@@ -1,6 +1,6 @@
 # macOS (SPEC §51): build the darwin-arm64 tarball on a GitHub Mac, install it as a user would (curl | sh from a
-# local web root), open a shell and an agent session, capture the cockpit's screen, uninstall. The tarball, the
-# screen captures and the logs are kept as the run's artifacts.
+# local web root), check the direct link daemon, open a shell and an agent session, capture the cockpit's screen,
+# uninstall. The tarball, the screen captures and the logs are kept as the run's artifacts.
 # By hand (Actions → macOS → Run workflow) with `debug` on, the job ends in an SSH session into the runner
 # (tmate) that only the person who started the run can open, for live debugging; it closes when they exit or
 # after the job's time limit.
@@ -69,6 +69,7 @@ jobs:
             e2e-out
             build/out-darwin/dist/releases
             ~/.local/state/force/daemon.log
+            ~/.local/state/force/link.log
           retention-days: 14
           if-no-files-found: warn
       - name: SSH into the runner (debug runs only)

@@ -1,5 +1,6 @@
-# Tests on every push to main and every pull request: the Python package (with tmux, as Force runs it), the two
-# Rust crates, and the website build; the package and the crates on macOS too (SPEC §51).
+# Tests on every push to main and every pull request: the Python package (with tmux, as Force runs it), the
+# Rust crates (and the link daemon started and stopped), and the website build; the package and the crates on macOS
+# too (SPEC §51).
 name: CI
 
 on:
@@ -57,6 +58,23 @@ jobs:
         run: cargo test --locked --release --manifest-path crates/intro/Cargo.toml
       - name: Link
         run: cargo test --locked --release --manifest-path crates/link/Cargo.toml
+      - name: The link daemon runs (force-link version; a daemon on a test state dir, port 0, a few seconds, SIGTERM)
+        run: |
+          cargo build --locked --release -q --manifest-path crates/link/Cargo.toml
+          L=crates/link/target/release/force-link
+          "$L" version
+          d="$(mktemp -d)"; mkdir -m 700 "$d/state"; echo '{"hosts":[]}' > "$d/hosts.json"
+          "$L" daemon --state "$d/state" --hosts "$d/hosts.json" --peers "$d/peers.json" --port 0 2> "$d/log" &
+          pid=$!
+          for _ in $(seq 20); do "$L" status --state "$d/state" --json >/dev/null 2>&1 && break; sleep 0.5; done
+          "$L" status --state "$d/state" --json | tee "$d/status.json"
+          grep -Eq '"running": ?true' "$d/status.json"
+          grep -qx "$pid" "$d/state/link/lock"
+          sleep 3
+          kill -TERM "$pid"
+          rc=0; wait "$pid" || rc=$?
+          cat "$d/log"
+          test "$rc" = 143
 
   python-macos:
     name: Python 3.12 (macOS)
@@ -104,6 +122,23 @@ jobs:
         run: cargo test --locked --release --manifest-path crates/intro/Cargo.toml
       - name: Link
         run: cargo test --locked --release --manifest-path crates/link/Cargo.toml
+      - name: The link daemon runs (force-link version; a daemon on a test state dir, port 0, a few seconds, SIGTERM)
+        run: |
+          cargo build --locked --release -q --manifest-path crates/link/Cargo.toml
+          L=crates/link/target/release/force-link
+          "$L" version
+          d="$(mktemp -d)"; mkdir -m 700 "$d/state"; echo '{"hosts":[]}' > "$d/hosts.json"
+          "$L" daemon --state "$d/state" --hosts "$d/hosts.json" --peers "$d/peers.json" --port 0 2> "$d/log" &
+          pid=$!
+          for _ in $(seq 20); do "$L" status --state "$d/state" --json >/dev/null 2>&1 && break; sleep 0.5; done
+          "$L" status --state "$d/state" --json | tee "$d/status.json"
+          grep -Eq '"running": ?true' "$d/status.json"
+          grep -qx "$pid" "$d/state/link/lock"
+          sleep 3
+          kill -TERM "$pid"
+          rc=0; wait "$pid" || rc=$?
+          cat "$d/log"
+          test "$rc" = 143
 
   website:
     name: Website

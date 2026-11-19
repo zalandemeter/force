@@ -20,3 +20,5 @@ cp /tmp/b/tmux-*/COPYING /out/licenses/tmux.txt
 cp /tmp/b/libevent-*/LICENSE /out/licenses/libevent.txt
 cp /tmp/b/ncurses-*/COPYING /out/licenses/ncurses.txt
 for f in /out/bin/*; do file "$f" 2>/dev/null | grep -q "statically linked\|static-pie" || { echo "inside: $f is not static" >&2; exit 1; }; done
+# the direct link (SPEC §56.2; iroh with ring, built against musl here) runs
+/out/bin/force-link version >/dev/null || { echo "inside: force-link does not run" >&2; exit 1; }

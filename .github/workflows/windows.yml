@@ -1,6 +1,7 @@
 # Windows (SPEC §55): build the Linux tarball, then on a GitHub Windows runner install it as a user would, with
-# install.ps1 into WSL (Ubuntu), and use Force from PowerShell and cmd: a shell session, the list, the session
-# still there after the step ends, `force api` the way a frontend starts it through wsl.exe, and the uninstall.
+# install.ps1 into WSL (Ubuntu), and use Force from PowerShell and cmd: the link daemon, a shell session, the list,
+# the session still there after the step ends, `force api` the way a frontend starts it through wsl.exe, and the
+# uninstall.
 name: Windows
 
 on:
@@ -8,6 +9,10 @@ on:
     paths:
       - force/**
       - share/**
+      - systemd/**
+      - crates/**
+      - build/Dockerfile
+      - build/inside.sh
       - website/root/install.ps1
       - scripts/build-release.sh
       - scripts/fill-installer.py
@@ -106,6 +111,20 @@ jobs:
           $list = force list | Out-String
           $list
           if ($list -notmatch 'e2e-shell') { throw "e2e-shell is not in force list" }
+      - name: The direct link daemon runs under WSL's systemd (SPEC §56.2, directLink on by default)
+        run: |
+          $status = '~/.local/share/force/app/share/bin/force-link status --state ~/.local/state/force --json'
+          $out = ''
+          for ($i = 0; $i -lt 30; $i++) {
+            $out = wsl.exe -d Ubuntu-24.04 --exec sh -c $status | Out-String
+            if ($out -match '"running": ?true') { break }
+            Start-Sleep -Seconds 1
+          }
+          $out
+          if ($out -notmatch '"running": ?true') {
+            wsl.exe -d Ubuntu-24.04 --exec sh -c 'systemctl --user status force-link --no-pager; journalctl --user -u force-link -n 40 --no-pager'
+            throw "force-link status does not say running"
+          }
       - name: force from cmd, in a Windows folder
         shell: cmd
         run: |
@@ -132,6 +151,8 @@ jobs:
           if (Test-Path (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\Force')) { throw "the Force profile is still there" }
           wsl.exe -d Ubuntu-24.04 --exec sh -c 'test ! -e ~/.local/bin/force'
           if ($LASTEXITCODE) { throw "Force is still installed in WSL" }
+          wsl.exe -d Ubuntu-24.04 --exec sh -c '! pgrep -u $(id -u) -f force-lin[k].daemon'
+          if ($LASTEXITCODE) { throw "a force-link daemon is still running in WSL" }
       - name: Force's logs
         if: always()
-        run: wsl.exe -d Ubuntu-24.04 --exec sh -c 'tail -n 80 ~/.local/state/force/daemon.log 2>/dev/null; journalctl --user -u force -n 80 --no-pager 2>/dev/null || true'
+        run: wsl.exe -d Ubuntu-24.04 --exec sh -c 'tail -n 80 ~/.local/state/force/daemon.log 2>/dev/null; journalctl --user -u force -u force-link -n 80 --no-pager 2>/dev/null || true'

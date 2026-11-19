@@ -20,6 +20,7 @@ on:
       - scripts/version.sh
       - share/get-force.sh
       - build/Dockerfile
+      - build/inside.sh
 
 permissions:
   contents: read
