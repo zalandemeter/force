@@ -929,7 +929,7 @@ daemon on a separate tmux server (`forcetest-smoke-<pid>`) with its own registry
 | turn | PONG prompt: working, then your turn; the reply is in the transcript | same; the daemon learns the session id; reply via `opencode export` |
 | needs you | a `touch` the work folder's settings make ask for (`permissions.ask`): needs you, Esc denies | same (`opencode.json` `permission.bash = ask`) |
 | restart | resumes the same session id | — |
-| move | to the second work folder: memory pinned (`autoMemoryDirectory`), transcript carried, the reply recalls PONG and gives the new folder's codename (BRAVO) | re-homed: recalls PONG and says BRAVO |
+| move | to the second work folder: memory pinned (`autoMemoryDirectory`), transcript carried, the reply recalls PONG and gives the new folder's codename (BRAVO) | re-homed: recalls PONG and says BRAVO, or recalls PONG in a reply OpenCode records as made in the new folder (a small model can overlook the codename line in a long prompt) |
 | move while busy | `force move` during a long reply: deferred (`pending_move`, card "moves after this turn"), the daemon moves it back after the turn, same conversation | — |
 
 - Work folders `<state>/smoke/work/{a,b}`: git repos (separate OpenCode projects) with CLAUDE.md /
