@@ -453,16 +453,24 @@ class Run:
             time.sleep(1)
         return text
 
-    def recall(self, name: str, read, what: str) -> None:
+    def recall(self, name: str, read, what: str, folder=None) -> None:
         """Ask for the earlier reply and the codename; `read()` gives the reply to that prompt. The reply can
-        land a moment after the card goes idle; a model answering off topic gets asked once more."""
+        land a moment after the card goes idle; a model answering off topic gets asked once more. `folder()`
+        (OpenCode): the folder the agent answered from, by its own record; when it is the new folder, a reply
+        that recalls PONG passes without the codename (a small model overlooks that one line in a long prompt,
+        though the new folder's AGENTS.md is in it)."""
         reply = ""
         for attempt in (1, 2):
             self.turn(name, PROMPT_RECALL, what)
             reply = self.reply(read, ("PONG", "BRAVO"))
             if "PONG" in reply and "BRAVO" in reply:
                 return
+            if "PONG" in reply and folder is not None and folder() == str(self.b):
+                return
             self.say(f"    attempt {attempt}: reply {reply[-120:]!r}")
+        if folder is not None:
+            raise SmokeFail(f"{what}: the reply was {reply[-200:]!r}, answered in {folder()!r} (want PONG, "
+                            f"from the new folder)")
         raise SmokeFail(f"{what}: the reply was {reply[-200:]!r} (want PONG and the new folder's BRAVO)")
 
     def live_session_id(self, name: str) -> str | None:
@@ -559,14 +567,26 @@ class Run:
         e = load(self.paths.registry).get(name)
         return e.extra.get("oc_session") if e else None
 
-    def oc_text(self, sid: str, cwd: Path, after: str | None = None) -> str:
+    def oc_export(self, sid: str, cwd: Path) -> dict:
         from . import opencode
         out = subprocess.run([opencode.installed(), "export", sid], cwd=cwd, capture_output=True, text=True,
                              timeout=120, env=dict(os.environ, OPENCODE_DISABLE_AUTOUPDATE="1"))
         try:
             data = json.loads(out.stdout)
         except ValueError:
-            return ""
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def oc_folder(self, sid: str, cwd: Path) -> str | None:
+        """The working folder OpenCode recorded on the session's last reply (`path.cwd`)."""
+        for m in reversed(self.oc_export(sid, cwd).get("messages") or []):
+            info = m.get("info") or {}
+            if info.get("role") == "assistant":
+                return (info.get("path") or {}).get("cwd")
+        return None
+
+    def oc_text(self, sid: str, cwd: Path, after: str | None = None) -> str:
+        data = self.oc_export(sid, cwd)
         texts = []
         for m in data.get("messages") or []:
             role = (m.get("info") or {}).get("role")
@@ -632,7 +652,8 @@ class Run:
             self.cockpit.move(name, str(self.b))
             self.wait(name, {"IDLE", "YOUR_TURN"}, 180, "move")
             time.sleep(3)
-            self.recall(name, lambda: self.oc_text(sid, self.b, after=PROMPT_RECALL[:40]), "after the move")
+            self.recall(name, lambda: self.oc_text(sid, self.b, after=PROMPT_RECALL[:40]), "after the move",
+                        folder=lambda: self.oc_folder(sid, self.b))
 
         for n, fn in (("opencode: start", start), ("opencode: turn", turn), ("opencode: needs you", needs_you),
                       ("opencode: move", move)):

@@ -507,3 +507,41 @@ def test_start_smoke_uses_the_installed_schedule(monkeypatch):
     assert all("start" not in c for c in calls), "no self-test schedule installed: nothing started"
     monkeypatch.setattr(services, "backend", lambda env=None, run=None: None)
     assert services.start_smoke(run=fake(True)) is False
+
+
+class _Recall:
+    """Just what Run.recall uses; each test sets `turn`, which gives the next reply."""
+    reply = smoke.Run.reply
+
+    def __init__(self, replies, b="/w/b"):
+        self.replies, self.b, self.said = list(replies), Path(b), []
+
+    def say(self, text):
+        self.said.append(text)
+
+
+@pytest.mark.parametrize("replies,folder,ok", [
+    (["PONG BRAVO"], None, True),                       # Claude: the codename is required
+    (["PONG opencode", "PONG opencode"], None, False),
+    (["PONG opencode"], "/w/b", True),                  # OpenCode answered from the new folder: PONG is enough
+    (["PONG opencode", "PONG opencode"], "/w/a", False),  # still in the old folder
+    (["BRAVO", "BRAVO"], "/w/b", False),                # the conversation did not come along
+])
+def test_recall_after_a_move(monkeypatch, replies, folder, ok):
+    monkeypatch.setattr(smoke.time, "sleep", lambda s: None)
+    clock = iter(range(0, 10_000, 10))
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(clock))
+    r = _Recall(replies)
+    it = iter(replies)
+    current = {"t": ""}
+
+    def turn(name, prompt, what):
+        current["t"] = next(it)
+    r.turn = turn
+    call = lambda: smoke.Run.recall(r, "s", lambda: current["t"], "after the move",
+                                    folder=(lambda: folder) if folder else None)
+    if ok:
+        call()
+    else:
+        with pytest.raises(smoke.SmokeFail):
+            call()
