@@ -1025,7 +1025,7 @@ impl App {
     // --- actions ------------------------------------------------------------------
     fn activate(&mut self, target: &str) {
         if target == ARCHIVED_TARGET {
-            self.popup("archived", None, 72, 21);
+            self.popup("archived", None, 72, 23);
             return;
         }
         if target == NEW_TARGET {

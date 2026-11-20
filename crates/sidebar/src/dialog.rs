@@ -33,7 +33,7 @@ pub const C_DOWN: Color = Color::Rgb(0xd7, 0x5f, 0x5f);
 
 const CONTENT_LEFT: usize = 2;
 /// Row layout below the title (row 1): a blank row, then the content.
-const ARCH_LIST_TOP: usize = 3;
+const ARCH_LIST_TOP: usize = 5;
 const JUMP_FILTER_Y: usize = 3;
 const JUMP_LIST_TOP: usize = 5;
 const SPACER: usize = 3;
@@ -350,6 +350,8 @@ pub struct Dialog {
 
     // archived
     pub arch_cursor: usize,
+    pub arch_filter: String,
+    pub arch_filter_cursor: usize,
     pub pending_forget: Option<String>,
 
     // jump
@@ -449,6 +451,8 @@ impl Dialog {
             warn_kind: StatusKind::Neutral,
             warn_text: String::new(),
             arch_cursor: 0,
+            arch_filter: String::new(),
+            arch_filter_cursor: 0,
             pending_forget: None,
             jump_filter: String::new(),
             jump_cursor: 0,
@@ -739,7 +743,7 @@ impl Dialog {
                     vec![("y", "delete"), ("n", "cancel")]
                 }
             }
-            Kind::Archived => vec![("enter", "restore"), ("d", "delete"), ("esc", "close")],
+            Kind::Archived => vec![("enter", "restore"), ("ctrl+d", "delete"), ("esc", "close")],
             Kind::Jump => vec![("enter", "jump"), ("↑↓", "select"), ("esc", "close")],
         }
     }
@@ -780,6 +784,13 @@ impl Dialog {
             Kind::Rename => self.input_cursor(4, &self.rename_input, self.rename_cursor),
             Kind::Move => self.input_cursor(4, &self.move_input, self.move_cursor),
             Kind::Jump => self.input_cursor(JUMP_FILTER_Y, &self.jump_filter, self.jump_cursor),
+            Kind::Archived => {
+                if archived_sorted(&self.entries).is_empty() {
+                    None
+                } else {
+                    self.input_cursor(JUMP_FILTER_Y, &self.arch_filter, self.arch_filter_cursor)
+                }
+            }
             _ => None,
         }
     }
@@ -971,15 +982,21 @@ impl Dialog {
     }
 
     fn draw_archived(&mut self, buf: &mut Buffer) {
-        let entries = archived_sorted(&self.entries);
+        let all = archived_sorted(&self.entries);
+        let shown = self.arch_shown();
         // the count in the title: the list can hold more than fits (11 archived, 7 shown)
-        let title = if entries.is_empty() { "Archived sessions".to_string() }
-                    else { format!("Archived sessions ({})", entries.len()) };
+        let title = if all.is_empty() {
+            "Archived sessions".to_string()
+        } else if self.arch_filter.trim().is_empty() {
+            format!("Archived sessions ({})", all.len())
+        } else {
+            format!("Archived sessions ({} of {})", shown.len(), all.len())
+        };
         self.draw_title(buf, '\u{F187}', &title);
         let list_top = ARCH_LIST_TOP;
         let bottom = self.h.saturating_sub(3);
         let list_h = bottom.saturating_sub(list_top);
-        if entries.is_empty() {
+        if all.is_empty() {
             let lines = ["Nothing archived yet.", "Archive a session with Ctrl+Space a."];
             let start = list_top + (list_h / 2).saturating_sub(1);
             for (i, l) in lines.iter().enumerate() {
@@ -989,13 +1006,21 @@ impl Dialog {
             self.status_text_y(buf, bottom);
             return;
         }
-        let (top, visible, up, down) = self.arch_layout(entries.len());
+        self.draw_input(buf, JUMP_FILTER_Y, &self.arch_filter, self.arch_filter_cursor, "type to filter by name or folder", true);
+        if shown.is_empty() {
+            let msg = "no archived session matches";
+            let x = CONTENT_LEFT + self.content_w().saturating_sub(msg.width()) / 2;
+            let _ = put(buf, x, list_top, msg, FG_DIM);
+            self.status_text_y(buf, bottom);
+            return;
+        }
+        let (top, visible, up, down) = self.arch_layout(shown.len());
         let more = |n: usize, arrow: char| format!("{arrow} {n} more");
         if up {
             let _ = put(buf, CONTENT_LEFT, list_top, &more(top, '↑'), FG_DIM);
         }
         let mut row = list_top + up as usize;
-        for (idx, e) in entries.iter().enumerate().skip(top).take(visible) {
+        for (idx, e) in shown.iter().enumerate().skip(top).take(visible) {
             if row + 1 >= bottom {
                 break;
             }
@@ -1013,10 +1038,15 @@ impl Dialog {
             row += 2;
         }
         if down {
-            let below = entries.len().saturating_sub(top + visible);
+            let below = shown.len().saturating_sub(top + visible);
             let _ = put(buf, CONTENT_LEFT, list_top + up as usize + 2 * visible, &more(below, '↓'), FG_DIM);
         }
         self.status_text_y(buf, bottom);
+    }
+
+    /// The archived list as shown under the current filter, newest first.
+    fn arch_shown(&self) -> Vec<RegistryEntry> {
+        filter_archived(&archived_sorted(&self.entries), &self.arch_filter, &self.home)
     }
 
     /// The archived list's layout: (first entry shown, entries that fit, a `↑ N more` row above them, a `↓ N more`
@@ -1171,7 +1201,7 @@ impl Dialog {
             Kind::Rename => self.key_rename(code, ctrl),
             Kind::Move => self.key_move(code, ctrl),
             Kind::Archive | Kind::Delete => self.key_confirm(code),
-            Kind::Archived => self.key_archived(code),
+            Kind::Archived => self.key_archived(code, ctrl),
             Kind::Jump => self.key_jump(code, ctrl),
         }
     }
@@ -1188,7 +1218,7 @@ impl Dialog {
             let step = |cur: usize, n: usize| if down { (cur + 1).min(n.saturating_sub(1)) } else { cur.saturating_sub(1) };
             match self.kind {
                 Kind::Archived => {
-                    let n = archived_sorted(&self.entries).len();
+                    let n = self.arch_shown().len();
                     self.arch_cursor = step(self.arch_cursor, n);
                 }
                 Kind::Jump => self.jump_sel = step(self.jump_sel, self.jump_shown.len()),
@@ -1218,7 +1248,7 @@ impl Dialog {
                 }
             }
             Kind::Archived => {
-                let entries = archived_sorted(&self.entries);
+                let entries = self.arch_shown();
                 if entries.is_empty() {
                     return;
                 }
@@ -1540,29 +1570,49 @@ impl Dialog {
         }
     }
 
-    fn key_archived(&mut self, code: crossterm::event::KeyCode) {
+    fn key_archived(&mut self, code: crossterm::event::KeyCode, ctrl: bool) {
+        if ctrl && code == crossterm::event::KeyCode::Char('u') {
+            self.arch_filter.clear();
+            self.arch_filter_cursor = 0;
+            self.arch_cursor = 0;
+            return;
+        }
+        if (ctrl && code == crossterm::event::KeyCode::Char('d'))
+            || code == crossterm::event::KeyCode::Delete {
+            self.action_forget();
+            return;
+        }
         match code {
-            crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q') => self.finish(0),
-            crossterm::event::KeyCode::Char('d') | crossterm::event::KeyCode::Char('f') => self.action_forget(),
+            crossterm::event::KeyCode::Esc => self.finish(0),
             crossterm::event::KeyCode::Up => {
-                let n = archived_sorted(&self.entries).len();
+                let n = self.arch_shown().len();
                 if n > 0 {
                     self.arch_cursor = (self.arch_cursor + n - 1) % n;
                 }
             }
             crossterm::event::KeyCode::Down => {
-                let n = archived_sorted(&self.entries).len();
+                let n = self.arch_shown().len();
                 if n > 0 {
                     self.arch_cursor = (self.arch_cursor + 1) % n;
                 }
             }
             crossterm::event::KeyCode::Enter => self.action_arch_choose(),
-            _ => {}
+            _ => {
+                // typing edits the filter; on a change the selection resets to the first match and any
+                // pending-delete warning goes away
+                let before = self.arch_filter.clone();
+                edit_text(&mut self.arch_filter, &mut self.arch_filter_cursor, code);
+                if self.arch_filter != before {
+                    self.arch_cursor = 0;
+                    self.pending_forget = None;
+                    self.set_status(StatusKind::Neutral, "");
+                }
+            }
         }
     }
 
     fn selected_archived_name(&self) -> Option<String> {
-        archived_sorted(&self.entries)
+        self.arch_shown()
             .get(self.arch_cursor)
             .map(|e| e.name.clone())
     }
@@ -2043,6 +2093,34 @@ pub fn rank_sessions(ordered: &[JumpSession], filter: &str) -> Vec<JumpSession> 
     ranked.into_iter().map(|(_, _, s)| s.clone()).collect()
 }
 
+/// Rank archived `entries` (newest first) against a filter: name prefix 0, name substring 1, name subsequence 2,
+/// the folder as shown substring 3, else hidden; stable by position. Empty/whitespace-only filters leave the list
+/// unchanged.
+pub fn filter_archived(entries: &[RegistryEntry], filter: &str, home: &str) -> Vec<RegistryEntry> {
+    if filter.trim().is_empty() {
+        return entries.to_vec();
+    }
+    let low = filter.trim().to_lowercase();
+    let mut ranked: Vec<(u8, usize, &RegistryEntry)> = Vec::new();
+    for (pos, e) in entries.iter().enumerate() {
+        let name = e.name.to_lowercase();
+        let rank = if name.starts_with(&low) {
+            0
+        } else if name.contains(&low) {
+            1
+        } else if is_subsequence(&low, &name) {
+            2
+        } else if display_cwd(&e.cwd, home).to_lowercase().contains(&low) {
+            3
+        } else {
+            continue;
+        };
+        ranked.push((rank, pos, e));
+    }
+    ranked.sort_by_key(|(r, p, _)| (*r, *p));
+    ranked.into_iter().map(|(_, _, e)| e.clone()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2295,6 +2373,52 @@ mod tests {
     fn archived_meta_text() {
         assert_eq!(display_cwd("/home/u", "/home/u"), "~");
         assert_eq!(display_cwd("/home/u/proj", "/home/u"), "~/proj");
+    }
+
+    #[test]
+    fn filter_archived_ranking() {
+        let e = |name: &str, cwd: &str| RegistryEntry {
+            name: name.into(), cwd: cwd.into(), archived: true, archived_at: None,
+            pending_name: None, kind: "claude".into(),
+        };
+        let home = "/home/u";
+        // rank 1 (name substring) x2 at positions 0,4; rank 0 (prefix) at 1; rank 2 (subsequence) at 2;
+        // rank 3 (folder as shown) at 3
+        let entries = vec![
+            e("xabcx", "/tmp"),
+            e("abc", "/tmp"),
+            e("xabxc", "/tmp"),
+            e("zzz", "/home/u/abcd"),
+            e("xabc2", "/tmp"),
+        ];
+        // prefix < substring < subsequence < folder, stable within a rank
+        let got = filter_archived(&entries, "abc", home);
+        let names: Vec<&str> = got.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["abc", "xabcx", "xabc2", "xabxc", "zzz"]);
+        // non-matching entries are hidden
+        assert_eq!(got.len(), 5);
+        // case-insensitive
+        let got2 = filter_archived(&entries, "ABC", home);
+        assert_eq!(got2.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), names);
+        // a name-only subsequence sits above a folder substring
+        let only = vec![e("abXc", "/tmp"), e("nomatch", "/home/u/abcde")];
+        let got3 = filter_archived(&only, "abc", home);
+        let names3: Vec<&str> = got3.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names3, ["abXc", "nomatch"]);
+        // empty / whitespace filter leaves the list unchanged (and in order)
+        assert_eq!(filter_archived(&entries, "", home).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                   ["xabcx", "abc", "xabxc", "zzz", "xabc2"]);
+        assert_eq!(filter_archived(&entries, "   ", home), entries);
+        // a filter matching nothing is hidden
+        assert!(filter_archived(&entries, "qq", home).is_empty());
+        // folder match uses the ~/ form: "~/pr" and "proj" both match a cwd under home
+        assert_eq!(filter_archived(&entries, "~/ab", home).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                   ["zzz"]);
+        let proj = vec![e("data", "/home/u/proj")];
+        assert_eq!(filter_archived(&proj, "~/pr", home).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                   ["data"]);
+        assert_eq!(filter_archived(&proj, "proj", home).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                   ["data"]);
     }
 
     // ---- exact argv per action ----------------------------------------------------------
@@ -2831,7 +2955,7 @@ mod tests {
         Box::new(R)
     }
 
-    fn archived_reg(n: usize) -> std::path::PathBuf {
+    pub fn archived_reg(n: usize) -> std::path::PathBuf {
         let rows: Vec<String> = (0..n).map(|i| format!(
             r#"{{"name":"s{i:02}","cwd":"/tmp","archived":true,"archived_at":"2026-11-{:02}T00:00:00Z","created_at":"x","order":0}}"#,
             28 - i)).collect();
@@ -2935,14 +3059,71 @@ mod tests {
         let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
         let runner = FakeRunner::new();
         let mut d = Dialog::new(Kind::Archived, None, &reg, &snap, Box::new(runner.clone()), Tier::Plain, 72, 20);
-        // d -> sets pending confirm, then enter -> forget
-        d.handle_key(key(KeyCode::Char('d')), 0);
+        // ctrl+d -> sets pending confirm, then enter -> forget
+        d.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL), 0);
         assert!(d.pending_forget.is_some());
         assert!(d.status_text.contains("cannot be restored"));
         d.handle_key(key(KeyCode::Enter), 0);
         let c = runner.logs.cockpit.borrow();
         assert_eq!(c[0], vec!["forget", "old"]);
         assert!(d.pending_forget.is_none());
+    }
+
+    #[test]
+    fn archived_letters_type_in_filter_and_delete_keys_forget() {
+        let reg = tmp_file(r#"{"sessions":[{"name":"old","cwd":"/home/u","archived":true,"archived_at":"2024-01-01T00:00:00Z","created_at":"x","order":0}]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let mut d = Dialog::new(Kind::Archived, None, &reg, &snap, Box::new(FakeRunner::new()), Tier::Plain, 72, 20);
+        // 'd','f','q' type into the filter, no pending forget, the dialog stays open
+        for c in ['d', 'f', 'q'] {
+            d.handle_key(key(KeyCode::Char(c)), 0);
+        }
+        assert_eq!(d.arch_filter, "dfq", "d/f/q type into the filter");
+        assert!(d.pending_forget.is_none());
+        assert!(!d.done, "q no longer closes the archived dialog");
+        // Delete arms delete-with-confirm; typing clears a pending delete-warning
+        d.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL), 0);   // clear the filter
+        d.handle_key(key(KeyCode::Delete), 0);
+        assert!(d.pending_forget.is_some(), "Delete arms delete-with-confirm");
+        d.handle_key(key(KeyCode::Char('x')), 0);
+        assert!(d.pending_forget.is_none(), "typing clears a pending delete");
+        assert_eq!(d.status_kind, StatusKind::Neutral);
+        // ctrl+d arms it too
+        d.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL), 0);
+        d.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL), 0);
+        assert!(d.pending_forget.is_some(), "ctrl+d arms delete-with-confirm");
+    }
+
+    #[test]
+    fn archived_ctrl_u_clears_the_filter() {
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let mut d = Dialog::new(Kind::Archived, None, &archived_reg(11), &snap, Box::new(FakeRunner::new()), Tier::Plain, 72, 19);
+        d.handle_key(key(KeyCode::Char('s')), 0);
+        d.handle_key(key(KeyCode::Char('0')), 0);
+        assert_eq!(d.arch_filter, "s0");
+        d.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL), 0);
+        assert!(d.arch_filter.is_empty());
+        assert_eq!(d.arch_filter_cursor, 0);
+        assert_eq!(d.arch_cursor, 0);
+    }
+
+    #[test]
+    fn archived_click_on_filtered_row_restores_it() {
+        let reg = tmp_file(r#"{"sessions":[
+            {"name":"aaa","cwd":"/tmp","archived":true,"archived_at":"2026-11-03T00:00:00Z","created_at":"x","order":0},
+            {"name":"baa","cwd":"/tmp","archived":true,"archived_at":"2026-11-02T00:00:00Z","created_at":"x","order":0},
+            {"name":"bba","cwd":"/tmp","archived":true,"archived_at":"2026-11-01T00:00:00Z","created_at":"x","order":0}
+        ]}"#);
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let runner = FakeRunner::new();
+        let mut d = Dialog::new(Kind::Archived, None, &reg, &snap, Box::new(runner.clone()), Tier::Plain, 72, 19);
+        d.handle_key(key(KeyCode::Char('a')), 0);   // filter "a" -> [aaa(prefix), baa(substring), bba(substring)]
+        assert_eq!(d.arch_shown().iter().map(|e| e.name.clone()).collect::<Vec<_>>(), ["aaa", "baa", "bba"]);
+        // row math with ARCH_LIST_TOP 5: entry i sits at row 5 + 2*i -> click row 7 selects baa
+        d.handle_mouse(&click(10, (ARCH_LIST_TOP + 2) as u16));
+        assert!(d.done);
+        let c = runner.logs.cockpit.borrow();
+        assert_eq!(c[0], vec!["unarchive", "baa"]);
     }
 
     #[test]
@@ -2984,7 +3165,7 @@ mod layout_tests {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
-    use crate::dialog::tests::{FakeRunner, key, tmp_file};
+    use crate::dialog::tests::{FakeRunner, archived_reg, key, tmp_file};
 
     fn render(d: &mut Dialog, w: u16, h: u16) -> Buffer {
         use ratatui::layout::Rect;
@@ -3195,9 +3376,10 @@ mod layout_tests {
         let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
         let mut d = Dialog::new(Kind::Archived, None, &reg, &snap, Box::new(FakeRunner::new()), Tier::Plain, 64, 17);
         let buf = render(&mut d, 64, 17);
-        assert!(contains(&row_text(&buf, 1), "Archived sessions"), "title: {:?}", row_text(&buf, 1));
-        assert!(contains(&row_text(&buf, 3), "old"), "name on row 3: {:?}", row_text(&buf, 3));
-        assert!(contains(&row_text(&buf, 4), "archived 2025-10-09 · "), "meta: {:?}", row_text(&buf, 4));
+        assert!(contains(&row_text(&buf, 1), "Archived sessions (1)"), "title: {:?}", row_text(&buf, 1));
+        assert!(contains(&row_text(&buf, 3), "type to filter by name or folder"), "filter on row 3: {:?}", row_text(&buf, 3));
+        assert!(contains(&row_text(&buf, 5), "old"), "name on row 5: {:?}", row_text(&buf, 5));
+        assert!(contains(&row_text(&buf, 6), "archived 2025-10-09 · "), "meta: {:?}", row_text(&buf, 6));
         assert!(contains(&row_text(&buf, 15), "Enter  Restore"), "footer: {:?}", row_text(&buf, 15));
     }
 
@@ -3207,7 +3389,7 @@ mod layout_tests {
         let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
         let mut d = Dialog::new(Kind::Archived, None, &reg, &snap, Box::new(FakeRunner::new()), Tier::Plain, 64, 17);
         let buf = render(&mut d, 64, 17);
-        assert!(contains(&row_text(&buf, 4), "archived  · "), "integer archived_at -> empty date: {:?}", row_text(&buf, 4));
+        assert!(contains(&row_text(&buf, 6), "archived  · "), "integer archived_at -> empty date: {:?}", row_text(&buf, 6));
     }
 
     #[test]
@@ -3216,13 +3398,44 @@ mod layout_tests {
         let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
         let runner = FakeRunner::new();
         let mut d = Dialog::new(Kind::Archived, None, &reg, &snap, Box::new(runner.clone()), Tier::Plain, 64, 17);
-        d.handle_key(key(KeyCode::Char('d')), 0);
+        d.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL), 0);
         d.handle_key(key(KeyCode::Enter), 0);
         let c = runner.logs.cockpit.borrow();
         assert_eq!(c[0], vec!["forget", "old"]);
         assert!(d.pending_forget.is_none());
         assert!(archived_sorted(&d.entries).is_empty(), "row removed even though the fake force left the file intact");
         let _ = render(&mut d, 64, 17); // rebuild draws empty state without panic
+    }
+
+    #[test]
+    fn archived_filter_title_and_enter_restores_first_match() {
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let runner = FakeRunner::new();
+        let mut d = Dialog::new(Kind::Archived, None, &archived_reg(11), &snap, Box::new(runner.clone()), Tier::Plain, 72, 19);
+        // s00..s10: only s10 holds "10" (s01 has the digits the other way round)
+        d.handle_key(key(KeyCode::Char('1')), 0);
+        d.handle_key(key(KeyCode::Char('0')), 0);
+        let buf = render(&mut d, 72, 19);
+        assert!(contains(&row_text(&buf, 1), "Archived sessions (1 of 11)"), "title: {:?}", row_text(&buf, 1));
+        assert!(contains(&row_text(&buf, ARCH_LIST_TOP as u16), "s10"), "row: {:?}", row_text(&buf, ARCH_LIST_TOP as u16));
+        d.handle_key(key(KeyCode::Enter), 0);
+        assert!(d.done);
+        let c = runner.logs.cockpit.borrow();
+        assert_eq!(c[0], vec!["unarchive", "s10"], "enter restores the match");
+    }
+
+    #[test]
+    fn archived_no_match_message_and_no_cockpit_call() {
+        let snap = tmp_file(r#"{"generated_ms":0,"sessions":[]}"#);
+        let runner = FakeRunner::new();
+        let mut d = Dialog::new(Kind::Archived, None, &archived_reg(11), &snap, Box::new(runner.clone()), Tier::Plain, 72, 19);
+        d.handle_key(key(KeyCode::Char('q')), 0);
+        d.handle_key(key(KeyCode::Char('q')), 0);
+        let buf = render(&mut d, 72, 19);
+        assert!(contains(&row_text(&buf, ARCH_LIST_TOP as u16), "no archived session matches"), "msg: {:?}", row_text(&buf, 5));
+        d.handle_key(key(KeyCode::Enter), 0);
+        assert!(!d.done);
+        assert!(runner.logs.cockpit.borrow().is_empty(), "no cockpit call on a no-match enter");
     }
 
     #[test]

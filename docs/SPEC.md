@@ -458,8 +458,9 @@ reaches it hands focus back to the agent pane. The sidebar never exits on errors
 `daemon not running` when the snapshot is older than 5 s.
 
 **Dialogs** (`force dialog`, the Rust binary per §22, run inside a popup): `new` (name with live validation, cwd
-default `$HOME`), `rename NAME`, `archive NAME` (confirm), `archived` (list archived sessions;
-Enter → unarchive and switch to it; `f` → forget with confirm). Each calls the same functions as
+default `$HOME`), `rename NAME`, `archive NAME` (confirm), `archived` (list archived sessions
+under a filter line: typing filters them by name or folder; Enter → unarchive and switch to it; Ctrl+D or Delete →
+delete with confirm). Each calls the same functions as
 the CLI and exits.
 
 ## 11. Taking over existing Claude Code sessions (`force import`)
@@ -530,8 +531,12 @@ guarded by tests/test_dev_tree.py).
   `jump` (an automatic name starts as `new`) can be renamed, moved, archived and deleted. In New, Up/Down move between
   the fields (no wrap; Tab and Shift+Tab wrap).
   Lists (archived, jump): the mouse wheel moves the selection one entry per notch (no wrap). The archived list
-  counts its entries in the title (`Archived sessions (11)`) and shows `↑ N more` / `↓ N more` rows when entries are
-  out of view; a click on one pages up or down.
+  counts its entries in the title (`Archived sessions (11)`, filtered `Archived sessions (3 of 11)`) and shows
+  `↑ N more` / `↓ N more` rows when entries are out of view; a click on one pages up or down.
+  Filter line (archived, jump): letters type into it, Ctrl+U clears it, the selection goes back to the first match
+  on every change, Esc closes. Matches are case-insensitive and ranked: name prefix, name substring, name
+  subsequence, then (archived only) folder substring (the folder as shown, `~/…`); within a rank the list's own
+  order. Nothing matches: `no archived session matches` / `no session matches`.
 - **Quit**: menu `q` or a click on `× quit` detach this terminal only; every session
   keeps running.
 - **Several terminals**: each attached terminal has its own current session. `force attach` opens on
@@ -620,13 +625,13 @@ follows:
 
 ## 20. Delete
 
-`force delete NAME [--force] [--yes]`, the menu `d`, and `d` in the archived list
-(`f` and `force forget` still work). Live or archived. Order: remove the registry entry first (so the
+`force delete NAME [--force] [--yes]`, the menu `d`, and Ctrl+D or Delete in the archived list
+(`force forget` still works). Live or archived. Order: remove the registry entry first (so the
 daemon never restores it), move viewing clients to another live session, stop the agent, kill the tmux
 session, delete force's archive copy `archive/<session_id>` (uuid-checked, never a symlink). Claude
 Code's own transcript in `~/.claude/projects` is left alone (Claude removes it after 30 days). Busy
-sessions need force; the CLI asks y/N on a terminal and needs `--yes` otherwise. `f` (`force forget`)
-removes only the registry entry of an archived session and keeps the archive. The daemon deletes a new
+sessions need force; the CLI asks y/N on a terminal and needs `--yes` otherwise. `force forget`
+is an older name for deleting an archived session. The daemon deletes a new
 Claude session the same way when its folder's trust question is declined (§6.4).
 
 ## 21. Plan usage bars
