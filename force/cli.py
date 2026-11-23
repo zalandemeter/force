@@ -1614,6 +1614,36 @@ def restart_command(cockpit: Cockpit, name: str | None, all_: bool = False) -> i
     return 0
 
 
+_MARK_REFUSED = {State.WORKING: "it is working", State.NEEDS_YOU: "it needs you", State.STARTING: "it is starting",
+                 State.DOWN: "it is down", State.ARCHIVED: "it is archived"}
+
+
+def mark_unread_command(cockpit: Cockpit, name: str) -> int:
+    """SPEC §5 marked unread: an idle session (or a shell at its prompt) shows as your turn again until you come back
+    to it. The mark lives in the registry entry; the daemon removes it."""
+    entry = registry.load(cockpit.paths.registry).get(name)
+    if entry is None:
+        print(f"force: no session {name!r}", file=sys.stderr)
+        return 1
+    state = State.ARCHIVED if entry.archived else _current_state_for(cockpit, name)
+    if state is State.YOUR_TURN:
+        print(f"{name}: already your turn")
+        return 0
+    if state not in (State.IDLE, State.STALE, State.SHELL):
+        why = _MARK_REFUSED.get(state, "its state is unknown (is the daemon running?)")
+        print(f"force: {name} cannot be marked unread: {why}", file=sys.stderr)
+        return 1
+    with registry.locked(cockpit.paths.home) as reg:
+        r = reg.get(name)
+        if r is None or r.archived:
+            print(f"force: no session {name!r}", file=sys.stderr)
+            return 1
+        r.extra["marked_unread_ms"] = int(time.time() * 1000)
+        r.extra.pop("marked_unread_away", None)
+    print(f"{name}: marked unread")
+    return 0
+
+
 def remote_control_command(cockpit: Cockpit, name: str, action: str) -> int:
     """`force remote-control NAME on|off|toggle|status` (SPEC §53): a Claude Code session's Remote Control choice.
     A change restarts the session to apply it (its conversation kept): now when it is idle, after this turn when it
@@ -2760,6 +2790,9 @@ def build_parser(only: str | None = None) -> argparse.ArgumentParser:
     p.add_argument("name")
     p.add_argument("action", choices=["on", "off", "toggle", "status"])
 
+    p = sub.add_parser("mark-unread", help="show an idle session as your turn again until you come back to it")
+    p.add_argument("name")
+
     p = sub.add_parser("upgrade", help="upgrade outdated sessions")
     p.add_argument("name", nargs="?")
     p.add_argument("--all", action="store_true")
@@ -3020,6 +3053,8 @@ def _dispatch(args) -> int:
         return restart_command(cockpit, args.name, args.all_)
     if cmd == "remote-control":
         return remote_control_command(cockpit, args.name, args.action)
+    if cmd == "mark-unread":
+        return mark_unread_command(cockpit, args.name)
     if cmd == "upgrade":
         return upgrade_command(cockpit, args.name, args.all)
     if cmd == "list":
@@ -3138,7 +3173,7 @@ def _dispatch(args) -> int:
 
 # commands that act on a host's sessions: run on the remote the ui shows (FORCE_HOST, SPEC §40)
 _FORWARDED = {"new", "rename", "sync-titles", "delete", "archive", "unarchive", "restart", "upgrade", "list", "switch",
-              "remote-control",
+              "remote-control", "mark-unread",
               "forget", "move", "kinds", "dirs", "prompt", "wait", "read", "keys", "report", "status", "explain",
               "import"}
 

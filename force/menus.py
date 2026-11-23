@@ -37,6 +37,7 @@ ITEMS = [
     ("t", "New shell…", "newshell", False),
     ("r", "Rename…", "rename", True),
     ("f", "Move to a folder…", "folder", True),
+    ("m", "Mark unread", "unread", False),
     ("K", "Move up in the list", "up", False),
     ("J", "Move down in the list", "down", False),
     None,
@@ -93,6 +94,8 @@ def classic() -> tuple[str, dict[str, str]]:
         "upgrade": force(f"upgrade '{s}'"),
         # SPEC §53: its one line ("NAME: Remote Control off (restarting)") as a message
         "rc": f"run-shell -b \"m=$({FORCE} remote-control '{s}' toggle 2>&1); tmux display-message -d 4000 \\\" $m \\\"\"",
+        # SPEC §5 marked unread: its one line ("NAME: marked unread", or why not) as a message
+        "unread": f"run-shell -b \"m=$({FORCE} mark-unread '{s}' 2>&1); tmux display-message -d 4000 \\\" $m \\\"\"",
         "archive": pop(64, 13, f"archive '{s}'"),
         "delete": pop(64, 13, f"delete '{s}'"),
         "archived": pop(*DIALOGS["archived"], "archived"),
@@ -138,6 +141,7 @@ def split() -> tuple[str, dict[str, str]]:
         "restart": key("restart"),
         "upgrade": key("upgrade"),
         "rc": key("rc"),
+        "unread": key("unread"),
         "archive": pop(64, 13, f"archive '{s}'"),
         "delete": pop(64, 13, f"delete '{s}'"),
         "archived": host_first("archived", pop(*DIALOGS["archived"], "archived")),
@@ -167,13 +171,13 @@ def _variants() -> list[tuple[int, list]]:
 # Terminal's default font) has, so no Windows stand-in spills over (SPEC §28). tmux expands the formats.
 ICONS = {
     "jump": "\uf002", "prev": "\uf0ec", "host": "\uf233", "new": "\uf067", "newshell": "\uf120",
-    "rename": "\uf040", "folder": "\uf07b", "up": "\uf062", "down": "\uf063", "restart": "\uf01e",
+    "rename": "\uf040", "folder": "\uf07b", "unread": "\uf0e0", "up": "\uf062", "down": "\uf063", "restart": "\uf01e",
     "upgrade": "\uf0aa", "rc": "\uf10b", "archive": "\uf187", "delete": "\uf1f8", "archived": "\uf07c", "restart-all": "\uf021",
     "sidebar": "\uf0db", "health": "\uf21e", "update": "\uf01b", "chuck": "\uf118", "help": "\uf11c", "quit": "\uf011",
 }
 PLAIN_ICONS = {
-    "jump": "❯", "prev": "↔", "host": "⌂", "new": "+", "newshell": "$", "rename": "▭", "folder": "▢", "up": "↑",
-    "down": "↓", "restart": "◔", "upgrade": "⇡", "rc": "▯", "archive": "▤", "delete": "×", "archived": "≡",
+    "jump": "❯", "prev": "↔", "host": "⌂", "new": "+", "newshell": "$", "rename": "▭", "folder": "▢", "unread": "●",
+    "up": "↑", "down": "↓", "restart": "◔", "upgrade": "⇡", "rc": "▯", "archive": "▤", "delete": "×", "archived": "≡",
     "restart-all": "◕", "sidebar": "◧", "health": "♥", "update": "⇣", "chuck": "?", "help": "▦", "quit": "◁",
 }
 CORAL, WHITE, GREY = "#d97757", "#ffffff", "#8a8a8a"

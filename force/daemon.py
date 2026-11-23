@@ -23,7 +23,7 @@ from .tmux import LEGACY_AGENT_ROLE, TmuxError
 from .registry import (RegistryError, is_support, is_claude, is_opencode, is_shell, kind as kind_of, locked, slugify, valid_name,
                      slugify, valid_name, remote_control)
 from .state import (STATE_WORDS, PaneInfo, Seen, SessionView, Snapshot, State, compute_state, compute_state_why, clean_title,
-                   glyph, load_seen, save_seen, unread, write_snapshot)
+                   glyph, load_seen, marked_unread, save_seen, unread, write_snapshot)
 
 _UPGRADE_INTERVAL = 30.0
 _CRASH_UNKNOWN_GRACE = 5.0
@@ -1296,10 +1296,37 @@ class Daemon:
                 if status.status == "idle" and prev in ("busy", "waiting") and not first:
                     seen.setdefault(name, Seen()).turn_done_ms = now_ms
             # (no toasts: the header pills already show needs-you / finished sessions; owner 2026-10-13)
+            self._follow_mark(entry, seen.get(name, Seen()), name in viewed)
         for n in list(seen):
             if n not in names:
                 seen.pop(n)
         save_seen(self.paths.seen, seen)
+
+    def _follow_mark(self, entry, s: Seen, viewed: bool) -> None:
+        """A session marked unread (SPEC §5) stays YOUR_TURN until you come back to it: the mark goes on the first
+        tick a client shows it after a tick none did, or once a turn finished after the mark."""
+        mark = marked_unread(entry)
+        if not mark:
+            return
+        away = bool(entry.extra.get("marked_unread_away"))
+        done = s.turn_done_ms > mark or (viewed and away)
+        if not done and (viewed or away):
+            return
+
+        def change(extra: dict) -> None:
+            if done:
+                extra.pop("marked_unread_ms", None)
+                extra.pop("marked_unread_away", None)
+            else:
+                extra["marked_unread_away"] = True     # left it: the next look ends the mark
+
+        with locked(self.paths.home) as reg:
+            e = reg.get(entry.name)
+            # re-read under the lock: a mark set again meanwhile (a newer marked_unread_ms) starts afresh
+            if e is None or e.extra.get("marked_unread_ms") != mark:
+                return
+            change(e.extra)
+        change(entry.extra)        # this tick's outputs step sees it too
 
     # --- step 8 ------------------------------------------------------------
     def _step_outputs(self) -> None:
