@@ -275,7 +275,8 @@
     var capEl = document.querySelector(".film-cap");
     var CAPS = [[.5, 2.6, "Seven agents. Seven terminals."], [2.8, 4.95, "Which one needs you?"],
                 [6.3, 8.2, "Force: every agent in one terminal."], [8.25, 11.8, "It tells you who needs you."],
-                [13.0, 15.6, "Close the terminal. They keep working."], [16.6, 18.75, "Open Force again. Nothing stopped."]];
+                [13.0, 15.6, "Close the terminal. They keep working."], [16.6, 18.75, "Open Force again. Nothing stopped."],
+                [20.0, 22.4, "Stuck? Ask Chuck."]];
     var capNow = -1;
     var caption = function () {
       if (!capEl) return;

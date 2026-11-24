@@ -282,6 +282,12 @@ h2 { margin: 0; text-wrap: balance; font: 700 clamp(1.65rem, 2.7vw, 2.3rem)/1.12
                                  radial-gradient(70% 80% at 100% 100%, #08200f, rgba(8, 32, 15, 0) 70%), linear-gradient(160deg, #3f8a52, #11381c 60%, #0a2112); }
 .wall-coral  { background-image: radial-gradient(70% 70% at 6% 100%, #f7b08f 0%, rgba(247, 176, 143, 0) 62%),
                                  radial-gradient(70% 80% at 100% 0%, #2a0d08, rgba(42, 13, 8, 0) 70%), linear-gradient(200deg, #9b3d24, #4a170d 60%, #240b07); }
+.wall-blue   { background-image: radial-gradient(70% 70% at 6% 0%, #a8c7fa 0%, rgba(168, 199, 250, 0) 62%),
+                                 radial-gradient(70% 80% at 100% 100%, #07142a, rgba(7, 20, 42, 0) 70%), linear-gradient(160deg, #2f5f9e, #10274a 60%, #081429); }
+/* Chuck's card over the cockpit, centred on the card: the window runs off both sides */
+.card.chuck .shot-win { left: 50%; top: 50%; transform: translate(-50%, -50%); }
+.card.chuck .shot-win .term { font-size: clamp(7px, .72vw, 10.5px); }
+.shot-win .layers { position: relative; }
 
 /* the smaller facts */
 .more dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 clamp(28px, 4vw, 56px); margin: 0; }
@@ -289,6 +295,7 @@ h2 { margin: 0; text-wrap: balance; font: 700 clamp(1.65rem, 2.7vw, 2.3rem)/1.12
 .more dt { margin-bottom: 8px; font-weight: 600; font-size: 1.08rem; letter-spacing: -.015em; color: var(--text); }
 .more dd { margin: 0; color: #9a9a9a; max-width: 40ch; line-height: 1.6; }
 .more code { color: var(--soft); }
+.more a { color: var(--soft); }
 
 /* commands: Force's own help, as a window on graphite */
 .sec-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: end; gap: 12px 40px; margin-bottom: clamp(28px, 3.4vw, 44px); }
@@ -387,7 +394,9 @@ h2 { margin: 0; text-wrap: balance; font: 700 clamp(1.65rem, 2.7vw, 2.3rem)/1.12
   .wall.card { height: auto; padding: 14px; container-type: inline-size; }
   .card .shot-win, .card.zoom .shot-win { position: relative; left: auto; top: auto; bottom: auto; transform: none;
     padding-bottom: calc(100cqw / 27.6943 * .7); }   /* the last row clear of the rounded bottom edge */
-  .shot-win .term.phone-only { font-size: calc(100cqw / 27.6943); }   /* 46 columns across the card (cqw is its content box); .term outranks the small-screen size below */
+  .shot-win .term.phone-only { font-size: calc(100cqw / 27.6943); }
+  .card.chuck .shot-win { left: auto; top: auto; transform: none; }
+  .shot-win .term.phone-only.card72 { font-size: calc(100cqw / 43.3512); }   /* Chuck's card: its 72 columns across */   /* 46 columns across the card (cqw is its content box); .term outranks the small-screen size below */
   /* the coral card is about the limits: only the list's last rows (host and plan usage) */
   .wall.card.bl { height: auto; }
   .card.bl .shot-win { bottom: auto; height: calc(100cqw / 27.6943 * (1.1640625 * 14 + .7) + 34px); -webkit-mask-image: none; mask-image: none; }

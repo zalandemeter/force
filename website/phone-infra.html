@@ -1,27 +1,27 @@
-<span style="color:#212121"></span><span style="color:#212121;background:#212121"></span>
-<span style="color:#212121;background:#212121"> </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#c6c6c6;background:#212121"> <span class="nf"></span>  </span><span style="color:#3c3c3c;background:#212121">────</span><span style="color:#8a8a8a;background:#212121"> +2 more </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#d7af5f;background:#212121"> <span class="nf">󰪤</span>  1 working </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#c6c6c6;background:#212121"> <span class="nf"></span>  </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#c6c6c6;background:#212121"> <span class="nf"></span>  </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#212121;background:#212121"></span>
-<span style="color:#212121;background:#212121"></span>     <span style="opacity:.62"></span><span style="color:#ffffff;opacity:.62"> 20 </span><span style="color:#ffffff">   vpc_security_group_ids = [a</span>
-     <span style="opacity:.62"></span><span style="color:#ffffff;opacity:.62">    </span><span style="color:#ffffff"> ws_security_group.db.id]</span>
-     <span style="opacity:.62"></span><span style="color:#ffffff;opacity:.62"> 21 </span><span style="color:#ffffff">   username               = &quot;a</span>
-     <span style="opacity:.62"></span><span style="color:#ffffff;opacity:.62">    </span><span style="color:#ffffff"> pi&quot;</span>
-     <span style="opacity:.62"></span><span style="color:#ffffff;opacity:.62"> 22 </span><span style="color:#ffffff">   manage_master_user_password</span>
-     <span style="opacity:.62"></span><span style="color:#ffffff;opacity:.62">    </span><span style="color:#ffffff">  = true</span>
-
-<span style="color:#ffffff">●</span> Two fixes:
-
-  1. <span style="font-weight:700">Security group ingress</span> — changed
-     <span style="color:#afd7ff">cidr_blocks = [&quot;0.0.0.0/0&quot;]</span> to
-     <span style="color:#afd7ff">security_groups = </span>
+<span style="color:#212121;background:#212121">                                              </span>
+<span style="color:#212121;background:#212121"> </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#c6c6c6;background:#212121"> <span class="nf"></span>  </span><span style="color:#3c3c3c;background:#212121">────</span><span style="color:#8a8a8a;background:#212121"> +2 more </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#d7af5f;background:#212121"> <span class="nf">󰪟</span>  1 working </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#c6c6c6;background:#212121"> <span class="nf"></span>  </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#c6c6c6;background:#212121"> <span class="nf"></span>  </span><span style="color:#3c3c3c;background:#212121">─</span><span style="color:#212121;background:#212121"> </span>
+     <span style="color:#ffffff;opacity:.62"> 20 </span><span style="color:#ffffff">   vpc_security_group_ids = [a</span>       
+     <span style="color:#ffffff;opacity:.62">    </span><span style="color:#ffffff"> ws_security_group.db.id]</span>            
+     <span style="color:#ffffff;opacity:.62"> 21 </span><span style="color:#ffffff">   username               = "a</span>       
+     <span style="color:#ffffff;opacity:.62">    </span><span style="color:#ffffff"> pi"</span>                                 
+     <span style="color:#ffffff;opacity:.62"> 22 </span><span style="color:#ffffff">   manage_master_user_password</span>       
+     <span style="color:#ffffff;opacity:.62">    </span><span style="color:#ffffff">  = true</span>                             
+                                              
+<span style="color:#ffffff">●</span> Two fixes:                                  
+                                              
+  1. <span style="font-weight:700">Security group ingress</span> — changed         
+     <span style="color:#afd7ff">cidr_blocks = ["0.0.0.0/0"]</span> to           
+     <span style="color:#afd7ff">security_groups = </span>                       
      <span style="color:#afd7ff">[aws_security_group.app.id]</span>. Port 5432 is
-     now only reachable from the app security
-     group, not the internet.
-  2. <span style="font-weight:700"></span><span style="color:#afd7ff;font-weight:700">publicly_accessible = false</span> — the RDS
-     instance will no longer be assigned a
-     public IP or placed in a public subnet.
-
-<span style="color:#949494">✻</span> <span style="color:#949494">Crunched for 12s · done Friday 9:44 AM</span>
-
+     now only reachable from the app security 
+     group, not the internet.                 
+  2. <span style="color:#afd7ff;font-weight:700">publicly_accessible = false</span> — the RDS    
+     instance will no longer be assigned a    
+     public IP or placed in a public subnet.  
+                                              
+<span style="color:#949494">✻</span> <span style="color:#949494">Crunched for 12s · done Friday 9:44 AM</span>      
+                                              
 <span style="color:#808080">──────────────────────────────────────────────</span>
-<span style="color:#808080"></span>❯ 
+❯                                             
 <span style="color:#808080">──────────────────────────────────────────────</span>
-<span style="color:#808080"></span>  <span style="color:#afafff">▶▶ accept edits on</span><span style="color:#949494"> (shift+tab to cycle)</span>
+  <span style="color:#afafff">▶▶ accept edits on</span><span style="color:#949494"> (shift+tab to cycle)</span>     
