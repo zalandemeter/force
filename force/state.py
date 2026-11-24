@@ -51,6 +51,12 @@ class Seen:
     turn_done_ms: int = 0
 
 
+def marked_unread(entry: Entry) -> int:
+    """When the session was marked unread (SPEC §5, `force mark-unread`), 0 when it is not."""
+    v = entry.extra.get("marked_unread_ms")
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+
+
 def compute_state(entry: Entry, pane: PaneInfo | None, status: AgentStatus | None,
                   seen: Seen, now_ms: int, cfg: Config) -> State:
     """SPEC §5 table, first match wins. pane None == no tmux session."""
@@ -72,6 +78,8 @@ def compute_state_why(entry: Entry, pane: PaneInfo | None, status: AgentStatus |
             return State.WORKING, "shell: a program is running"
         if status is not None and seen.turn_done_ms > seen.last_seen_ms:
             return State.YOUR_TURN, "shell: a program finished, not viewed since"
+        if marked_unread(entry):
+            return State.YOUR_TURN, "shell: marked unread"
         return State.SHELL, "shell: pane alive"
 
     prefix = ""
@@ -116,6 +124,8 @@ def compute_state_why(entry: Entry, pane: PaneInfo | None, status: AgentStatus |
     if status.status == "idle":
         if seen.turn_done_ms > seen.last_seen_ms:
             return State.YOUR_TURN, "status: idle; turn finished, not viewed since"
+        if marked_unread(entry):
+            return State.YOUR_TURN, "status: idle; marked unread"
         stale_ms = int(cfg.stale_hours * 3600 * 1000)
         if status.status_updated_ms is not None and now_ms - status.status_updated_ms > stale_ms:
             return State.STALE, (f"status: idle, unchanged for "

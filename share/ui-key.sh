@@ -2,7 +2,7 @@
 # Key actions of a ui window (split mode, SPEC §39/§40): act on the host the window shows. This machine:
 # its tmux directly (fast); a remote: `force …` with FORCE_HOST, which runs it there over the link.
 # Usage: ui-key.sh <ui socket_path> <window_id> <action> [arg]
-#   idx N | next | prev | last | restart | restart-all | upgrade | rc | up | down | newshell NAME
+#   idx N | next | prev | last | restart | restart-all | upgrade | rc | unread | up | down | newshell NAME
 # Every call to a remote is a round trip (SPEC §40): a switch and the question which session the client shows
 # then go in one call (`force switch … --print`, or one tmux command list).
 S="$1"; W="$2"; A="$3"; ARG="$4"
@@ -112,6 +112,7 @@ case "$A" in
   restart-all) f restart --all >/dev/null 2>&1 ;;
   upgrade) on_shown; f upgrade "$sess" >/dev/null 2>&1 ;;
   rc) on_shown; m=$(f remote-control "$sess" toggle 2>&1); t display-message -d 4000 " $m " ;;    # SPEC §53
+  unread) on_shown; m=$(f mark-unread "$sess" 2>&1); t display-message -d 4000 " $m " ;;    # SPEC §5 marked unread
   up|down) on_shown; f move "$sess" "$A" >/dev/null 2>&1 ;;
   newshell)
     if f new "$ARG" --shell --no-switch >/dev/null 2>&1; then

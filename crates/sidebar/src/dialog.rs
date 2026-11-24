@@ -164,8 +164,8 @@ pub trait Runner {
 /// two lists the same).
 pub const FORWARDED: &[&str] = &[
     "new", "rename", "sync-titles", "delete", "archive", "unarchive", "restart", "upgrade", "list", "switch",
-    "remote-control", "forget", "move", "kinds", "dirs", "prompt", "wait", "read", "keys", "report", "status",
-    "explain", "import",
+    "remote-control", "mark-unread", "forget", "move", "kinds", "dirs", "prompt", "wait", "read", "keys", "report",
+    "status", "explain", "import",
 ];
 
 /// Real runner shelling out to the force binary and the tmux CLI on a named socket.
