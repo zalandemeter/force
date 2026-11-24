@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from force import api, cli, config, daemon, doctor, link, net, remote
+from force import api, cli, config, daemon, doctor, link, net, remote, support
 from force.state import Snapshot
 
 ID = "b" * 64
@@ -418,6 +418,19 @@ def test_hint_card_needs_a_host(env, capsys):
     assert net.hint_command(env.paths, env.cfg, None, ui=True, wait_key=lambda: "d") == 2
     assert net.hint_command(env.paths, env.cfg, "bad host", ui=False) == 2
     assert config.load_config(env.paths.config_file).net_up_hint is True
+
+
+def test_hint_card_from_the_sidebars_command_line(env, capsys, monkeypatch):
+    """The sidebar runs `force net hint --ui HOST` (the option before the host): the card opens, `d` hides the
+    hint for that host. It once failed with a usage error, so the popup closed at once."""
+    setup_remote(env)
+    monkeypatch.setattr(support, "_wait_key", lambda: "d")
+    assert cli.main(["net", "hint", "--ui", "devbox"]) == 0
+    out = capsys.readouterr()
+    assert "force net up" in out.out and out.err == ""
+    assert json.loads(remote.remotes_file(env.paths).read_text())["hosts"][0]["netUpHint"] is False
+    monkeypatch.setattr(support, "_wait_key", lambda: "\x1b")
+    assert cli.main(["net", "hint", "devbox", "--ui"]) == 0, "the flag after the host works too"
 
 
 def test_net_hint_host_on_off(env, capsys):
