@@ -93,11 +93,14 @@ html, body { margin: 0; background: #000; }
 .fwin pre .paint i.arc { background: none; box-sizing: border-box; }
 .fwin pre .bk { -webkit-text-fill-color: transparent; }
 #endfloor { position: absolute; inset: 0; background: #161616; }
+/* Chuck's card (force support --ui), laid over the end window as tmux lays the popup over Force */
+.fwin .scr { position: relative; }
+#preC { position: absolute; left: 0; top: 0; opacity: 0; transform-origin: 44.853em 21.535em; }   /* the card's centre: column 74.5, row 18.5 */
 /* the last caption sits over the window, so it gets a quiet dark plate of its own */
 /* captions over Force's window get a quiet dark plate of their own, low on the window over its status line */
 .cap.plate { left: 50%; right: auto; top: 978px; transform: translateX(-50%); padding: 16px 30px 18px; border-radius: 14px;
              font-size: 40px; background: rgba(20,20,20,.9); box-shadow: 0 0 0 1px rgba(255,255,255,.1), 0 20px 50px rgba(0,0,0,.55); }
-#cap6 { opacity: 0; }
+#cap6, #cap7 { opacity: 0; }
 #cap6 .hair { top: 78px; }
 
 /* finish: grain and vignette over everything */
@@ -118,7 +121,7 @@ html, body { margin: 0; background: #000; }
   <div id="keep" class="layer"><div class="floor"></div><div class="list" id="list"></div></div>
   <div id="end" class="layer"><div id="endfloor"></div>
     <div id="fin" class="fwin"><div class="chrome"><span></span><b>force</b><span class="ctl"><svg viewBox="0 0 44 10"><path d="M1 5.5h8M18 1.5h7v7h-7zM35 1.5l7 7m0-7-7 7" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span></div>
-      <div class="tw"><div class="scr"><pre id="preF"></pre></div></div></div></div>
+      <div class="tw"><div class="scr"><pre id="preF"></pre><pre id="preC"></pre></div></div></div></div>
 
   <div class="cap" id="cap1">Seven agents. Seven terminals.</div>
   <div class="cap" id="cap2">Which one needs you?</div>
@@ -126,6 +129,7 @@ html, body { margin: 0; background: #000; }
   <div class="cap plate" id="cap4">It tells you who needs you.</div>
   <div class="cap" id="cap5">Close the terminal. They keep working.</div>
   <div class="cap plate" id="cap6">Open Force again. Nothing stopped.</div>
+  <div class="cap plate" id="cap7">Stuck? Ask Chuck.</div>
 
   <svg id="cursor" viewBox="0 0 24 24"><path d="M3 2l7 19 2.6-7.6L20 11z" fill="#fff" stroke="#000" stroke-width="1.2"/></svg>
   <canvas id="grain" width="1020" height="590"></canvas>
@@ -211,6 +215,7 @@ grainEl.style.width = "2040px"; grainEl.style.height = "1180px";
 const STATE = {
   shell: ["\uEA85", "#c6c6c6", "shell ~"], idle: ["\uF10C", "#c6c6c6", "idle"], stale: ["\uF017", "#8a8a8a", "stale"],
   turn: ["\uF058", "#87c08f", "your turn"], work: [null, "#d7af5f", ""], need: ["\uF0F3", "#f0645e", "needs permission"],
+  unread: [null, "#5c9cf5", ""],   // still working, with a finding you haven't read: blue (SPEC §5)
 };
 const KEEP = [
   { name: "shell", from: "shell" },
@@ -218,15 +223,15 @@ const KEEP = [
   { name: "billing-fix", from: "work", to: "need", at: 14.55, a: "updating the tests" },
   { name: "docs-site", from: "work", to: "turn", at: 13.75, a: "building the docs" },
   { name: "infra", from: "idle" },
-  { name: "mobile", from: "work", a: "running a command" },
+  { name: "mobile", from: "work", to: "unread", at: 14.15, a: "running a command", b: "running a command" },
   { name: "migration-2024", from: "stale" },
 ];
-const icon = (st, t) => st === "work" ? SPIN[Math.floor(t * 8) % 8] : STATE[st][0];
+const icon = (st, t) => st === "work" || st === "unread" ? SPIN[Math.floor(t * 8) % 8] : STATE[st][0];
 const list = document.getElementById("list");
 list.innerHTML = '<div class="rule"><span><span class="bolt nf">\uF0E7</span> FORCE</span></div>';
 const rowEls = KEEP.map(k => {
   const el = document.createElement("div"); el.className = "row";
-  const words = st => st === "work" ? null : STATE[st][2];
+  const words = st => st === "work" || st === "unread" ? null : STATE[st][2];
   const ta = k.a || words(k.from), tb = k.b || (k.to ? words(k.to) : "");
   el.innerHTML = `<i class="edge"></i><span class="ic nf"></span><span class="nm">${k.name}</span>` +
     `<span class="st"><b class="a" style="color:${STATE[k.from][1]}">${ta}</b><b class="b" style="color:${STATE[k.to || k.from][1]}">${tb}</b></span>`;
@@ -349,6 +354,27 @@ function render(t) {
   document.getElementById("endfloor").style.opacity = lin(t, 16.1, 16.5);
   cap("cap6", t, 16.75, 18.75);
   document.getElementById("cap6").style.opacity = ease(lin(t, 16.6, 16.95)) * (1 - ease(lin(t, 18.35, 18.75)));
+  // --- Chuck: the cursor clicks "ask chuck" under the list (row 20), his card opens; Esc closes it -----------
+  const ax = ORGX + 15 * CW, ay = ORGY + 20.55 * CH;
+  const g2 = inout(lin(t, 19.05, 19.75));
+  cur.style.opacity = t < 15 ? cur.style.opacity : lin(t, 18.95, 19.15) * (1 - lin(t, 20.3, 20.6));
+  if (t >= 15) {
+    const qx = mix(1300, ax, g2), qy = mix(760, ay, g2) - Math.sin(g2 * Math.PI) * 70;
+    cur.style.transform = `translate(${qx}px, ${qy}px) scale(${t > 19.8 && t < 19.95 ? 0.86 : 1})`;
+    const rq = lin(t, 19.82, 20.3);
+    if (t > 19) {
+      rip.style.left = `${ax}px`; rip.style.top = `${ay}px`;
+      rip.style.opacity = rq > 0 && rq < 1 ? (1 - rq) * .9 : 0;
+      rip.style.transform = `scale(${1 + rq * 5})`;
+    }
+  }
+  const cin = easeQ(lin(t, 19.9, 20.25)), cgo = inout(lin(t, 22.55, 22.85));
+  const pc = document.getElementById("preC");
+  pc.style.opacity = cin * (1 - cgo);
+  pc.style.transform = `scale(${.97 + .03 * cin - .02 * cgo})`;
+  cap("cap7", t, 20.15, 22.5);
+  document.getElementById("cap7").style.opacity = ease(lin(t, 20.0, 20.3)) * (1 - ease(lin(t, 22.1, 22.5)));
+
   // grain and vignette leave with the film, so its last frame is the page's own window
   grainEl.style.opacity = 0;
   document.getElementById("vignette").style.opacity = 0;
@@ -360,7 +386,7 @@ function measure() {
   const fin = document.getElementById("fin");
   FIN_H = fin.offsetHeight;
   ORGX = 960 - 600 * KW; ORGY = 540 - FIN_H / 2 * KW + 34 * KW;
-  PILL = { x: ORGX + 118 * CW, y: ORGY + CH, w: 6 * CW, h: CH };   // " <bell>  1 ": the needs-you count in the header rule
+  PILL = { x: ORGX + 92 * CW, y: ORGY + CH, w: 16 * CW, h: CH };   // " <bell>  billing-fix ": who needs you, in the header rule
   const fs = 13.2647, cw = fs * .6021, lh = fs * 1.1640625, K = 1.6;
   const top = 540 - FIN_H / 2 * K;
   const stage = document.getElementById("stage").getBoundingClientRect();
@@ -377,6 +403,7 @@ window.ready = (async () => {
   await load("preA", "cockpit-api.html");
   await load("preB", "cockpit-billing-fix.html");
   await load("preF", "cockpit-api.html");
+  await load("preC", "card-chuck.html");
   await document.fonts.ready;
   measure();
   render(0);

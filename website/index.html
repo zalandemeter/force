@@ -53,7 +53,7 @@
       <div class="window" id="cockpit" inert>
         <div class="chrome" aria-hidden="true"><span></span><b>force</b><span class="ctl"><svg viewBox="0 0 44 10"><path d="M1 5.5h8M18 1.5h7v7h-7zM35 1.5l7 7m0-7-7 7" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span></div>
         <div class="term-wrap" tabindex="0" role="application"
-             aria-label="Force's window, as text. Seven sessions in the sidebar; billing-fix needs permission. Up and down arrows switch sessions; Ctrl+Space opens the menu.">
+             aria-label="Force's window, as text. Seven sessions in the sidebar; billing-fix needs permission and mobile, still working, has a finding you haven't read. Up and down arrows switch sessions; Ctrl+Space opens the menu.">
           <div class="screen" data-screen="api">
             <pre class="term" data-view="shell" hidden data-include="cockpit-shell.html"></pre>
             <pre class="term" data-view="api" data-include="cockpit-api.html"></pre>
@@ -91,7 +91,7 @@
         </div>
       </div>
       <video id="film-video" poster="media/poster.jpg" data-poster-phone="media/poster-phone.jpg" muted playsinline preload="auto"
-             aria-label="Seven terminal windows, one per coding agent, collapse into Force's sidebar; a session asking for permission is opened with one click; the terminal closes and the agents keep working; the window opens again, and stays open to click around in.">
+             aria-label="Seven terminal windows, one per coding agent, collapse into Force's sidebar; a session asking for permission is opened with one click; the terminal closes and the agents keep working, one turning blue with a finding to read; the window opens again, Chuck's card opens from the sidebar and closes, and the window stays open to click around in.">
         <source media="(max-width: 640px)" src="media/brag-phone.webm" type="video/webm">
         <source media="(max-width: 640px)" src="media/brag-phone.mp4" type="video/mp4">
         <source src="media/brag.webm" type="video/webm">
@@ -113,9 +113,10 @@
     <div class="txt">
       <h2>You see who needs you.</h2>
       <p>A permission prompt or a question anywhere shows in the sidebar and as a count at the top. One click takes you
-         there, and you answer it in place.</p>
+         there, and you answer it in place. A session that is still working but has written you a finding turns blue
+         until you read it.</p>
     </div>
-    <figure class="wall card wall-red"><div class="shot-win" role="img" aria-label="Force with billing-fix selected: the sidebar marks it red, needs permission, and the agent asks to edit test_invoice.py."><div class="chrome" aria-hidden="true"><span></span><b>force — billing-fix</b><span class="ctl"><svg viewBox="0 0 44 10"><path d="M1 5.5h8M18 1.5h7v7h-7zM35 1.5l7 7m0-7-7 7" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span></div><pre class="term desk-only" data-include="cockpit-billing-fix.html"></pre><pre class="term phone-only" data-include="phone-billing-fix.html"></pre></div></figure>
+    <figure class="wall card wall-red"><div class="shot-win" role="img" aria-label="Force with billing-fix selected: the sidebar marks it red, needs permission, and mobile blue, a finding you haven't read; the agent asks to edit test_invoice.py."><div class="chrome" aria-hidden="true"><span></span><b>force — billing-fix</b><span class="ctl"><svg viewBox="0 0 44 10"><path d="M1 5.5h8M18 1.5h7v7h-7zM35 1.5l7 7m0-7-7 7" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span></div><pre class="term desk-only" data-include="cockpit-billing-fix.html"></pre><pre class="term phone-only" data-include="phone-billing-fix.html"></pre></div></figure>
   </article>
 
   <article class="row flip">
@@ -141,9 +142,21 @@
     <div class="txt">
       <h2>Every agent. Every machine.</h2>
       <p>Claude Code, OpenCode and plain shells in one list, with your Claude plan's five-hour and weekly limits under
-         it. <code>force host add</code> puts a server's sessions one click away from your laptop's.</p>
+         it. <code>force host add</code> puts a server's sessions one click away from your laptop's, over a direct link
+         when the network allows and ssh otherwise. An agent on one machine can hand work to a session on another.</p>
     </div>
     <figure class="wall card wall-coral bl"><div class="shot-win" role="img" aria-label="The bottom of Force's sidebar: the machine devbox, and the Claude limits, 34% of five hours and 18% of the week."><div class="chrome" aria-hidden="true"><span></span><b>force — api</b><span class="ctl"><svg viewBox="0 0 44 10"><path d="M1 5.5h8M18 1.5h7v7h-7zM35 1.5l7 7m0-7-7 7" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span></div><pre class="term desk-only" data-include="cockpit-api.html"></pre><pre class="term phone-only" data-include="phone-list.html"></pre></div></figure>
+  </article>
+
+  <article class="row">
+    <div class="txt">
+      <h2>Stuck? Ask Chuck.</h2>
+      <p>Chuck is Force's own assistant, one key away (<kbd>?</kbd> in the menu). He answers from the docs and the code of
+         the version you run, sets up a host or a notification once you approve, and turns a bug into a ready report,
+         or into a fix and its pull request. He runs on your own Claude Code or OpenCode.</p>
+      <p class="go"><a href="docs.html#chuck">What Chuck can do</a></p>
+    </div>
+    <figure class="wall card wall-blue chuck"><div class="shot-win" role="img" aria-label="Chuck's card over Force: how something works, set it up for me, report a bug or an idea, help fix it, a security problem; Enter talks to Chuck."><div class="chrome" aria-hidden="true"><span></span><b>force — ask chuck</b><span class="ctl"></span></div><div class="layers desk-only"><pre class="term" data-include="cockpit-api.html"></pre><pre class="term menu" data-include="card-chuck.html"></pre></div><pre class="term phone-only card72" data-include="phone-chuck.html"></pre></div></figure>
   </article>
 </section>
 
@@ -158,6 +171,15 @@
     <div><dt>Nothing to set up</dt>
       <dd>No root, no packages, no terminal profile. Force brings its own tmux and paints its own theme in any
           terminal or ssh login.</dd></div>
+    <div><dt>It keeps itself current</dt>
+      <dd>Update from the menu, on every machine at once, or let <code>autoUpdate</code> do it. Sessions keep running;
+          each agent moves to its newest version once it is idle.</dd></div>
+    <div><dt>Linux, macOS and Windows</dt>
+      <dd>One line on Linux and macOS. On Windows, one PowerShell line, then <code>force</code> in PowerShell, cmd or
+          Windows Terminal (it runs in WSL).</dd></div>
+    <div><dt>Open source</dt>
+      <dd>MIT licence, <a href="{{repo}}" data-repo>on GitHub</a>. Report a bug or suggest an idea there, or let Chuck
+          write it up for you.</dd></div>
   </dl>
 </section>
 
@@ -175,7 +197,8 @@
           <tr><th scope="row"><code>force new [NAME]</code></th><td>Start a session in the current folder; without a name it is named after your first message.</td></tr>
           <tr><th scope="row"><code>force import</code></th><td>List sessions Force doesn't manage yet; <code>force import ID</code> takes one over.</td></tr>
           <tr><th scope="row"><code>force host add NAME</code></th><td>Add another machine you reach with ssh.</td></tr>
-          <tr><th scope="row"><code>force prompt NAME TEXT --wait</code></th><td>Send a session a prompt from a script or another agent and wait for its answer.</td></tr>
+          <tr><th scope="row"><code>force prompt NAME TEXT --wait</code></th><td>Send a session, here or on another machine (<code>HOST:NAME</code>), a prompt from a script or another agent and wait for its answer.</td></tr>
+          <tr><th scope="row"><code>force support</code></th><td>Ask Chuck, Force's assistant: how something works, a setup, a bug report.</td></tr>
           <tr><th scope="row"><code>force status working</code></th><td>From a script in a shell session: show what it is doing on its card.</td></tr>
           <tr><th scope="row"><code>force settings</code></th><td>Show and change settings, such as the command that notifies you.</td></tr>
           <tr><th scope="row"><code>force update</code></th><td>Install the newest release. Sessions keep running.</td></tr>

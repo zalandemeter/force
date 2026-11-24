@@ -9,7 +9,7 @@
 **Tone:** deadpan cinematic. Played straight, lounge-slow music, the comedy is the chair.
 **Share caption:** "Seven coding agents, one terminal, one leather chair. Force keeps them running and tells you which one needs you."
 
-## Storyboard (1920×1080, 30 fps, 20.0 s)
+## Storyboard (1920×1080, 30 fps; recut 2026-11 to 23.3 s: the screens of Force 1.10, mobile turning blue in scene 5, and scene 8)
 
 | # | time | scene | on screen | motion | sound |
 |---|---|---|---|---|---|
@@ -20,6 +20,7 @@
 | 5 | 11.8–14.8 | Highlight 2 | terminal window closes (shrinks to nothing); a strip of cards keeps spinning ("working", "working"); caption: "Close the terminal. They keep working." | window collapses, cards stay alive, then reopen | gentle swish |
 | 6 | 14.8–17.4 | Punchline | the film: the gentleman sits down in the chair; caption: "Sit back." | film plays at 1×, pixel-crisp | music swells a little |
 | 7 | 17.4–20.0 | Outro | FORCE wordmark + "The code cockpit"; install line types: `curl -fsSL https://useforce.cc/install.sh \| sh`; then "force" | wordmark settles, typing at ~40 chars/s, cursor blink | music resolves |
+| 8 | 19.0–23.3 | Chuck | back on the api screen: the cursor clicks "ask chuck" under the list; Chuck's card opens (what he can do); caption: "Stuck? Ask Chuck."; the card closes and the window stays, as the page shows it | cursor glide + click, card scales in, Esc | — |
 
 Every caption holds ≥ 0.3 s per word after it is fully in. Captions in Archivo 800 (wdth 112), white on the ground; terminal text in DejaVu Sans Mono.
 

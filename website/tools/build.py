@@ -133,7 +133,7 @@ def main(out: Path) -> None:
     page = (SITE / "index.html").read_text(encoding="utf-8")
     # every <pre ... data-include="FILE"></pre> gets FILE (a Force screen or a fragment of one, as coloured text)
     page, n = re.subn(r'(<pre\b[^>]*?) data-include="([^"]+)"([^>]*)></pre>',
-                      lambda m: f'{m.group(1)}{m.group(3)}>{render((SITE / m.group(2)).read_text(encoding="utf-8"), overlay=m.group(2).startswith("menu-"))}</pre>', page)
+                      lambda m: f'{m.group(1)}{m.group(3)}>{render((SITE / m.group(2)).read_text(encoding="utf-8"), overlay=m.group(2).startswith(("menu-", "card-")))}</pre>', page)
     if n == 0 or "data-include" in page:
         raise SystemExit("build: an include placeholder is missing or malformed in index.html")
     # versioned links, so a browser never pairs the new page with a stylesheet or script it cached earlier

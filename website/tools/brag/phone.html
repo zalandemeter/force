@@ -134,6 +134,7 @@ let spinEls = null;
 const STATE = {
   shell: ["", "#c6c6c6", "shell ~"], idle: ["", "#c6c6c6", "idle"], stale: ["", "#8a8a8a", "stale"],
   turn: ["", "#87c08f", "your turn"], work: [null, "#d7af5f", ""], need: ["", "#f0645e", "needs permission"],
+  unread: [null, "#5c9cf5", ""],   // still working, with a finding you haven't read: blue (SPEC §5)
 };
 const KEEP = [
   { name: "shell", from: "shell" },
@@ -141,15 +142,15 @@ const KEEP = [
   { name: "billing-fix", from: "work", to: "need", at: 14.55, a: "updating tests" },
   { name: "docs-site", from: "work", to: "turn", at: 13.75, a: "checking links" },
   { name: "infra", from: "idle" },
-  { name: "mobile", from: "work", a: "running a command" },
+  { name: "mobile", from: "work", to: "unread", at: 14.15, a: "running a command", b: "running a command" },
   { name: "migration-2024", from: "stale" },
 ];
-const icon = (st, t) => st === "work" ? SPIN[Math.floor(t * 8) % 8] : STATE[st][0];
+const icon = (st, t) => st === "work" || st === "unread" ? SPIN[Math.floor(t * 8) % 8] : STATE[st][0];
 const list = document.getElementById("list");
 list.innerHTML = '<div class="rule"><span><span class="bolt nf"></span> FORCE</span></div>';
 const rowEls = KEEP.map(k => {
   const el = document.createElement("div"); el.className = "row";
-  const words = st => st === "work" ? null : STATE[st][2];
+  const words = st => st === "work" || st === "unread" ? null : STATE[st][2];
   const ta = k.a || words(k.from), tb = k.b || (k.to ? words(k.to) : "");
   el.innerHTML = `<i class="edge"></i><span class="ic nf"></span><span class="nm">${k.name}</span>` +
     `<span class="st"><b class="a" style="color:${STATE[k.from][1]}">${ta}</b><b class="b" style="color:${STATE[k.to || k.from][1]}">${tb}</b></span>`;
