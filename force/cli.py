@@ -3245,7 +3245,12 @@ def main(argv: list[str] | None = None) -> int:
     if words[:1] == ["terminals"]:
         # the deprecated alias, with its leading options, goes straight through to fonts.sh's cleanup modes
         return terminals_alias_command(words[1:])
-    parser = build_parser(only=_command_word(words))
+    command_word = _command_word(words)
+    if command_word == "net" and "--ui" in words:
+        # the sidebar's card is `force net hint --ui HOST`: argparse fills the optional HOST and value before the
+        # option and leaves the host after it over ("unrecognized arguments"), so the flag goes last
+        words = [w for w in words if w != "--ui"] + ["--ui"]
+    parser = build_parser(only=command_word)
     if not parser.only_found:
         parser = build_parser()
     args = parser.parse_args(words)
