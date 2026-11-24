@@ -34,32 +34,32 @@ class _Out(io.StringIO):
 
 
 def test_frame_centres_the_spinner_and_the_text():
-    c = cli.Connecting("neumann", out=_Out(), start=False)
+    c = cli.Connecting("devbox", out=_Out(), start=False)
     f = c.frame(0, 80, 24, 0.0)
     assert f.startswith("\x1b[?25l\x1b[2J"), "cursor hidden, pane cleared"
     assert "\x1b[12;" in f, "middle row"
     x = int(f.split("\x1b[12;")[1].split("H")[0])
-    assert x == (80 - len("connecting to neumann") - 2) // 2 + 1
-    assert "⠋" in f and "connecting to neumann" in f
+    assert x == (80 - len("connecting to devbox") - 2) // 2 + 1
+    assert "⠋" in f and "connecting to devbox" in f
     assert "⠙" in c.frame(1, 80, 24, 0.0), "the next frame turns"
     assert " s" not in f
     assert "· 12 s" in c.frame(0, 80, 24, 12.4), "after 10 s, how long it has been"
 
 
 def test_reconnecting_and_a_tiny_pane():
-    c = cli.Connecting("brian", again=True, out=_Out(), start=False)
+    c = cli.Connecting("devbox", again=True, out=_Out(), start=False)
     f = c.frame(3, 5, 1, 0.0)
-    assert "reconnecting to brian" in f
+    assert "reconnecting to devbox" in f
     assert "\x1b[1;1H" in f, "never off the pane"
 
 
 def test_draws_until_stopped_and_stop_clears_once():
     out = _Out()
-    c = cli.Connecting("neumann", out=out)
+    c = cli.Connecting("devbox", out=out)
     time.sleep(0.25)
     c.stop()
     drawn = out.getvalue()
-    assert drawn.count("connecting to neumann") >= 2
+    assert drawn.count("connecting to devbox") >= 2
     assert drawn.endswith("\x1b[2J\x1b[H\x1b[?25h"), "a clear pane, cursor back"
     c.stop()
     time.sleep(0.15)
