@@ -471,7 +471,7 @@ def test_why_pid_mismatch_prefix():
     ("✳ ", "x", "devbox", None),
     ("x" * 80, "y", "devbox", "x" * 60),
     # tmux's default title, the full host name (macOS: name.local): not a title
-    ("Zalans-MacBook-Pro.local", "x", "Zalans-MacBook-Pro", None),
+    ("Devs-MacBook-Pro.local", "x", "Devs-MacBook-Pro", None),
     ("devbox.lan", "x", "devbox", None),
     ("devbox.local build", "x", "devbox", "devbox.local build"),
     ("devbox2.local", "x", "devbox", "devbox2.local"),
