@@ -3479,7 +3479,7 @@ mod tests {
         a.tmux_pane = Some("%10".into());
         a.own = Some("ui-sess".into());
         a.now_ms = NOW;
-        a.set_remote(None, "neumann");
+        a.set_remote(None, "devbox");
         a.host_tmux = Some(host);
         a.refresh_ui_mode();
         assert!(a.ui_mode, "a remote window is a ui window while connecting");

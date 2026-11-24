@@ -1804,7 +1804,7 @@ sidebar".into()); // list-panes: an agent pane, then a pane with role sidebar
         let spawner: Box<dyn Spawner> = Box::new(FakeSpawner::default());
         let mut h = Header::new(tmux, spawner, PathBuf::from("/nonexistent/snapshot.json"), PathBuf::from("/share"), Some("%10".into()), GlyphArg::Fixed(Tier::Plain), 80);
         h.own = Some("ui-sess".into());
-        h.set_hosts(None, "neumann", "here");
+        h.set_hosts(None, "devbox", "here");
         h.host_tmux = Some(host);
         h.refresh_ui_mode();
         assert!(h.ui_mode && h.nested.is_none(), "connecting: a ui window without a client");
