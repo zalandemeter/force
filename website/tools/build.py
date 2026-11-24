@@ -28,9 +28,10 @@ SKILL_DESC = ("Install and drive Force, the code cockpit: start Claude Code, Ope
               "and report a script's status on its card.")
 SKILL_FRONT = f"---\nname: force\ndescription: {json.dumps(SKILL_DESC)}\n---\n\n"   # quoted: the text has colons
 SKILL_INSTALL = ("## Install Force (once per machine)\n\n"
-                 "If `force` is not on PATH, install it as the user (Linux x86-64, no root):\n"
+                 "If `force` is not on PATH, install it as the user (Linux x86-64 or macOS on Apple Silicon, no root):\n"
                  "`curl -fsSL https://useforce.cc/install.sh | sh`. Then `force skill` prints this guide for the\n"
                  "installed version.\n\n")
+PLATFORMS = ("Linux (x86-64), macOS on Apple Silicon, and Windows 10 and 11 (in WSL)")
 DIRS = ["fonts", "media"]   # (the cockpit-*.html screens are inlined, not copied)
 
 
@@ -99,6 +100,26 @@ def with_versions(page: str, versions: list[tuple[str, list[str]]], shown: str) 
     return page
 
 
+def source_md() -> str:
+    """The Markdown versions' line pointing at the source code (empty while there is no public repository)."""
+    return f"Source code: [{REPO.removeprefix('https://')}]({REPO}).\n" if REPO else ""
+
+
+def json_ld() -> str:
+    """Structured data for search engines: what Force is and, when public, where its source code is."""
+    data = {"@context": "https://schema.org", "@type": ["SoftwareApplication", "SoftwareSourceCode"],
+            "name": "Force", "alternateName": "Force, the code cockpit", "url": f"{BASE}/",
+            "description": ("Force keeps your Claude Code, OpenCode and shell sessions running in tmux on your machine "
+                            "or a server, through closed terminals and reboots, and shows them all in one terminal "
+                            "with who needs you."),
+            "applicationCategory": "DeveloperApplication", "operatingSystem": "Linux, macOS, Windows (WSL)",
+            "license": "https://spdx.org/licenses/MIT", "isAccessibleForFree": True,
+            "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}}
+    if REPO:
+        data |= {"codeRepository": REPO, "sameAs": [REPO], "programmingLanguage": ["Python", "Rust"]}
+    return f'<script type="application/ld+json">{json.dumps(data, ensure_ascii=False)}</script>\n'
+
+
 def versioned(page: str) -> str:
     """Asset links with their content hash, so a browser never pairs a new page with an old cached file."""
     for f in FILES:
@@ -121,6 +142,7 @@ def main(out: Path) -> None:
         page = page.replace(f'"{f}"', f'"{f}?v={v}"')
     # the film and its posters too: a new cut must not meet a cached old one (it has to match the window pixel for pixel)
     page = re.sub(r'"media/([^"?]+)"', lambda m: f'"media/{m.group(1)}?v={hashlib.sha1((SITE / "media" / m.group(1)).read_bytes()).hexdigest()[:10]}"', page)
+    page = page.replace("</head>", json_ld() + "</head>", 1)
     (out / "index.html").write_text(repo_links(page), encoding="utf-8")
     # the docs of every older release line, as its newest release had them; a line without a docs page is left out
     versions, older = doc_versions(SITE.parent), {}
@@ -148,22 +170,32 @@ def main(out: Path) -> None:
         shutil.copytree(SITE / d, out / d)
     # Markdown for agents: index.md (written by hand), docs.md (made from docs.html), and llms.txt pointing at
     # both; a Cloudflare Worker (website/worker/markdown.js) serves them for `Accept: text/markdown`
-    shutil.copy2(SITE / "index.md", out / "index.md")
+    overview = (SITE / "index.md").read_text(encoding="utf-8")
+    if "{{source}}\n\n" not in overview:
+        raise SystemExit("build: index.md has no {{source}} paragraph")
+    (out / "index.md").write_text(overview.replace("{{source}}\n\n", source_md() + "\n" if REPO else ""),
+                                  encoding="utf-8")
     for name in ("docs", "privacy"):
-        (out / f"{name}.md").write_text(html_to_md(repo_links((SITE / f"{name}.html").read_text(encoding="utf-8")), f"{name}.html"),
-                                        encoding="utf-8")
+        md = html_to_md(repo_links((SITE / f"{name}.html").read_text(encoding="utf-8")), f"{name}.html")
+        if name == "docs" and REPO:
+            md = md.rstrip("\n") + "\n\n" + source_md()
+        (out / f"{name}.md").write_text(md, encoding="utf-8")
     (out / "llms.txt").write_text(
         "# Force\n\n"
         "> Force is the code cockpit: it keeps your Claude Code, OpenCode and shell sessions running in tmux on your\n"
         "> machine or a server, through closed terminals and reboots, and shows them all in one terminal with who\n"
-        "> needs you. Linux, one-line install: `curl -fsSL https://useforce.cc/install.sh | sh`.\n\n"
+        f"> needs you. Open source (MIT licence). {PLATFORMS}.\n"
+        "> One-line install: `curl -fsSL https://useforce.cc/install.sh | sh` (Windows, in PowerShell:\n"
+        "> `irm https://useforce.cc/install.ps1 | iex`).\n\n"
         "## Docs\n\n"
         f"- [Overview]({BASE}/index.md): what Force does, the install line, the main commands\n"
         f"- [Documentation]({BASE}/docs.md): install, the cockpit and its states, keys, sessions, other machines,"
         " notifications, scripts and agents (`force prompt`, `wait`, `read`, `keys`, `status`), settings, every command\n"
         f"- [Privacy]({BASE}/privacy.md): what the site and the app process (no cookies, analytics or telemetry)\n"
         "\n## Agent skill\n\n"
-        f"- [force]({BASE}/.well-known/agent-skills/force/SKILL.md): install Force and drive its sessions from an agent\n",
+        f"- [force]({BASE}/.well-known/agent-skills/force/SKILL.md): install Force and drive its sessions from an agent\n"
+        + (f"\n## Source\n\n- [{REPO.removeprefix('https://')}]({REPO}): the source code (MIT licence), issues and"
+           " pull requests\n" if REPO else ""),
         encoding="utf-8")
     # the agent guide (`force skill`, share/skill.md) as an Agent Skill, with a discovery index (Agent Skills
     # Discovery v0.2.0): an agent that finds the site can install Force and drive it
