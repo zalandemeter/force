@@ -55,6 +55,8 @@ cmd and Windows Terminal). No root, no packages, no config files.
 Everything else is in the menu (`Ctrl`+`Space` inside Force) and in the documentation:
 [docs.md](https://useforce.cc/docs.md) (Markdown) or [docs.html](https://useforce.cc/docs.html).
 
+{{source}}
+
 Open source under the [MIT licence](https://useforce.cc/LICENSE.txt): provided as is, without warranty of
 any kind, and used at your own risk; its author is not liable for any damage or loss from using it. An independent project, not affiliated with Anthropic or the makers of
 OpenCode. Claude and Claude Code are trademarks of Anthropic, PBC.
