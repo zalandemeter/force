@@ -47,9 +47,9 @@ def test_frame_centres_the_spinner_and_the_text():
 
 
 def test_reconnecting_and_a_tiny_pane():
-    c = cli.Connecting("brian", again=True, out=_Out(), start=False)
+    c = cli.Connecting("devbox", again=True, out=_Out(), start=False)
     f = c.frame(3, 5, 1, 0.0)
-    assert "reconnecting to brian" in f
+    assert "reconnecting to devbox" in f
     assert "\x1b[1;1H" in f, "never off the pane"
 
 
