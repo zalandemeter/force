@@ -408,11 +408,20 @@ async fn main(opts: Opts) -> Result<(), String> {
     let mut int = signal(SignalKind::interrupt()).map_err(|e| format!("signals: {e}"))?;
     // the manager: peers file, remotes to dial, their status (once a second)
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let deaf = watch_deaf(port);
+    tokio::pin!(deaf);
+    let mut restart = false;
     loop {
         tokio::select! {
             _ = tick.tick() => {}
             _ = term.recv() => break,
             _ = int.recv() => break,
+            msg = &mut deaf => {
+                // a deaf socket: stop as on SIGTERM, then exit 1 so the service manager starts us with new sockets
+                log(&msg);
+                restart = true;
+                break;
+            }
         }
         shared.reload_peers(false);
         manage_remotes(&ep, &shared);
@@ -426,6 +435,9 @@ async fn main(opts: Opts) -> Result<(), String> {
         let _ = identity::write_link_state(&link_json(&shared, name), r.state, &r.reason, r.since_ms, r.fails);
     }
     let _ = tokio::time::timeout(Duration::from_secs(2), ep.close()).await;
+    if restart {
+        return Err("stopped: a UDP socket no longer received".to_string());
+    }
     Ok(())
 }
 
@@ -448,6 +460,68 @@ async fn watch_addrs(ep: Endpoint, shared: Arc<Shared>) {
             write_self(&shared, &ep);
             shared.addrs_changed.store(true, Ordering::SeqCst);
             last = now;
+        }
+    }
+}
+
+/// How often the self-check runs, and how many checks in a row a socket's queue may stay full (SPEC §56.2).
+const SELF_CHECK: Duration = Duration::from_secs(15);
+const DEAF_CHECKS: u32 = 3;
+
+/// The receive queue (bytes) of the socket bound to the wildcard address on `port`, from the text of
+/// `/proc/net/udp` (IPv4) or `/proc/net/udp6` (`v6`). None when no such socket is listed.
+fn wildcard_rx_queue(table: &str, port: u16, v6: bool) -> Option<u64> {
+    let any = if v6 { "00000000000000000000000000000000" } else { "00000000" };
+    let want = format!("{any}:{port:04X}");
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if *f.get(1)? != want {
+                return None;
+            }
+            u64::from_str_radix(f.get(4)?.split(':').nth(1)?, 16).ok()
+        })
+        .max()
+}
+
+/// Checks in a row each socket's queue was not empty; `step` names the first socket to reach DEAF_CHECKS.
+#[derive(Default)]
+struct Deafness {
+    streak: [u32; 2],
+}
+
+impl Deafness {
+    fn step(&mut self, queues: [Option<u64>; 2]) -> Option<&'static str> {
+        for (i, q) in queues.iter().enumerate() {
+            self.streak[i] = if q.unwrap_or(0) > 0 { self.streak[i] + 1 } else { 0 };
+        }
+        (0..2).find(|&i| self.streak[i] >= DEAF_CHECKS).map(|i| ["IPv4", "IPv6"][i])
+    }
+}
+
+/// The self-check (SPEC §56.2): resolves with the log line once a socket of ours stopped being read. A probe byte
+/// sent to ourselves each round gives every socket something to read, so a deaf one shows with no traffic at all.
+/// Linux only (`/proc`); elsewhere it never resolves.
+async fn watch_deaf(port: u16) -> String {
+    if !cfg!(target_os = "linux") {
+        return std::future::pending().await;
+    }
+    let probes = [("127.0.0.1:0", SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)),
+                  ("[::1]:0", SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))]
+        .map(|(from, to)| std::net::UdpSocket::bind(from).ok().map(|s| (s, to)));
+    let mut deaf = Deafness::default();
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + SELF_CHECK, SELF_CHECK);
+    loop {
+        tick.tick().await;
+        let queues = [("/proc/net/udp", false), ("/proc/net/udp6", true)]
+            .map(|(f, v6)| std::fs::read_to_string(f).ok().and_then(|t| wildcard_rx_queue(&t, port, v6)));
+        if let Some(family) = deaf.step(queues) {
+            return format!("UDP port {port} ({family}) stopped receiving: restarting");
+        }
+        for (s, to) in probes.iter().flatten() {
+            let _ = s.send_to(&[0], to);
         }
     }
 }
@@ -949,5 +1023,69 @@ mod tests {
         // with no address there is nothing to look it up with: it never connects
         let none = tokio::time::timeout(Duration::from_millis(300), a.connect(EndpointAddr::new(other), ALPN)).await;
         assert!(!matches!(none, Ok(Ok(_))));
+    }
+
+    /// The wildcard socket's receive queue, from /proc/net/udp text: the port in hex, the queue after the colon.
+    #[test]
+    fn rx_queue_of_the_wildcard_socket() {
+        let v4 = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                  \x20 10: 00000000:BACF 00000000:0000 07 00000000:00000900 00:00000000 00000000  1004        0 1 2 0\n\
+                  \x20 11: 0100007F:BACF 00000000:0000 07 00000000:00000040 00:00000000 00000000  1004        0 3 2 0\n\
+                  \x20 12: 00000000:BAD0 00000000:0000 07 00000000:00000000 00:00000000 00000000  1004        0 4 2 0\n";
+        assert_eq!(wildcard_rx_queue(v4, 47823, false), Some(0x900), "only 0.0.0.0, not 127.0.0.1");
+        assert_eq!(wildcard_rx_queue(v4, 47824, false), Some(0));
+        assert_eq!(wildcard_rx_queue(v4, 1, false), None);
+        assert_eq!(wildcard_rx_queue(v4, 47823, true), None, "not an IPv6 table");
+        let v6 = "  sl  local_address rem_address st tx_queue rx_queue\n\
+                  \x20 5: 00000000000000000000000000000000:BACF 00000000000000000000000000000000:0000 07 00000000:000000C0 00:0\n";
+        assert_eq!(wildcard_rx_queue(v6, 47823, true), Some(0xC0));
+        assert_eq!(wildcard_rx_queue("", 47823, false), None);
+        assert_eq!(wildcard_rx_queue("header\n garbage line\n  1: 00000000:BACF x 07 zz\n", 47823, false), None);
+    }
+
+    /// A socket is deaf after DEAF_CHECKS non-empty queues in a row; an empty or missing queue starts over.
+    #[test]
+    fn deaf_after_three_full_checks_in_a_row() {
+        let mut d = Deafness::default();
+        assert_eq!(d.step([Some(9), None]), None);
+        assert_eq!(d.step([Some(9), Some(0)]), None);
+        assert_eq!(d.step([Some(0), Some(5)]), None, "read in between: starts over");
+        assert_eq!(d.step([Some(9), Some(5)]), None);
+        assert_eq!(d.step([Some(9), Some(5)]), Some("IPv6"));
+        let mut d = Deafness::default();
+        for _ in 0..2 {
+            assert_eq!(d.step([Some(1), None]), None);
+        }
+        assert_eq!(d.step([Some(1), None]), Some("IPv4"));
+        let mut d = Deafness::default();
+        for _ in 0..10 {
+            assert_eq!(d.step([None, None]), None, "no socket listed: never deaf");
+        }
+    }
+
+    /// The kernel's own table: a socket nobody reads shows its queue there (what the self-check relies on), and
+    /// the endpoint's socket, which iroh reads, empties at once.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn proc_table_shows_an_unread_socket_and_a_read_one_empties() {
+        let table = || std::fs::read_to_string("/proc/net/udp").unwrap();
+        let unread = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = unread.local_addr().unwrap().port();
+        assert_eq!(wildcard_rx_queue(&table(), port, false), Some(0));
+        let tx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        tx.send_to(&[0], ("127.0.0.1", port)).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(wildcard_rx_queue(&table(), port, false).unwrap() > 0, "an unread datagram waits in the queue");
+
+        #[derive(Debug)]
+        struct Open;
+        impl EndpointHooks for Open {}
+        let ep = bind_endpoint(SecretKey::generate(), 0, Open).await.unwrap();
+        let port = bound_port(&ep);
+        for _ in 0..5 {
+            tx.send_to(&[0], ("127.0.0.1", port)).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(wildcard_rx_queue(&table(), port, false), Some(0), "iroh reads the probe bytes");
     }
 }
