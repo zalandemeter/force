@@ -719,9 +719,22 @@ async fn connect_ready(ep: &Endpoint, addr: EndpointAddr) -> Result<Connection, 
     }
 }
 
+/// The card's addresses minus those this host has too (any port): a Docker bridge's 172.17.0.1 is on both hosts,
+/// and a dial there reaches our own daemon, whose key fails the pinned id and fails the whole dial (SPEC §56.2).
+fn foreign_addrs(card: &[SocketAddr], own: &[String]) -> Vec<SocketAddr> {
+    let mine: Vec<IpAddr> = own.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).map(|a| a.ip().to_canonical())
+        .collect();
+    card.iter().filter(|a| !mine.contains(&a.ip().to_canonical())).copied().collect()
+}
+
 async fn dial(ep: Endpoint, shared: Arc<Shared>, name: String, card: identity::RemoteCard) {
-    let addr = EndpointAddr::new(card.id).with_addrs(card.addrs.iter().map(|a| iroh::TransportAddr::Ip(*a)));
-    let res = tokio::time::timeout(DIAL_TIMEOUT, connect_ready(&ep, addr)).await;
+    let addrs = foreign_addrs(&card.addrs, &shared.addrs.lock().unwrap());
+    let addr = EndpointAddr::new(card.id).with_addrs(addrs.iter().map(|a| iroh::TransportAddr::Ip(*a)));
+    let res = if addrs.is_empty() {
+        Ok(Err("only addresses this host has too".to_string()))
+    } else {
+        tokio::time::timeout(DIAL_TIMEOUT, connect_ready(&ep, addr)).await
+    };
     let mut remotes = shared.remotes.lock().unwrap();
     let Some(r) = remotes.get_mut(&name) else { return };
     r.dialing = false;
@@ -1087,5 +1100,21 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(wildcard_rx_queue(&table(), port, false), Some(0), "iroh reads the probe bytes");
+    }
+
+    /// A card address this host has too (a Docker bridge on both) is not dialed; the others are, in order.
+    #[test]
+    fn dial_skips_addresses_this_host_has_too() {
+        let card: Vec<SocketAddr> = ["100.64.0.2:47823", "172.17.0.1:47823", "192.168.95.119:47823", "[fd00::2]:47823"]
+            .iter().map(|a| a.parse().unwrap()).collect();
+        let own = vec!["172.17.0.1:47823".to_string(), "192.168.95.162:47823".to_string(), "[fd00::1]:9".to_string()];
+        let want: Vec<SocketAddr> = ["100.64.0.2:47823", "192.168.95.119:47823", "[fd00::2]:47823"]
+            .iter().map(|a| a.parse().unwrap()).collect();
+        assert_eq!(foreign_addrs(&card, &own), want);
+        let own_other_port = vec!["172.17.0.1:5".to_string(), "not an address".to_string()];
+        assert_eq!(foreign_addrs(&card[1..2], &own_other_port), vec![], "any port: the IP is ours");
+        assert_eq!(foreign_addrs(&card, &[]), card);
+        let mapped: SocketAddr = "[::ffff:172.17.0.1]:47823".parse().unwrap();
+        assert_eq!(foreign_addrs(&[mapped], &own), vec![], "an IPv4-mapped form of our address too");
     }
 }
